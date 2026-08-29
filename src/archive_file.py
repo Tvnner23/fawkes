@@ -14,6 +14,19 @@ RAW_DIR.mkdir(parents=True, exist_ok=True)
 META_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def find_duplicate(sha256: str):
+    for meta_path in META_DIR.glob("*.json"):
+        try:
+            metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+
+        if metadata.get("sha256") == sha256:
+            return metadata
+
+    return None
+
+
 def archive_file(source_path: str, title: str):
     source = Path(source_path)
 
@@ -25,11 +38,19 @@ def archive_file(source_path: str, title: str):
         print("Source path is not a file.")
         sys.exit(1)
 
-    archive_id = str(uuid.uuid4())
-    created_at = datetime.now(timezone.utc).isoformat()
-
     raw_bytes = source.read_bytes()
     sha256 = hashlib.sha256(raw_bytes).hexdigest()
+
+    duplicate = find_duplicate(sha256)
+
+    if duplicate:
+        print("Duplicate detected: file not archived again.")
+        print(f'Existing Archive ID: {duplicate["archive_id"]}')
+        print(f"SHA-256: {sha256}")
+        return
+
+    archive_id = str(uuid.uuid4())
+    created_at = datetime.now(timezone.utc).isoformat()
 
     extension = source.suffix
     raw_filename = f"{archive_id}{extension}"
