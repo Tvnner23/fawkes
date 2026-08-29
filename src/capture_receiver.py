@@ -9,10 +9,18 @@ PORT = 8765
 
 
 class CaptureHandler(BaseHTTPRequestHandler):
+    def send_json(self, status_code: int, payload: dict):
+        encoded = json.dumps(payload).encode("utf-8")
+
+        self.send_response(status_code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(encoded)))
+        self.end_headers()
+        self.wfile.write(encoded)
+
     def do_POST(self):
         if self.path != "/capture":
-            self.send_response(404)
-            self.end_headers()
+            self.send_json(404, {"error": "Not found"})
             return
 
         try:
@@ -26,49 +34,46 @@ class CaptureHandler(BaseHTTPRequestHandler):
             if not isinstance(title, str) or not isinstance(conversation, str):
                 raise ValueError("title and conversation must be strings")
 
+            source = payload.get("source", "unknown")
+            capture_type = payload.get("capture_type", "unknown")
+            encoding = payload.get("encoding", "utf-8")
+
+            if not isinstance(source, str):
+                raise ValueError("source must be a string")
+
+            if not isinstance(capture_type, str):
+                raise ValueError("capture_type must be a string")
+
+            if encoding is not None and not isinstance(encoding, str):
+                raise ValueError("encoding must be a string or null")
+
             metadata = ingest_bytes(
                 conversation.encode("utf-8"),
                 title,
-                source="browser_live",
-                capture_type="near_live",
-                encoding="utf-8",
+                source=source,
+                capture_type=capture_type,
+                encoding=encoding,
             )
 
-            response = {
-                "returncode": 0,
-                "archive_id": metadata["archive_id"],
-                "stdout": (
-                    f"Archived: {metadata['archive_id']}\n"
-                    f"SHA-256: {metadata['sha256']}\n"
-                ),
-                "stderr": "",
-            }
-
-            encoded = json.dumps(response).encode("utf-8")
-
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(encoded)))
-            self.end_headers()
-            self.wfile.write(encoded)
+            self.send_json(
+                200,
+                {
+                    "returncode": 0,
+                    "archive_id": metadata["archive_id"],
+                    "sha256": metadata["sha256"],
+                    "source": metadata["ingest_method"],
+                    "capture_type": metadata["capture_type"],
+                },
+            )
 
         except (json.JSONDecodeError, KeyError, ValueError) as exc:
-            encoded = json.dumps({"error": str(exc)}).encode("utf-8")
-            self.send_response(400)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(encoded)))
-            self.end_headers()
-            self.wfile.write(encoded)
+            self.send_json(400, {"error": str(exc)})
 
         except Exception as exc:
-            encoded = json.dumps({
-                "error": f"Capture failed: {exc}"
-            }).encode("utf-8")
-            self.send_response(500)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(encoded)))
-            self.end_headers()
-            self.wfile.write(encoded)
+            self.send_json(
+                500,
+                {"error": f"Capture failed: {exc}"},
+            )
 
     def log_message(self, format, *args):
         return
