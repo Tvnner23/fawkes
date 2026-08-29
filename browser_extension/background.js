@@ -14,12 +14,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         body: JSON.stringify({
           title: message.title,
           conversation: message.conversation,
-          conversation_id: message.conversation_id ?? identity.conversation_id ?? null,
           source: "browser_live",
           capture_type: "near_live",
           encoding: "utf-8",
           instance_id: identity.instance_id ?? null,
-          conversation_id: identity.conversation_id ?? null
+          conversation_id:
+            message.conversation_id ?? identity.conversation_id ?? null
         })
       })
         .then(async (response) => {
