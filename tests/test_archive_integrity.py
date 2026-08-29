@@ -332,6 +332,41 @@ class FawkesWorkflowTests(unittest.TestCase):
         self.assertEqual(len(manifest["entries"]), len(meta_files))
 
 
+class FawkesNormalizationTests(unittest.TestCase):
+    def test_terminal_assistant_memcite_marker_is_removed(self):
+        from src.capture.normalize import normalize_message_text
+
+        marker = "\ue200memcite\ue201"
+        original = "Clean assistant response." + marker
+
+        self.assertEqual(
+            normalize_message_text("assistant", original),
+            "Clean assistant response.",
+        )
+
+    def test_user_memcite_text_is_preserved(self):
+        from src.capture.normalize import normalize_message_text
+
+        marker = "\ue200memcite\ue201"
+        original = "User pasted this marker: " + marker
+
+        self.assertEqual(
+            normalize_message_text("user", original),
+            original,
+        )
+
+    def test_nonterminal_assistant_memcite_text_is_preserved(self):
+        from src.capture.normalize import normalize_message_text
+
+        marker = "\ue200memcite\ue201"
+        original = "Quoted marker " + marker + " inside assistant text."
+
+        self.assertEqual(
+            normalize_message_text("assistant", original),
+            original,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
 
@@ -428,3 +463,42 @@ Fawkes: disconnected answer"""
 
         self.assertFalse(merged)
         self.assertEqual(reconstructed, base)
+
+    def test_pinned_prefix_with_shifted_window_merges(self):
+        from src.capture.reconstruct import merge_snapshot, parse_messages
+
+        snapshot_one = (
+            "User: pinned attachment one\n\n"
+            "User: pinned attachment two\n\n"
+            "Fawkes: older answer\n\n"
+            "User: tired message\n\n"
+            "Fawkes: night checkpoint"
+        )
+
+        snapshot_two = (
+            "User: pinned attachment one\n\n"
+            "User: pinned attachment two\n\n"
+            "User: tired message\n\n"
+            "Fawkes: night checkpoint\n\n"
+            "User: cross reference reminder"
+        )
+
+        reconstructed, _ = merge_snapshot(
+            [],
+            parse_messages(snapshot_one),
+        )
+
+        reconstructed, merged = merge_snapshot(
+            reconstructed,
+            parse_messages(snapshot_two),
+        )
+
+        self.assertTrue(merged)
+        self.assertEqual(
+            reconstructed[-3:],
+            [
+                {"role": "user", "content": "tired message"},
+                {"role": "assistant", "content": "night checkpoint"},
+                {"role": "user", "content": "cross reference reminder"},
+            ],
+        )

@@ -101,18 +101,30 @@ def find_contained(base: list, incoming: list):
     return None
 
 
-def find_suffix_prefix_overlap(base: list, incoming: list):
+def find_suffix_window_overlap(base: list, incoming: list):
     maximum = min(len(base), len(incoming))
 
-    for size in range(maximum, 0, -1):
-        if all(
-            messages_compatible(
-                base[len(base) - size + offset],
-                incoming[offset],
-            )
-            for offset in range(size)
-        ):
-            return size
+    for size in range(maximum, 1, -1):
+        base_start = len(base) - size
+
+        for incoming_start in range(len(incoming) - size + 1):
+            if all(
+                messages_compatible(
+                    base[base_start + offset],
+                    incoming[incoming_start + offset],
+                )
+                for offset in range(size)
+            ):
+                return incoming_start, size
+
+    return None, 0
+
+
+def find_suffix_prefix_overlap(base: list, incoming: list):
+    incoming_start, size = find_suffix_window_overlap(base, incoming)
+
+    if incoming_start == 0:
+        return size
 
     return 0
 
@@ -135,7 +147,7 @@ def merge_snapshot(base: list, incoming: list):
 
         return merged, True
 
-    overlap = find_suffix_prefix_overlap(base, incoming)
+    incoming_start, overlap = find_suffix_window_overlap(base, incoming)
 
     if overlap == 0:
         return base, False
@@ -144,15 +156,17 @@ def merge_snapshot(base: list, incoming: list):
     base_start = len(merged) - overlap
 
     for offset in range(overlap):
-        index = base_start + offset
-        merged[index] = prefer_more_complete(
-            merged[index],
-            incoming[offset],
+        base_index = base_start + offset
+        incoming_index = incoming_start + offset
+
+        merged[base_index] = prefer_more_complete(
+            merged[base_index],
+            incoming[incoming_index],
         )
 
     merged.extend(
         message.copy()
-        for message in incoming[overlap:]
+        for message in incoming[incoming_start + overlap:]
     )
 
     return merged, True
