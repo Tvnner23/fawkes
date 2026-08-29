@@ -1,0 +1,25 @@
+{
+  "manifest_version": 3,
+  "name": "Fawkes Live Capture",
+  "version": "0.1.0",
+  "description": "Captures ChatGPT conversations into the local Fawkes Archive.",
+  "permissions": [],
+  "host_permissions": [
+    "https://chatgpt.com/*",
+    "http://127.0.0.1:8765/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://chatgpt.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "background": {
+    "service_worker": "background.js"
+  }
+}
