@@ -3,3 +3,8 @@ __pycache__/
 .venv/
 .pytest_cache/
 .DS_Store
+
+# Fawkes runtime state — keep outside source control
+/archive/
+/backups/
+/database/
