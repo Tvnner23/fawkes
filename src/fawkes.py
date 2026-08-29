@@ -13,9 +13,11 @@ def run_script(script_name, args=None, use_stdin=False):
     command = [sys.executable, str(SRC / script_name), *args]
 
     if use_stdin:
-        subprocess.run(command)
+        result = subprocess.run(command)
     else:
-        subprocess.run(command)
+        result = subprocess.run(command)
+
+    sys.exit(result.returncode)
 
 
 def main():
@@ -29,6 +31,8 @@ def main():
         print('  printf "TEXT" | python src/fawkes.py archive "TITLE"')
         print('  python src/fawkes.py archive-file SOURCE_FILE "TITLE"')
         print('  python src/fawkes.py bulk-archive DIRECTORY')
+        print('  python src/fawkes.py backup')
+        print('  python src/fawkes.py verify-backup BACKUP_DIRECTORY')
         sys.exit(1)
 
     command = sys.argv[1].lower()
@@ -57,6 +61,12 @@ def main():
 
     elif command == "bulk-archive":
         run_script("bulk_archive.py", args)
+
+    elif command == "backup":
+        run_script("backup_archive.py")
+
+    elif command == "verify-backup":
+        run_script("verify_backup.py", args)
 
     else:
         print(f"Unknown command: {command}")
