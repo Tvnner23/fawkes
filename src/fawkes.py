@@ -36,6 +36,7 @@ def main():
         print('  python src/fawkes.py restore BACKUP_DIRECTORY DESTINATION_DIRECTORY')
         print('  python src/fawkes.py manifest')
         print('  python src/fawkes.py test')
+        print('  python src/fawkes.py capture SOURCE_FILE TITLE')
         sys.exit(1)
 
     command = sys.argv[1].lower()
@@ -79,6 +80,15 @@ def main():
 
     elif command == "test":
         run_script("run_tests.py")
+
+    elif command == "capture":
+        if len(sys.argv) != 4:
+            print("Usage: python src/fawkes.py capture SOURCE_FILE TITLE")
+            sys.exit(1)
+        run_script(
+            "capture_conversation.py",
+            [sys.argv[2], sys.argv[3]],
+        )
 
     else:
         print(f"Unknown command: {command}")

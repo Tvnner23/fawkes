@@ -204,6 +204,34 @@ class FawkesWorkflowTests(unittest.TestCase):
         )
         self.assertIn("Failed: 1", result.stdout)
 
+    def test_unified_capture_archives_once_and_rejects_duplicate(self):
+        source = self.root / "capture.txt"
+        source.write_text(
+            "User: capture test\n\nFawkes: archived once\n",
+            encoding="utf-8",
+        )
+
+        first = self.run_fawkes(
+            "capture",
+            str(source),
+            "Capture Test",
+        )
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+
+        second = self.run_fawkes(
+            "capture",
+            str(source),
+            "Capture Test Again",
+        )
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        self.assertIn("Duplicate detected", second.stdout)
+
+        meta_files = list((self.root / "archive" / "meta").glob("*.json"))
+        raw_files = list((self.root / "archive" / "raw").glob("*"))
+
+        self.assertEqual(len(meta_files), 1)
+        self.assertEqual(len(raw_files), 1)
+
     def test_backup_and_restore_match_archive(self):
         archive_result = self.run_fawkes(
             "archive",
