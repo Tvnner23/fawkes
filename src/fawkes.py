@@ -25,6 +25,7 @@ def main():
         print('  python src/fawkes.py search "TERM"')
         print('  python src/fawkes.py retrieve ARCHIVE_ID')
         print('  python src/fawkes.py verify ARCHIVE_ID')
+        print('  python src/fawkes.py verify-all')
         print('  printf "TEXT" | python src/fawkes.py archive "TITLE"')
         print('  python src/fawkes.py archive-file SOURCE_FILE "TITLE"')
         print('  python src/fawkes.py bulk-archive DIRECTORY')
@@ -44,6 +45,9 @@ def main():
 
     elif command == "verify":
         run_script("verify_archive.py", args)
+
+    elif command == "verify-all":
+        run_script("verify_all.py")
 
     elif command == "archive":
         run_script("archive.py", args, use_stdin=True)
