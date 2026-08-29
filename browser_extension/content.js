@@ -12,6 +12,14 @@
     return "ChatGPT Conversation";
   }
 
+  function getConversationId() {
+    const match = window.location.pathname.match(
+      /^\/c\/([0-9a-f-]{36})\/?$/i
+    );
+
+    return match ? match[1] : null;
+  }
+
   function buildConversation() {
     const messages = document.querySelectorAll(
       '[data-message-author-role="user"], [data-message-author-role="assistant"]'
@@ -47,7 +55,8 @@
       {
         type: "fawkes_capture",
         title: getConversationTitle(),
-        conversation
+        conversation,
+        conversation_id: getConversationId()
       },
       (response) => {
         if (chrome.runtime.lastError) {

@@ -38,6 +38,7 @@ class CaptureHandler(BaseHTTPRequestHandler):
             capture_type = payload.get("capture_type", "unknown")
             encoding = payload.get("encoding", "utf-8")
             instance_id = payload.get("instance_id")
+            conversation_id = payload.get("conversation_id")
 
             if not isinstance(source, str):
                 raise ValueError("source must be a string")
@@ -51,6 +52,9 @@ class CaptureHandler(BaseHTTPRequestHandler):
             if instance_id is not None and not isinstance(instance_id, str):
                 raise ValueError("instance_id must be a string or null")
 
+            if conversation_id is not None and not isinstance(conversation_id, str):
+                raise ValueError("conversation_id must be a string or null")
+
             metadata = ingest_bytes(
                 conversation.encode("utf-8"),
                 title,
@@ -58,6 +62,7 @@ class CaptureHandler(BaseHTTPRequestHandler):
                 capture_type=capture_type,
                 encoding=encoding,
                 instance_id=instance_id,
+                conversation_id=conversation_id,
             )
 
             self.send_json(
@@ -69,6 +74,7 @@ class CaptureHandler(BaseHTTPRequestHandler):
                     "source": metadata["ingest_method"],
                     "capture_type": metadata["capture_type"],
                     "instance_id": metadata["instance_id"],
+                    "conversation_id": metadata["conversation_id"],
                 },
             )
 

@@ -3,7 +3,9 @@
   "name": "Fawkes Live Capture",
   "version": "0.1.0",
   "description": "Captures ChatGPT conversations into the local Fawkes Archive.",
-  "permissions": [],
+  "permissions": [
+    "storage"
+  ],
   "host_permissions": [
     "https://chatgpt.com/*",
     "http://127.0.0.1:8765/*"
