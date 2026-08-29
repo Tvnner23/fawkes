@@ -182,6 +182,45 @@ def revise_memory(
     return current
 
 
+def strengthen_memory(
+    memory_id: str,
+    *,
+    confidence: float,
+    source_message_ids=(),
+    source_archive_ids=(),
+):
+    current = load_memory(memory_id)
+    if current is None:
+        return None
+
+    old_confidence = float(current["confidence"])
+    evidence_confidence = max(0.0, min(1.0, float(confidence)))
+    new_confidence = 1.0 - ((1.0 - old_confidence) * (1.0 - evidence_confidence))
+
+    current["confidence"] = new_confidence
+    current["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+    path = _memory_path(memory_id)
+    path.write_text(
+        json.dumps(current, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+    append_memory_event(
+        memory_id,
+        "strengthened",
+        data={
+            "previous_confidence": old_confidence,
+            "evidence_confidence": evidence_confidence,
+            "current_confidence": new_confidence,
+        },
+        source_message_ids=source_message_ids,
+        source_archive_ids=source_archive_ids,
+    )
+
+    return current
+
+
 def supersede_memory(
     memory_id: str,
     memory_type: str,

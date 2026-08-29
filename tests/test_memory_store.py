@@ -220,6 +220,44 @@ class FawkesMemoryStoreTests(unittest.TestCase):
 
                 self.assertEqual(before, after)
 
+    def test_strengthen_memory_updates_confidence_and_records_event(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            records = root / "records"
+            events = root / "events"
+
+            with patch.object(store, "MEMORY_RECORDS_DIR", records), \
+                 patch.object(store, "MEMORY_EVENTS_DIR", events):
+
+                memory = store.create_memory(
+                    "preference",
+                    "The rider prefers command-first instructions.",
+                    confidence=0.60,
+                )
+
+                strengthened = store.strengthen_memory(
+                    memory.memory_id,
+                    confidence=0.95,
+                    source_message_ids=("message-2",),
+                )
+
+                self.assertGreater(strengthened["confidence"], 0.60)
+
+                saved_events = [
+                    json.loads(path.read_text(encoding="utf-8"))
+                    for path in events.glob("*.json")
+                ]
+                strengthened_events = [
+                    event for event in saved_events
+                    if event["event_type"] == "strengthened"
+                ]
+
+                self.assertEqual(len(strengthened_events), 1)
+                self.assertEqual(
+                    strengthened_events[0]["source_message_ids"],
+                    ["message-2"],
+                )
+
 
 if __name__ == "__main__":
     unittest.main()
