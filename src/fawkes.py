@@ -34,6 +34,7 @@ def main():
         print('  python src/fawkes.py backup')
         print('  python src/fawkes.py verify-backup BACKUP_DIRECTORY')
         print('  python src/fawkes.py restore BACKUP_DIRECTORY DESTINATION_DIRECTORY')
+        print('  python src/fawkes.py manifest')
         sys.exit(1)
 
     command = sys.argv[1].lower()
@@ -71,6 +72,9 @@ def main():
 
     elif command == "restore":
         run_script("restore_archive.py", args)
+
+    elif command == "manifest":
+        run_script("build_manifest.py")
 
     else:
         print(f"Unknown command: {command}")
