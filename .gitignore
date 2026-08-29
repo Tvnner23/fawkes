@@ -7,3 +7,6 @@ memory/
 database/
 logs/
 backups/
+
+!src/memory/
+!src/memory/**
