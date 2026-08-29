@@ -8,3 +8,6 @@ __pycache__/
 /archive/
 /backups/
 /database/
+
+# Phoenix derived runtime state — private and rebuildable where applicable
+/memory/
