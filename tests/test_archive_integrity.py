@@ -334,3 +334,97 @@ class FawkesWorkflowTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FawkesReconstructionTests(unittest.TestCase):
+    def test_shifted_overlapping_snapshots_reconstruct_in_order(self):
+        from src.capture.reconstruct import merge_snapshot, parse_messages
+
+        snapshot_one = """User: first message
+
+Fawkes: first answer
+
+User: second message
+
+Fawkes: second answer"""
+
+        snapshot_two = """User: second message
+
+Fawkes: second answer
+
+User: third message
+
+Fawkes: third answer"""
+
+        reconstructed = []
+
+        reconstructed, merged_one = merge_snapshot(
+            reconstructed,
+            parse_messages(snapshot_one),
+        )
+
+        reconstructed, merged_two = merge_snapshot(
+            reconstructed,
+            parse_messages(snapshot_two),
+        )
+
+        self.assertTrue(merged_one)
+        self.assertTrue(merged_two)
+        self.assertEqual(
+            reconstructed,
+            [
+                {"role": "user", "content": "first message"},
+                {"role": "assistant", "content": "first answer"},
+                {"role": "user", "content": "second message"},
+                {"role": "assistant", "content": "second answer"},
+                {"role": "user", "content": "third message"},
+                {"role": "assistant", "content": "third answer"},
+            ],
+        )
+
+    def test_streaming_message_prefers_more_complete_version(self):
+        from src.capture.reconstruct import merge_snapshot, parse_messages
+
+        snapshot_one = """User: question
+
+Fawkes: This answer is still"""
+
+        snapshot_two = """User: question
+
+Fawkes: This answer is still being generated."""
+
+        reconstructed, _ = merge_snapshot(
+            [],
+            parse_messages(snapshot_one),
+        )
+
+        reconstructed, merged = merge_snapshot(
+            reconstructed,
+            parse_messages(snapshot_two),
+        )
+
+        self.assertTrue(merged)
+        self.assertEqual(
+            reconstructed[-1]["content"],
+            "This answer is still being generated.",
+        )
+
+    def test_unprovable_snapshot_is_flagged_not_guessed(self):
+        from src.capture.reconstruct import merge_snapshot, parse_messages
+
+        base = parse_messages(
+            """User: known message
+
+Fawkes: known answer"""
+        )
+
+        unrelated = parse_messages(
+            """User: disconnected message
+
+Fawkes: disconnected answer"""
+        )
+
+        reconstructed, merged = merge_snapshot(base, unrelated)
+
+        self.assertFalse(merged)
+        self.assertEqual(reconstructed, base)
