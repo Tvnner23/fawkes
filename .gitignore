@@ -1,12 +1,5 @@
-.venv/
 __pycache__/
-*.pyc
-.env
-archive/
-memory/
-database/
-logs/
-backups/
-
-!src/memory/
-!src/memory/**
+*.py[cod]
+.venv/
+.pytest_cache/
+.DS_Store
