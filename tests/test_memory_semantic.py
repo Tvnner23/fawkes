@@ -64,6 +64,50 @@ class FawkesSemanticMemoryTests(unittest.TestCase):
         self.assertEqual(evaluator.last_content, "Yeah, that's the one.")
         self.assertEqual(evaluator.last_context, context)
 
+    def test_evaluate_conversation_uses_semantic_evaluator(self):
+        from src.memory.evaluate import evaluate_conversation
+        from unittest.mock import patch
+
+        class FakeEvaluator:
+            def evaluate(self, *, content, conversation_context=()):
+                return SemanticMemoryAssessment(
+                    should_remember=True,
+                    memory_type="preference",
+                    meaning="The rider prefers networking over general cybersecurity work.",
+                    confidence=0.94,
+                    importance=0.88,
+                )
+
+        candidate = {
+            "candidate_id": "message-1",
+            "memory_type": "unclassified",
+            "content": "I strongly prefer networking over general cybersecurity work.",
+            "importance": None,
+            "confidence": None,
+            "source_message_ids": ("message-1",),
+            "source_archive_ids": ("archive-1",),
+            "created_at": "2026-08-29T00:00:00+00:00",
+        }
+
+        with patch(
+            "src.memory.evaluate.extract_memory_candidates",
+            return_value=[candidate],
+        ):
+            results = evaluate_conversation(
+                "conversation-1",
+                evaluator=FakeEvaluator(),
+            )
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["decision"], "likely_memory")
+        self.assertEqual(results[0]["memory_type"], "preference")
+        self.assertEqual(
+            results[0]["meaning"],
+            "The rider prefers networking over general cybersecurity work.",
+        )
+        self.assertEqual(results[0]["evaluation_confidence"], 0.94)
+        self.assertEqual(results[0]["importance"], 0.88)
+
 
 if __name__ == "__main__":
     unittest.main()

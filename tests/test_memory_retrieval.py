@@ -8,11 +8,13 @@ from src.memory.retrieval import retrieve_memories
 
 
 class FawkesMemoryRetrievalTests(unittest.TestCase):
+    def _directories(self, tmp):
+        root = Path(tmp)
+        return root / "records", root / "events"
+
     def test_retrieval_returns_relevant_active_memories(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            records = root / "records"
-            events = root / "events"
+            records, events = self._directories(tmp)
 
             with patch.object(store, "MEMORY_RECORDS_DIR", records), \
                  patch.object(store, "MEMORY_EVENTS_DIR", events):
@@ -37,13 +39,14 @@ class FawkesMemoryRetrievalTests(unittest.TestCase):
 
                 self.assertTrue(results)
                 self.assertEqual(results[0]["memory_id"], relevant.memory_id)
-                self.assertNotEqual(results[0]["memory_id"], unrelated.memory_id)
+                self.assertNotEqual(
+                    results[0]["memory_id"],
+                    unrelated.memory_id,
+                )
 
     def test_retrieval_excludes_superseded_memories(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            records = root / "records"
-            events = root / "events"
+            records, events = self._directories(tmp)
 
             with patch.object(store, "MEMORY_RECORDS_DIR", records), \
                  patch.object(store, "MEMORY_EVENTS_DIR", events):
@@ -59,7 +62,9 @@ class FawkesMemoryRetrievalTests(unittest.TestCase):
                     "Focus primarily on networking.",
                 )
 
-                results = retrieve_memories("What is the current career focus?")
+                results = retrieve_memories(
+                    "What is the current career focus?"
+                )
 
                 result_ids = [memory["memory_id"] for memory in results]
 
@@ -68,9 +73,7 @@ class FawkesMemoryRetrievalTests(unittest.TestCase):
 
     def test_retrieval_respects_limit(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            records = root / "records"
-            events = root / "events"
+            records, events = self._directories(tmp)
 
             with patch.object(store, "MEMORY_RECORDS_DIR", records), \
                  patch.object(store, "MEMORY_EVENTS_DIR", events):
@@ -78,7 +81,10 @@ class FawkesMemoryRetrievalTests(unittest.TestCase):
                 for index in range(5):
                     store.create_memory(
                         memory_type="goal",
-                        content=f"The rider has a cybersecurity networking goal number {index}.",
+                        content=(
+                            "The rider has a cybersecurity "
+                            f"networking goal number {index}."
+                        ),
                         importance=0.8,
                         confidence=0.9,
                     )
@@ -92,9 +98,7 @@ class FawkesMemoryRetrievalTests(unittest.TestCase):
 
     def test_irrelevant_query_returns_no_memories(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            records = root / "records"
-            events = root / "events"
+            records, events = self._directories(tmp)
 
             with patch.object(store, "MEMORY_RECORDS_DIR", records), \
                  patch.object(store, "MEMORY_EVENTS_DIR", events):
@@ -107,6 +111,44 @@ class FawkesMemoryRetrievalTests(unittest.TestCase):
                 results = retrieve_memories("favorite pizza toppings")
 
                 self.assertEqual(results, [])
+
+    def test_durable_memory_can_outlive_recency(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            records, events = self._directories(tmp)
+
+            with patch.object(store, "MEMORY_RECORDS_DIR", records), \
+                 patch.object(store, "MEMORY_EVENTS_DIR", events):
+
+                old_goal = store.create_memory(
+                    memory_type="goal",
+                    content="The rider wants to become a network engineer.",
+                    importance=1.0,
+                    confidence=1.0,
+                )
+
+                recent_note = store.create_memory(
+                    memory_type="knowledge",
+                    content=(
+                        "The rider is currently researching "
+                        "network engineer careers."
+                    ),
+                    importance=0.3,
+                    confidence=0.8,
+                )
+
+                results = retrieve_memories(
+                    "What is the rider's network engineering career goal?"
+                )
+
+                self.assertTrue(results)
+                self.assertEqual(
+                    results[0]["memory_id"],
+                    old_goal.memory_id,
+                )
+                self.assertIn(
+                    recent_note.memory_id,
+                    [memory["memory_id"] for memory in results],
+                )
 
 
 if __name__ == "__main__":
