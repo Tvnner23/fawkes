@@ -34,6 +34,7 @@ def process_memory_candidate(
             assessment,
             source_message_ids=candidate.get("source_message_ids", ()),
             source_archive_ids=candidate.get("source_archive_ids", ()),
+            conversation_context=conversation_context,
         )
 
     existing_memories = retrieve_memories(
@@ -47,6 +48,7 @@ def process_memory_candidate(
         source_archive_ids=candidate.get("source_archive_ids", ()),
         matcher=matcher,
         existing_memories=existing_memories,
+        conversation_context=conversation_context,
     )
 
 

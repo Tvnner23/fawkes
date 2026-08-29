@@ -102,3 +102,87 @@ class FawkesMemoryPipelineTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ContextCapturingMatcher:
+    def __init__(self):
+        self.received_context = None
+
+    def compare(
+        self,
+        *,
+        new_meaning,
+        new_memory_type,
+        existing_memory,
+        conversation_context=(),
+    ):
+        self.received_context = conversation_context
+        return MemoryComparison(
+            relation="supports",
+            confidence=0.95,
+        )
+
+
+class ContextCapturingEvaluator:
+    def __init__(self):
+        self.received_context = None
+
+    def evaluate(self, *, content, conversation_context=()):
+        self.received_context = conversation_context
+        return SemanticMemoryAssessment(
+            should_remember=True,
+            memory_type="preference",
+            meaning="The rider prefers networking work.",
+            confidence=0.94,
+            importance=0.88,
+        )
+
+
+class FawkesMemoryPipelineContextTests(unittest.TestCase):
+    def test_conversation_context_reaches_semantic_evaluation_and_comparison(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            records = root / "records"
+            events = root / "events"
+
+            with patch.object(store, "MEMORY_RECORDS_DIR", records), \
+                 patch.object(store, "MEMORY_EVENTS_DIR", events):
+
+                store.create_memory(
+                    memory_type="preference",
+                    content="The rider prefers networking work.",
+                    confidence=0.70,
+                    importance=0.80,
+                )
+
+                evaluator = ContextCapturingEvaluator()
+                matcher = ContextCapturingMatcher()
+
+                context = (
+                    {"role": "assistant", "content": "What career direction?"},
+                    {"role": "user", "content": "Networking."},
+                )
+
+                candidate = {
+                    "candidate_id": "message-1",
+                    "content": "That's still what I prefer.",
+                    "source_message_ids": ("message-1",),
+                    "source_archive_ids": ("archive-1",),
+                }
+
+                result = process_memory_candidate(
+                    candidate,
+                    evaluator=evaluator,
+                    matcher=matcher,
+                    conversation_context=context,
+                )
+
+                self.assertEqual(result.action, "strengthened")
+                self.assertEqual(
+                    evaluator.received_context,
+                    context,
+                )
+                self.assertEqual(
+                    matcher.received_context,
+                    context,
+                )

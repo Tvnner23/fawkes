@@ -23,6 +23,7 @@ def consolidate_assessment(
     source_archive_ids=(),
     matcher=None,
     existing_memories=(),
+    conversation_context=(),
 ):
     """
     Convert a semantic assessment into persistent Phoenix memory state.
@@ -61,7 +62,7 @@ def consolidate_assessment(
                 new_meaning=assessment.meaning,
                 new_memory_type=assessment.memory_type,
                 existing_memory=existing,
-                conversation_context=(),
+                conversation_context=tuple(conversation_context),
             )
 
             if comparison.relation == "supports":
