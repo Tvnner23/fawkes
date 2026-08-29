@@ -113,7 +113,120 @@ def create_memory(
         encoding="utf-8",
     )
 
+    append_memory_event(
+        memory.memory_id,
+        "created",
+        data={
+            "memory_type": memory.memory_type,
+            "content": memory.content,
+            "importance": memory.importance,
+            "confidence": memory.confidence,
+            "status": memory.status,
+            "supersedes": memory.supersedes,
+        },
+        source_message_ids=memory.source_message_ids,
+        source_archive_ids=memory.source_archive_ids,
+    )
+
     return memory
+
+
+def revise_memory(
+    memory_id: str,
+    *,
+    content=None,
+    memory_type=None,
+    importance=None,
+    confidence=None,
+    status=None,
+    source_message_ids=(),
+    source_archive_ids=(),
+):
+    current = load_memory(memory_id)
+
+    if current is None:
+        return None
+
+    previous = dict(current)
+
+    if content is not None:
+        current["content"] = content
+    if memory_type is not None:
+        current["memory_type"] = memory_type
+    if importance is not None:
+        current["importance"] = importance
+    if confidence is not None:
+        current["confidence"] = confidence
+    if status is not None:
+        current["status"] = status
+
+    current["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+    path = _memory_path(memory_id)
+    path.write_text(
+        json.dumps(current, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+    append_memory_event(
+        memory_id,
+        "revised",
+        data={
+            "previous": previous,
+            "current": current,
+        },
+        source_message_ids=source_message_ids,
+        source_archive_ids=source_archive_ids,
+    )
+
+    return current
+
+
+def supersede_memory(
+    memory_id: str,
+    memory_type: str,
+    content: str,
+    *,
+    importance: float = 0.5,
+    confidence: float = 1.0,
+    source_message_ids=(),
+    source_archive_ids=(),
+):
+    old = load_memory(memory_id)
+
+    if old is None:
+        return None
+
+    new_memory = create_memory(
+        memory_type,
+        content,
+        importance=importance,
+        confidence=confidence,
+        source_message_ids=source_message_ids,
+        source_archive_ids=source_archive_ids,
+        supersedes=memory_id,
+    )
+
+    old["status"] = "superseded"
+    old["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+    old_path = _memory_path(memory_id)
+    old_path.write_text(
+        json.dumps(old, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+    append_memory_event(
+        memory_id,
+        "superseded",
+        data={
+            "superseded_by": new_memory.memory_id,
+        },
+        source_message_ids=source_message_ids,
+        source_archive_ids=source_archive_ids,
+    )
+
+    return new_memory
 
 
 def load_memory(memory_id: str):
