@@ -15,17 +15,41 @@ def verify_archive(archive_id: str):
         print("Metadata file not found.")
         sys.exit(1)
 
-    metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+    try:
+        metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        print("Archive integrity: FAILED")
+        print(f"Metadata unreadable: {exc}")
+        sys.exit(1)
 
-    raw_path = RAW_DIR / metadata["raw_file"]
+    raw_file = metadata.get("raw_file")
+    expected_hash = metadata.get("sha256")
+
+    if not raw_file:
+        print("Archive integrity: FAILED")
+        print("Metadata missing required field: raw_file")
+        sys.exit(1)
+
+    if not expected_hash:
+        print("Archive integrity: FAILED")
+        print("Metadata missing required field: sha256")
+        sys.exit(1)
+
+    raw_path = RAW_DIR / raw_file
 
     if not raw_path.exists():
+        print("Archive integrity: FAILED")
         print("Raw archive file not found.")
         sys.exit(1)
 
-    raw_bytes = raw_path.read_bytes()
+    try:
+        raw_bytes = raw_path.read_bytes()
+    except OSError as exc:
+        print("Archive integrity: FAILED")
+        print(f"Raw archive file unreadable: {exc}")
+        sys.exit(1)
+
     actual_hash = hashlib.sha256(raw_bytes).hexdigest()
-    expected_hash = metadata["sha256"]
 
     if actual_hash == expected_hash:
         print("Archive integrity: VERIFIED")

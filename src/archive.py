@@ -26,11 +26,15 @@ def archive_text(text: str, title: str):
     raw_path.write_bytes(raw_bytes)
 
     metadata = {
+        "schema_version": 1,
         "archive_id": archive_id,
         "title": title,
         "created_at": created_at,
         "sha256": sha256,
         "raw_file": raw_path.name,
+        "original_filename": None,
+        "size_bytes": len(raw_bytes),
+        "ingest_method": "text_stdin",
         "encoding": "utf-8",
     }
 

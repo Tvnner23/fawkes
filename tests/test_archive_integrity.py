@@ -57,6 +57,50 @@ class FawkesArchiveTests(unittest.TestCase):
 
         expected_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
         self.assertEqual(metadata["sha256"], expected_hash)
+        self.assertEqual(metadata["schema_version"], 1)
+        self.assertIsNone(metadata["original_filename"])
+        self.assertEqual(metadata["size_bytes"], len(text.encode("utf-8")))
+        self.assertEqual(metadata["ingest_method"], "text_stdin")
+        self.assertEqual(metadata["encoding"], "utf-8")
+
+    def test_verify_rejects_malformed_metadata(self):
+        archive_id = "malformed-metadata-test"
+        meta_path = self.root / "archive" / "meta" / f"{archive_id}.json"
+        meta_path.write_text("{not valid json", encoding="utf-8")
+
+        result = self.run_fawkes("verify", archive_id)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Archive integrity: FAILED", result.stdout)
+        self.assertIn("Metadata unreadable:", result.stdout)
+
+    def test_verify_rejects_metadata_missing_raw_file(self):
+        archive_id = "missing-raw-file-test"
+        meta_path = self.root / "archive" / "meta" / f"{archive_id}.json"
+        meta_path.write_text(
+            '{"sha256": "abc123"}\n',
+            encoding="utf-8",
+        )
+
+        result = self.run_fawkes("verify", archive_id)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Archive integrity: FAILED", result.stdout)
+        self.assertIn("Metadata missing required field: raw_file", result.stdout)
+
+    def test_verify_rejects_metadata_missing_sha256(self):
+        archive_id = "missing-sha256-test"
+        meta_path = self.root / "archive" / "meta" / f"{archive_id}.json"
+        meta_path.write_text(
+            '{"raw_file": "example.txt"}\n',
+            encoding="utf-8",
+        )
+
+        result = self.run_fawkes("verify", archive_id)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Archive integrity: FAILED", result.stdout)
+        self.assertIn("Metadata missing required field: sha256", result.stdout)
 
     def test_verify_detects_tampering(self):
         text = "Original immutable archive data."
@@ -131,6 +175,13 @@ class FawkesWorkflowTests(unittest.TestCase):
 
         self.assertEqual(len(meta_files), 1)
         self.assertEqual(len(raw_files), 1)
+
+        metadata = json.loads(meta_files[0].read_text(encoding="utf-8"))
+        self.assertEqual(metadata["schema_version"], 1)
+        self.assertEqual(metadata["original_filename"], "duplicate.txt")
+        self.assertEqual(metadata["size_bytes"], len(b"same bytes every time\n"))
+        self.assertEqual(metadata["ingest_method"], "file_copy")
+        self.assertIsNone(metadata["encoding"])
 
     def test_backup_and_restore_match_archive(self):
         archive_result = self.run_fawkes(

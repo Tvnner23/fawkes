@@ -60,6 +60,7 @@ def archive_file(source_path: str, title: str):
     shutil.copyfile(source, raw_path)
 
     metadata = {
+        "schema_version": 1,
         "archive_id": archive_id,
         "title": title,
         "created_at": created_at,
@@ -68,6 +69,7 @@ def archive_file(source_path: str, title: str):
         "original_filename": source.name,
         "size_bytes": len(raw_bytes),
         "ingest_method": "file_copy",
+        "encoding": None,
     }
 
     meta_path.write_text(
