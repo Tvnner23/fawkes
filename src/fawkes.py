@@ -33,6 +33,7 @@ def main():
         print('  python src/fawkes.py bulk-archive DIRECTORY')
         print('  python src/fawkes.py backup')
         print('  python src/fawkes.py verify-backup BACKUP_DIRECTORY')
+        print('  python src/fawkes.py restore BACKUP_DIRECTORY DESTINATION_DIRECTORY')
         sys.exit(1)
 
     command = sys.argv[1].lower()
@@ -67,6 +68,9 @@ def main():
 
     elif command == "verify-backup":
         run_script("verify_backup.py", args)
+
+    elif command == "restore":
+        run_script("restore_archive.py", args)
 
     else:
         print(f"Unknown command: {command}")
