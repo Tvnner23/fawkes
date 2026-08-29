@@ -7,7 +7,9 @@ import uuid
 
 
 ROOT = Path(__file__).resolve().parent.parent.parent
-MEMORY_DIR = ROOT / "archive" / "memory"
+MEMORY_ROOT = ROOT / "memory"
+MEMORY_RECORDS_DIR = MEMORY_ROOT / "records"
+MEMORY_EVENTS_DIR = MEMORY_ROOT / "events"
 
 
 @dataclass
@@ -29,11 +31,49 @@ class Memory:
 
 
 def _ensure_memory_dir():
-    MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+    MEMORY_RECORDS_DIR.mkdir(parents=True, exist_ok=True)
+    MEMORY_EVENTS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _memory_path(memory_id: str) -> Path:
-    return MEMORY_DIR / f"{memory_id}.json"
+    return MEMORY_RECORDS_DIR / f"{memory_id}.json"
+
+
+
+def _event_path(event_id: str) -> Path:
+    return MEMORY_EVENTS_DIR / f"{event_id}.json"
+
+
+def append_memory_event(
+    memory_id: str,
+    event_type: str,
+    *,
+    data=None,
+    source_message_ids=(),
+    source_archive_ids=(),
+):
+    _ensure_memory_dir()
+
+    now = datetime.now(timezone.utc).isoformat()
+    event_id = str(uuid.uuid4())
+
+    event = {
+        "event_id": event_id,
+        "memory_id": memory_id,
+        "event_type": event_type,
+        "created_at": now,
+        "data": data or {},
+        "source_message_ids": tuple(source_message_ids),
+        "source_archive_ids": tuple(source_archive_ids),
+    }
+
+    path = _event_path(event_id)
+    path.write_text(
+        json.dumps(event, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+    return event
 
 
 def create_memory(
@@ -90,7 +130,7 @@ def list_memories(status="active"):
 
     memories = []
 
-    for path in sorted(MEMORY_DIR.glob("*.json")):
+    for path in sorted(MEMORY_RECORDS_DIR.glob("*.json")):
         try:
             memory = json.loads(
                 path.read_text(encoding="utf-8")
