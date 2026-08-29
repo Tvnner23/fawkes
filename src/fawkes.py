@@ -27,6 +27,7 @@ def main():
         print('  python src/fawkes.py verify ARCHIVE_ID')
         print('  printf "TEXT" | python src/fawkes.py archive "TITLE"')
         print('  python src/fawkes.py archive-file SOURCE_FILE "TITLE"')
+        print('  python src/fawkes.py bulk-archive DIRECTORY')
         sys.exit(1)
 
     command = sys.argv[1].lower()
@@ -49,6 +50,9 @@ def main():
 
     elif command == "archive-file":
         run_script("archive_file.py", args)
+
+    elif command == "bulk-archive":
+        run_script("bulk_archive.py", args)
 
     else:
         print(f"Unknown command: {command}")
