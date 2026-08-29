@@ -183,6 +183,27 @@ class FawkesWorkflowTests(unittest.TestCase):
         self.assertEqual(metadata["ingest_method"], "file_copy")
         self.assertIsNone(metadata["encoding"])
 
+    def test_verify_all_rejects_metadata_missing_sha256(self):
+        archive_id = "verify-all-missing-sha256"
+        raw_path = self.root / "archive" / "raw" / f"{archive_id}.txt"
+        meta_path = self.root / "archive" / "meta" / f"{archive_id}.json"
+
+        raw_path.write_text("data", encoding="utf-8")
+        meta_path.write_text(
+            '{"archive_id": "verify-all-missing-sha256", '
+            '"raw_file": "verify-all-missing-sha256.txt"}\n',
+            encoding="utf-8",
+        )
+
+        result = self.run_fawkes("verify-all")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "FAILED: verify-all-missing-sha256 has no sha256 entry",
+            result.stdout,
+        )
+        self.assertIn("Failed: 1", result.stdout)
+
     def test_backup_and_restore_match_archive(self):
         archive_result = self.run_fawkes(
             "archive",

@@ -31,9 +31,15 @@ def main():
 
         archive_id = metadata.get("archive_id", meta_path.stem)
         raw_file = metadata.get("raw_file")
+        expected_hash = metadata.get("sha256")
 
         if not raw_file:
             print(f"FAILED: {archive_id} has no raw_file entry")
+            failed += 1
+            continue
+
+        if not expected_hash:
+            print(f"FAILED: {archive_id} has no sha256 entry")
             failed += 1
             continue
 
@@ -44,8 +50,14 @@ def main():
             failed += 1
             continue
 
-        actual_hash = hashlib.sha256(raw_path.read_bytes()).hexdigest()
-        expected_hash = metadata.get("sha256")
+        try:
+            raw_bytes = raw_path.read_bytes()
+        except OSError:
+            print(f"FAILED: {archive_id} raw file unreadable")
+            failed += 1
+            continue
+
+        actual_hash = hashlib.sha256(raw_bytes).hexdigest()
 
         if actual_hash == expected_hash:
             print(f"VERIFIED: {archive_id}")
