@@ -243,3 +243,99 @@ class FawkesMemoryEvolutionTests(unittest.TestCase):
 
         self.assertEqual(result.action, "conflict_detected")
         self.assertEqual(result.memory_id, "memory-1")
+
+
+class MultiMemoryMatcher:
+    def __init__(self):
+        self.compared = []
+
+    def compare(
+        self,
+        *,
+        new_meaning,
+        new_memory_type,
+        existing_memory,
+        conversation_context=(),
+    ):
+        self.compared.append(existing_memory["memory_id"])
+
+        from src.memory.compare import MemoryComparison
+
+        if existing_memory["content"] == "The rider prefers networking work.":
+            return MemoryComparison(
+                relation="supports",
+                confidence=0.95,
+                reasoning="This is the matching durable memory.",
+            )
+
+        return MemoryComparison(
+            relation="related_to",
+            confidence=0.60,
+            reasoning="Related, but not the same memory.",
+        )
+
+
+class FawkesMultiMemoryConsolidationTests(unittest.TestCase):
+    def test_consolidation_can_evaluate_multiple_existing_memories(self):
+        assessment = SemanticMemoryAssessment(
+            should_remember=True,
+            memory_type="preference",
+            meaning="The rider prefers networking work.",
+            confidence=0.94,
+            importance=0.88,
+        )
+
+        matcher = MultiMemoryMatcher()
+
+        existing_memories = (
+            {
+                "memory_id": "unrelated-memory",
+                "memory_type": "knowledge",
+                "content": "The rider is researching cybersecurity careers.",
+                "confidence": 0.80,
+                "importance": 0.70,
+            },
+            {
+                "memory_id": "target-memory",
+                "memory_type": "preference",
+                "content": "The rider prefers networking work.",
+                "confidence": 0.70,
+                "importance": 0.80,
+            },
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            records = root / "records"
+            events = root / "events"
+
+            with patch.object(store, "MEMORY_RECORDS_DIR", records), \
+                 patch.object(store, "MEMORY_EVENTS_DIR", events):
+
+                existing = store.create_memory(
+                    memory_type="preference",
+                    content="The rider prefers networking work.",
+                    confidence=0.70,
+                    importance=0.80,
+                )
+
+                existing_memories = (
+                    existing_memories[0],
+                    {
+                        **existing_memories[1],
+                        "memory_id": existing.memory_id,
+                    },
+                )
+
+                result = consolidate.consolidate_assessment(
+                    assessment,
+                    matcher=matcher,
+                    existing_memories=existing_memories,
+                )
+
+        self.assertEqual(result.action, "strengthened")
+        self.assertEqual(result.memory_id, existing_memories[1]["memory_id"])
+        self.assertEqual(
+            matcher.compared,
+            ["unrelated-memory", existing_memories[1]["memory_id"]],
+        )
