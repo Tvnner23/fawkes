@@ -32,6 +32,7 @@ def ingest_bytes(
     capture_type: str,
     original_filename=None,
     encoding=None,
+    instance_id=None,
 ):
     sha256 = hashlib.sha256(raw_bytes).hexdigest()
 
@@ -66,6 +67,7 @@ def ingest_bytes(
         "ingest_method": source,
         "capture_type": capture_type,
         "encoding": encoding,
+        "instance_id": instance_id,
     }
 
     meta_path.write_text(
