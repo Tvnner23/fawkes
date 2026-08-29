@@ -26,6 +26,7 @@ def main():
         print('  python src/fawkes.py retrieve ARCHIVE_ID')
         print('  python src/fawkes.py verify ARCHIVE_ID')
         print('  printf "TEXT" | python src/fawkes.py archive "TITLE"')
+        print('  python src/fawkes.py archive-file SOURCE_FILE "TITLE"')
         sys.exit(1)
 
     command = sys.argv[1].lower()
@@ -45,6 +46,9 @@ def main():
 
     elif command == "archive":
         run_script("archive.py", args, use_stdin=True)
+
+    elif command == "archive-file":
+        run_script("archive_file.py", args)
 
     else:
         print(f"Unknown command: {command}")
