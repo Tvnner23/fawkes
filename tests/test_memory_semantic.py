@@ -111,3 +111,92 @@ class FawkesSemanticMemoryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FawkesSemanticNoPrefixTests(unittest.TestCase):
+    def test_semantic_evaluator_can_identify_memory_without_prefix_signal(self):
+        class ContextAwareEvaluator:
+            def __init__(self):
+                self.received_context = None
+
+            def evaluate(self, *, content, conversation_context=()):
+                self.received_context = conversation_context
+
+                return SemanticMemoryAssessment(
+                    should_remember=True,
+                    memory_type="decision",
+                    meaning="The rider chose networking as his career direction.",
+                    confidence=0.96,
+                    importance=0.91,
+                )
+
+        evaluator = ContextAwareEvaluator()
+
+        context = (
+            {
+                "role": "assistant",
+                "content": "So networking is the career direction you're choosing?",
+            },
+            {
+                "role": "user",
+                "content": "Yeah, that's the one.",
+            },
+        )
+
+        result = evaluate_semantically(
+            evaluator,
+            content="Yeah, that's the one.",
+            conversation_context=context,
+        )
+
+        self.assertTrue(result.should_remember)
+        self.assertEqual(result.memory_type, "decision")
+        self.assertEqual(
+            result.meaning,
+            "The rider chose networking as his career direction.",
+        )
+        self.assertEqual(result.confidence, 0.96)
+        self.assertEqual(result.importance, 0.91)
+        self.assertEqual(evaluator.received_context, context)
+
+
+class FawkesRelationshipSemanticMemoryTests(unittest.TestCase):
+    def test_semantic_evaluator_can_classify_shared_inside_joke(self):
+        from src.memory.semantic import SemanticMemoryAssessment
+        from src.memory.semantic_provider import ModelSemanticMemoryEvaluator
+
+        class FakeProvider:
+            def evaluate_memory(self, *, content, conversation_context=()):
+                return SemanticMemoryAssessment(
+                    should_remember=True,
+                    memory_type="inside_joke",
+                    meaning="A recurring playful way Tanner addresses Fawkes.",
+                    confidence=0.95,
+                    importance=0.70,
+                    reasoning="The shared conversational context establishes this as relationship humor.",
+                )
+
+        evaluator = ModelSemanticMemoryEvaluator(FakeProvider())
+
+        result = evaluator.evaluate(
+            content="you little fawker",
+            conversation_context=(
+                {
+                    "role": "assistant",
+                    "content": "Absolutely, dingus mode engaged.",
+                },
+                {
+                    "role": "user",
+                    "content": "next command you lil fawker",
+                },
+            ),
+        )
+
+        self.assertTrue(result.should_remember)
+        self.assertEqual(result.memory_type, "inside_joke")
+        self.assertIn("playful", result.meaning.lower())
+        self.assertGreaterEqual(result.confidence, 0.90)
+
+
+if __name__ == "__main__":
+    unittest.main()

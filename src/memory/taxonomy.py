@@ -39,6 +39,15 @@ MEMORY_TYPES = {
     "relationship": {
         "description": "Information about relationships and shared history.",
     },
+    "inside_joke": {
+        "description": "A joke or recurring bit whose meaning belongs to shared interaction history.",
+    },
+    "shared_reference": {
+        "description": "A recurring phrase, event, reference, or shorthand whose meaning depends on shared history.",
+    },
+    "relationship_moment": {
+        "description": "A meaningful moment contributing to the shared history or development of the user-Phoenix relationship.",
+    },
     "knowledge": {
         "description": "Something learned through interaction or research.",
     },

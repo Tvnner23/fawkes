@@ -1,6 +1,8 @@
+from src.capture.canonical import canonical_messages
 from src.memory.consolidate import consolidate_assessment
 from src.memory.retrieval import retrieve_memories
 from src.memory.semantic import evaluate_semantically
+from src.memory.extract import extract_memory_candidates
 
 
 def process_memory_candidate(
@@ -77,3 +79,29 @@ def process_candidates(
         )
 
     return results
+
+
+
+def process_conversation(
+    conversation_id: str,
+    *,
+    evaluator,
+    matcher=None,
+    retrieval_limit=5,
+):
+    """
+    Process one canonical conversation through the memory pipeline.
+
+    Canonical conversation history is the sole source of semantic context.
+    The archive itself remains untouched.
+    """
+    conversation = tuple(canonical_messages(conversation_id))
+    candidates = extract_memory_candidates(conversation_id)
+
+    return process_candidates(
+        candidates,
+        evaluator=evaluator,
+        matcher=matcher,
+        conversation_context=conversation,
+        retrieval_limit=retrieval_limit,
+    )

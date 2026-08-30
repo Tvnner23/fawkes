@@ -59,3 +59,18 @@ class FawkesMemoryTaxonomyTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FawkesRelationshipMemoryTaxonomyTests(unittest.TestCase):
+    def test_relationship_memory_types_exist(self):
+        from src.memory.taxonomy import all_memory_types
+
+        catalog = all_memory_types()
+
+        self.assertIn("inside_joke", catalog)
+        self.assertIn("shared_reference", catalog)
+        self.assertIn("relationship_moment", catalog)
+
+
+if __name__ == "__main__":
+    unittest.main()

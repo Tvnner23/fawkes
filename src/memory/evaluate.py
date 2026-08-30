@@ -131,33 +131,37 @@ def evaluate_candidate(candidate: dict):
     }
 
 
-def evaluate_conversation(conversation_id: str, evaluator=None):
+def evaluate_conversation(
+    conversation_id: str,
+    *,
+    evaluator,
+    conversation_context=(),
+):
     candidates = extract_memory_candidates(conversation_id)
 
-    if evaluator is not None:
-        results = []
-        for candidate in candidates:
-            assessment = evaluator.evaluate(
-                content=candidate["content"],
-                conversation_context=tuple(candidates),
-            )
-            results.append(
-                {
-                    **candidate,
-                    "decision": (
-                        "likely_memory"
-                        if assessment.should_remember
-                        else "likely_ephemeral"
-                    ),
-                    "evaluation_confidence": assessment.confidence,
-                    "importance": assessment.importance,
-                    "memory_type": assessment.memory_type,
-                    "meaning": assessment.meaning,
-                }
-            )
-        return results
+    context = tuple(conversation_context)
 
-    return [
-        evaluate_candidate(candidate)
-        for candidate in candidates
-    ]
+    results = []
+
+    for candidate in candidates:
+        assessment = evaluator.evaluate(
+            content=candidate["content"],
+            conversation_context=context,
+        )
+
+        results.append(
+            {
+                **candidate,
+                "decision": (
+                    "likely_memory"
+                    if assessment.should_remember
+                    else "likely_ephemeral"
+                ),
+                "evaluation_confidence": assessment.confidence,
+                "importance": assessment.importance,
+                "memory_type": assessment.memory_type,
+                "meaning": assessment.meaning,
+            }
+        )
+
+    return results
