@@ -1,7 +1,7 @@
 [Unit]
 Description=Complete current production Fawkes runtime
-Wants=fawkes-app.service fawkes-discord.service
-After=network-online.target
+Wants=fawkes-production-ready.service fawkes-app.service fawkes-failure-notifier.timer fawkes-discord.service
+After=network-online.target fawkes-production-ready.service fawkes-app.service fawkes-discord.service
 
 [Install]
 WantedBy=multi-user.target

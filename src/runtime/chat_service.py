@@ -1211,6 +1211,57 @@ class FawkesChatService:
         record = campaign.cancel(campaign_id, authenticated_rider=authenticated_rider)
         return {"campaign": campaign.presentation(record["campaign_id"])}
 
+    def review_codex_development_campaign(self, campaign_id, *, authenticated_rider=False):
+        if authenticated_rider is not True:
+            raise PermissionError("authenticated rider authority is required")
+        campaign = CodexDevelopmentCampaign(self.instance_id)
+        current = campaign.presentation(campaign_id)
+        if current["status"] != "awaiting_independent_review":
+            raise RuntimeError("campaign does not have a reviewable candidate")
+        record = campaign.run_to_terminal(campaign_id)
+        return {"campaign": campaign.presentation(record["campaign_id"])}
+
+    def codex_development_campaign_evidence(self, campaign_id):
+        campaign = CodexDevelopmentCampaign(self.instance_id)
+        record = campaign.store.load(campaign_id)
+        reports = []
+        for run in record.get("builder_runs", []):
+            for key in ("source_report_id", "return_report_id"):
+                report_id = run.get(key)
+                if report_id:
+                    reports.append(campaign.exchange._load("reports", report_id))
+        for review in record.get("reviews", []):
+            if review.get("review_report_id"):
+                reports.append(campaign.exchange._load("reports", review["review_report_id"]))
+        return {"campaign_id": campaign_id, "reports": reports,
+                "validation_evidence": [item for run in record.get("builder_runs", [])
+                                        for item in run.get("validation_evidence", [])],
+                "creates_authority": False}
+
+    def production_component_status(self):
+        import json
+        state_root = Path.home() / ".local/state/fawkes"
+        discord_path = state_root / "discord-bridge-status.json"
+        discord = json.loads(discord_path.read_text()) if discord_path.exists() else {"state": "stopped"}
+        from src.runtime.component_supervision import ComponentReceiptStore
+        failures = ComponentReceiptStore(state_root).latest(limit=20)
+        from src.runtime.production_control import component_states
+        supervised = component_states()
+        return {"components": {
+                    "stack": supervised["stack"],
+                    "app_server": supervised["app_server"],
+                    "discord_bridge": {**supervised["discord_bridge"], **discord},
+                    "development_coordinator": {"state": "READY"},
+                    "worker_launcher": {"state": "IDLE"},
+                    "reviewer_launcher": {"state": "IDLE"}},
+                "latest_failure_receipts": failures, "creates_authority": False}
+
+    def control_production_component(self, payload, *, authenticated_rider=False):
+        if authenticated_rider is not True:
+            raise PermissionError("authenticated rider authority is required")
+        from src.runtime.production_control import control_component
+        return control_component(payload.get("component"), payload.get("action"))
+
     def review_development_proposal(self, proposal_id, payload):
         return review_development_proposal(
             proposal_id,

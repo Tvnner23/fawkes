@@ -29,8 +29,10 @@ def sanitize_failure_message(value, *, secrets=()):
 class ComponentReceiptStore:
     """Append-only body-free failure/recovery receipts plus pending alerts."""
 
-    def __init__(self, root=DEFAULT_STATE_ROOT):
-        self.root = Path(root)
+    def __init__(self, root=None):
+        self.root = Path(root) if root is not None else Path(
+            os.getenv("FAWKES_RUNTIME_STATE_ROOT", DEFAULT_STATE_ROOT)
+        )
         self.receipt_root = self.root / "component-receipts"
         self.pending_root = self.root / "pending-failure-notifications"
 

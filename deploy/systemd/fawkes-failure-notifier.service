@@ -7,10 +7,10 @@ Wants=network-online.target
 Type=oneshot
 User=tvnner
 Group=tvnner
-WorkingDirectory=/home/tvnner/fawkes
+WorkingDirectory=/home/tvnner/.local/lib/fawkes-production/current
 Environment=PYTHONDONTWRITEBYTECODE=1
 EnvironmentFile=/home/tvnner/.config/fawkes/notification.env
-ExecStart=/home/tvnner/fawkes/.venv/bin/python -B /home/tvnner/fawkes/scripts/fawkes_failure_notifier.py
+ExecStart=/home/tvnner/.local/lib/fawkes-production/venv/bin/python -B scripts/fawkes_failure_notifier.py
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict

@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#171b22">
+  <title>Fawkes</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <main class="shell">
+    <header>
+      <div class="mark" aria-hidden="true">F</div>
+      <div><h1 id="phoenix-name">Fawkes</h1><p id="status">Connecting…</p></div>
+    </header>
+    <section id="auth" class="auth hidden" aria-labelledby="auth-title">
+      <h2 id="auth-title">Private access</h2>
+      <p>Enter the access token configured on your Fawkes host.</p>
+      <form id="auth-form"><input id="token" type="password" autocomplete="current-password" placeholder="Access token" required><button id="connect" type="submit">Connect</button></form>
+      <p id="auth-error" class="auth-error hidden" role="alert" aria-live="assertive"></p>
+    </section>
+    <section id="chat-view" class="view chat-view">
+      <button id="phoenix-presence" class="phoenix-presence" type="button" aria-label="Fawkes Presence. Activate to open Chat.">
+        <span id="presence-render-host" class="presence-render-host" aria-live="polite"></span>
+      </button>
+      <section id="messages" class="messages" aria-live="polite" aria-label="Conversation"></section>
+      <form id="composer" class="composer">
+        <label class="attach-button" for="attachments" aria-label="Attach image, PDF, or audio">＋</label>
+        <input id="attachments" class="sr-only" type="file" accept="image/png,image/jpeg,image/webp,image/gif,application/pdf,audio/mpeg,audio/wav,audio/x-wav,audio/flac,audio/ogg,audio/webm,audio/mp4,audio/x-m4a" multiple>
+        <div id="attachment-tray" class="attachment-tray hidden" aria-live="polite"></div>
+        <label class="sr-only" for="message">Message Fawkes</label>
+        <textarea id="message" rows="1" maxlength="50000" placeholder="Message Fawkes…" enterkeyhint="send" required></textarea>
+        <button id="send" type="submit" aria-label="Send message">↑</button>
+      </form>
+    </section>
+    <section id="developer-view" class="view developer-view hidden" aria-label="Developer">
+      <div class="developer-intro">
+        <p class="eyebrow">Development observatory</p>
+        <h2>What Fawkes may be becoming</h2>
+        <p>Evidence and interpretation only. Nothing here directly controls personality.</p>
+        <div class="development-actions">
+          <button id="start-development-task" type="button">Start Development Task</button>
+          <button id="open-live-activity" type="button">Live Activity</button>
+          <button id="open-runtime-status" type="button">Fawkes Status / Failures</button>
+        </div>
+      </div>
+      <nav id="developer-sections" class="section-tabs" aria-label="Developer sections">
+        <button class="active" data-section="observations">Observations</button>
+        <button data-section="campaigns">Campaigns</button>
+        <button data-section="corrections">Corrections</button>
+        <button data-section="defects">Defects</button>
+        <button data-section="base">Base candidates</button>
+        <button data-section="proposals">Proposals</button>
+        <button data-section="review">Human review</button>
+        <button data-section="memory">Memory triage</button>
+        <button data-section="progression">Progression</button>
+        <button data-section="presentation">Presentation</button>
+        <button data-section="growth">Growth</button>
+        <button data-section="tests">Test Center</button>
+      </nav>
+      <div id="developer-content" class="developer-content" aria-live="polite"></div>
+    </section>
+    <section id="settings-view" class="view settings-view hidden" aria-label="Settings">
+      <div class="developer-intro">
+        <p class="eyebrow">Rider preferences</p>
+        <h2>Sound</h2>
+        <p>Optional event sounds are separate from Fawkes's future voice and are never stored as Memory.</p>
+      </div>
+      <div id="sound-settings" class="sound-settings" aria-live="polite"></div>
+      <div id="presence-settings" class="sound-settings" aria-live="polite"></div>
+    </section>
+    <section id="library-view" class="view settings-view hidden" aria-label="Library">
+      <div class="developer-intro"><p class="eyebrow">Retained references</p><h2>Library</h2><p>External/reference knowledge, isolated from personal Memory.</p></div>
+      <form id="library-search-form" class="library-search"><label class="sr-only" for="library-query">Search Library</label><input id="library-query" placeholder="Search retained sources…"><button type="submit">Search</button></form>
+      <div id="library-content" class="sound-settings" aria-live="polite"></div>
+    </section>
+    <section id="history-view" class="view settings-view hidden" aria-label="Historical search">
+      <div class="developer-intro"><p class="eyebrow">Manual evidence inspection</p><h2>History</h2><p>Summary for navigation. Original text for truth. Inherited history remains separate from native Archive history.</p></div>
+      <form id="history-search-form" class="library-search">
+        <label class="sr-only" for="history-query">Search history</label><input id="history-query" placeholder="Search historical evidence…" required>
+        <label class="sr-only" for="history-domain">Historical domain</label><select id="history-domain"><option value="both">Native + inherited</option><option value="native_archive">Native Archive</option><option value="inherited_history">Inherited history</option></select>
+        <button type="submit">Search</button>
+      </form>
+      <div id="history-content" class="sound-settings" aria-live="polite"><p class="dev-empty">Search runs only when you request it here. Results are not added to Chat or Memory.</p></div>
+    </section>
+    <nav class="app-nav" aria-label="Main navigation">
+      <button class="active" data-view="chat">Chat</button>
+      <button data-view="developer">Developer</button>
+      <button data-view="library">Library</button>
+      <button data-view="history">History</button>
+      <button data-view="settings">Settings</button>
+    </nav>
+  </main>
+  <section id="detail-panel" class="detail-panel hidden" aria-modal="true" role="dialog" aria-labelledby="detail-title">
+    <div class="detail-sheet">
+      <button id="detail-close" class="close" aria-label="Close">×</button>
+      <div id="detail-content"></div>
+    </div>
+  </section>
+  <script src="/app.js" defer></script>
+  <script src="/presence-three.bundle.js" defer></script>
+  <script type="module" src="/presence-bootstrap.js"></script>
+</body>
+</html>

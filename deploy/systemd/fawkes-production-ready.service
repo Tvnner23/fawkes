@@ -1,0 +1,12 @@
+[Unit]
+Description=Verify approved Fawkes release, protected credentials, and shared state
+After=network-online.target
+Before=fawkes-app.service fawkes-discord.service
+
+[Service]
+Type=oneshot
+User=tvnner
+Group=tvnner
+ExecStart=/home/tvnner/.local/lib/fawkes-production/venv/bin/python -B /home/tvnner/.local/lib/fawkes-production/current/scripts/verify_fawkes_production_prerequisites.py
+RemainAfterExit=true
+NoNewPrivileges=true

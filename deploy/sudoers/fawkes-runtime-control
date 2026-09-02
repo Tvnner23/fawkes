@@ -1,0 +1,1 @@
+tvnner ALL=(root) NOPASSWD: /usr/bin/systemctl start fawkes.target, /usr/bin/systemctl stop fawkes.target, /usr/bin/systemctl restart fawkes.target, /usr/bin/systemctl restart fawkes-app.service, /usr/bin/systemctl restart fawkes-discord.service
