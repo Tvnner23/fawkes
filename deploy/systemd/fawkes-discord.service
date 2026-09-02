@@ -1,0 +1,33 @@
+[Unit]
+Description=Fawkes private Discord conversation bridge
+After=network-online.target fawkes-app.service
+Wants=network-online.target
+PartOf=fawkes.target
+OnFailure=fawkes-failure-notifier.service
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=tvnner
+Group=tvnner
+WorkingDirectory=/home/tvnner/fawkes
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONUNBUFFERED=1
+Environment=FAWKES_RUNTIME_STATE_ROOT=/home/tvnner/.local/state/fawkes
+EnvironmentFile=/home/tvnner/.config/fawkes/discord-bot.env
+ExecStartPre=/home/tvnner/fawkes/.venv/bin/python -B /home/tvnner/fawkes/scripts/initialize_fawkes_discord_cursors.py
+ExecStart=/home/tvnner/fawkes/.venv/bin/python -B /home/tvnner/fawkes/scripts/run_fawkes_discord_bot.py
+ExecStopPost=/home/tvnner/fawkes/.venv/bin/python -B /home/tvnner/fawkes/scripts/fawkes_component_failure.py discord_bridge --result ${SERVICE_RESULT} --exit-code ${EXIT_CODE} --exit-status ${EXIT_STATUS}
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+KillSignal=SIGTERM
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/tvnner/fawkes/Archive /home/tvnner/fawkes/database /home/tvnner/.local/state/fawkes
+
+[Install]
+WantedBy=fawkes.target

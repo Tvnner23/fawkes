@@ -3,6 +3,7 @@ import json
 import struct
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 from scripts import bootstrap_fawkes_discord_dm, run_fawkes_discord_bot
@@ -12,7 +13,7 @@ from src.runtime.discord_bot import (
     DiscordBotTransportError, DiscordConversationBridge,
     DiscordConversationProcessingError, DiscordGatewayRunner, DiscordIdentityError,
     DiscordOutboundAuthorization, DiscordOutboundBridge, DiscordReplyDeliveryError,
-    TANNER_DM_BOOTSTRAP_MESSAGE, bootstrap_tanner_dm,
+    TANNER_DM_BOOTSTRAP_MESSAGE, DiscordMessageCursorStore, bootstrap_tanner_dm,
 )
 from src.runtime.discord_webhook import DiscordWebhookConfiguration, DiscordWebhookSender
 from src.runtime.chat import FawkesChatRuntime
@@ -98,7 +99,8 @@ class DiscordBotTests(unittest.TestCase):
         configuration = self.configuration()
         client = client_type.return_value
         from_environment.return_value = configuration
-        run_fawkes_discord_bot.main()
+        with patch("scripts.run_fawkes_discord_bot.write_status"):
+            run_fawkes_discord_bot.main()
         client.send_dm.assert_not_called()
         runner_type.return_value.run.assert_called_once_with()
 
@@ -416,6 +418,131 @@ class DiscordBotTests(unittest.TestCase):
         ) as caught:
             DiscordGatewayRunner._receive(socket, (TimeoutError,))
         self.assertNotIn(TOKEN, str(caught.exception))
+
+    def test_normal_close_reconnects_and_resumes_exact_session(self):
+        first = Mock()
+        first.recv_data.side_effect = [
+            (1, json.dumps({"op": 10, "d": {"heartbeat_interval": 45_000}})),
+            (1, json.dumps({"op": 0, "t": "READY", "s": 8, "d": {
+                "session_id": "session-1", "resume_gateway_url": "wss://resume.example"}})),
+            (8, struct.pack("!H", 1000)),
+        ]
+        second = Mock()
+        second.recv_data.side_effect = [
+            (1, json.dumps({"op": 10, "d": {"heartbeat_interval": 45_000}})),
+            (1, json.dumps({"op": 0, "t": "RESUMED", "s": 9, "d": {}})),
+        ]
+        runner = None
+        def lifecycle(state, _detail):
+            if state == "RESUMED":
+                runner.stop()
+        runner = DiscordGatewayRunner(
+            self.configuration(), Mock(),
+            http_client=Mock(gateway_url=Mock(return_value="wss://gateway.example")),
+            websocket_factory=Mock(side_effect=[first, second]), max_reconnect_attempts=2,
+            sleep=Mock(), random_source=lambda: 0, on_lifecycle=lifecycle)
+        runner.run()
+        self.assertEqual(json.loads(second.send.call_args_list[0].args[0]), {"op": 6, "d": {
+            "token": TOKEN, "session_id": "session-1", "seq": 8}})
+
+    def test_nonresumable_invalid_session_falls_back_to_identify(self):
+        first = Mock()
+        first.recv_data.side_effect = [
+            (1, json.dumps({"op": 10, "d": {"heartbeat_interval": 45_000}})),
+            (1, json.dumps({"op": 9, "d": False})),
+        ]
+        second = Mock()
+        second.recv_data.side_effect = [
+            (1, json.dumps({"op": 10, "d": {"heartbeat_interval": 45_000}})),
+            (1, json.dumps({"op": 0, "t": "READY", "s": 1, "d": {}})),
+        ]
+        runner = None
+        def ready():
+            runner.stop()
+        runner = DiscordGatewayRunner(
+            self.configuration(), Mock(),
+            http_client=Mock(gateway_url=Mock(return_value="wss://gateway.example")),
+            websocket_factory=Mock(side_effect=[first, second]), max_reconnect_attempts=2,
+            sleep=Mock(), random_source=lambda: 0, on_ready=ready)
+        runner.run()
+        self.assertEqual(json.loads(second.send.call_args_list[0].args[0])["op"], 2)
+
+    def test_fatal_gateway_close_does_not_reconnect(self):
+        socket = Mock()
+        socket.recv_data.side_effect = [
+            (1, json.dumps({"op": 10, "d": {"heartbeat_interval": 45_000}})),
+            (8, struct.pack("!H", 4014) + b"disallowed intents"),
+        ]
+        factory = Mock(return_value=socket)
+        runner = DiscordGatewayRunner(
+            self.configuration(), Mock(),
+            http_client=Mock(gateway_url=Mock(return_value="wss://gateway.example")),
+            websocket_factory=factory, max_reconnect_attempts=None, sleep=Mock())
+        with self.assertRaises(DiscordBotTransportError) as caught:
+            runner.run()
+        self.assertEqual(caught.exception.provider_code, 4014)
+        self.assertTrue(caught.exception.fatal)
+        factory.assert_called_once()
+
+    def test_cursor_prevents_duplicate_and_advances_only_after_reply(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cursor = DiscordMessageCursorStore(Path(directory) / "cursor.json")
+            chat = Mock()
+            chat.send.return_value = {"message": {"content": "reply"}}
+            http = Mock()
+            http.send_dm.return_value = {"provider": "discord_bot", "message_id": "9"}
+            bridge = DiscordConversationBridge(
+                self.configuration(), chat_service=chat, http_client=http, cursor_store=cursor)
+            event = {"t": "MESSAGE_CREATE", "d": {"id": "7", "content": "hello",
+                     "author": {"id": TANNER, "bot": False}}}
+            self.assertEqual(bridge.handle_dispatch(event)["status"], "replied")
+            self.assertEqual(cursor.get("tanner"), "7")
+            self.assertEqual(bridge.handle_dispatch(event)["status"], "duplicate")
+            chat.send.assert_called_once()
+
+    def test_backfill_processes_post_cursor_tanner_messages_in_order(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cursor = DiscordMessageCursorStore(Path(directory) / "cursor.json")
+            cursor.advance("tanner", "10")
+            chat = Mock()
+            chat.send.side_effect = [
+                {"message": {"content": "reply 11"}},
+                {"message": {"content": "reply 12"}},
+            ]
+            http = Mock()
+            http.messages_after.return_value = [
+                {"id": "11", "content": "first", "author": {"id": TANNER, "bot": False}},
+                {"id": "12", "content": "second", "author": {"id": TANNER, "bot": False}},
+            ]
+            http.send_dm.return_value = {"provider": "discord_bot", "message_id": "20"}
+            bridge = DiscordConversationBridge(
+                self.configuration(), chat_service=chat, http_client=http, cursor_store=cursor)
+            bridge.backfill()
+            self.assertEqual([call.args[0] for call in chat.send.call_args_list], ["first", "second"])
+            self.assertEqual(cursor.get("tanner"), "12")
+
+    def test_backfill_never_fetches_pre_opt_in_emily_history(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cursor = DiscordMessageCursorStore(Path(directory) / "cursor.json")
+            cursor.advance("tanner", "10")
+            http = Mock()
+            http.messages_after.return_value = []
+            DiscordConversationBridge(
+                self.configuration(emily_opted_in=False), chat_service=Mock(),
+                http_client=http, cursor_store=cursor).backfill()
+            http.messages_after.assert_called_once()
+            self.assertEqual(http.messages_after.call_args.args[0].identity, "tanner")
+
+    def test_cursor_tampering_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "cursor.json"
+            store = DiscordMessageCursorStore(path)
+            store.advance("tanner", "10")
+            value = json.loads(path.read_text())
+            value["cursors"]["tanner"] = "99"
+            path.write_text(json.dumps(value))
+            with self.assertRaisesRegex(DiscordBotTransportError, "cursor state is invalid"):
+                store.get("tanner")
 
 
 if __name__ == "__main__":

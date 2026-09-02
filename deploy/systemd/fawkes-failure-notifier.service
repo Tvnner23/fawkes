@@ -1,0 +1,18 @@
+[Unit]
+Description=Deliver pending sanitized Fawkes component failure receipts
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=tvnner
+Group=tvnner
+WorkingDirectory=/home/tvnner/fawkes
+Environment=PYTHONDONTWRITEBYTECODE=1
+EnvironmentFile=/home/tvnner/.config/fawkes/notification.env
+ExecStart=/home/tvnner/fawkes/.venv/bin/python -B /home/tvnner/fawkes/scripts/fawkes_failure_notifier.py
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/tvnner/.local/state/fawkes

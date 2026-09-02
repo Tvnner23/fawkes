@@ -1,0 +1,11 @@
+[Unit]
+Description=Retry pending Fawkes component failure notifications
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Persistent=true
+RandomizedDelaySec=20
+
+[Install]
+WantedBy=timers.target

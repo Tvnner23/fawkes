@@ -1,0 +1,7 @@
+[Unit]
+Description=Complete current production Fawkes runtime
+Wants=fawkes-app.service fawkes-discord.service
+After=network-online.target
+
+[Install]
+WantedBy=multi-user.target
