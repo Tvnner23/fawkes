@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -31,12 +32,26 @@ def main():
                                        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}, timeout=180)
         real_command = [python, "-B", "-m", "unittest",
             "tests.test_wsl_codex_reviewer.WslFormalReviewerTests.test_real_authenticated_wsl_formal_review_route", "-v"]
+        route_run_id = "wsl-assurance-route-" + uuid.uuid4().hex
+        route_evidence_path = evidence / "real-route-bound.json"
         real = subprocess.run(real_command, cwd=fixture.root, text=True, capture_output=True,
-            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "FAWKES_WSL_CODEX_QUALIFICATION": "1"},
+            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "FAWKES_WSL_CODEX_QUALIFICATION": "1",
+                 "FAWKES_WSL_ROUTE_RUN_ID": route_run_id,
+                 "FAWKES_WSL_ROUTE_EVIDENCE_PATH": str(route_evidence_path)},
             timeout=480)
+        bound_route = (json.loads(route_evidence_path.read_text())
+                       if route_evidence_path.exists() else {})
+        route_bound = (bound_route.get("route_run_id") == route_run_id
+            and bound_route.get("invocation_id") == route_run_id + "-invocation"
+            and bound_route.get("status") == "delivered"
+            and bound_route.get("review_status_present") is True
+            and bound_route.get("creates_authority") is False)
         real_record = {"command": real_command, "exit_status": real.returncode,
             "stdout_sha256": sha(real.stdout.encode()), "stderr_sha256": sha(real.stderr.encode()),
-            "output_bodies_recorded": False, "real_authenticated_route": real.returncode == 0}
+            "output_bodies_recorded": False, "route_run_id": route_run_id,
+            "bound_route_evidence_sha256": (sha(route_evidence_path.read_bytes())
+                if route_evidence_path.exists() else None),
+            "real_authenticated_route": real.returncode == 0 and route_bound}
         (evidence / "real-route.json").write_text(json.dumps(real_record, indent=2) + "\n", encoding="utf-8")
         deterministic_record = {"command": command, "exit_status": deterministic.returncode,
             "stdout_sha256": sha(deterministic.stdout.encode()), "stderr_sha256": sha(deterministic.stderr.encode()),
@@ -62,6 +77,12 @@ Recompute the candidate identity before mutating it and require it to equal the 
 Verify all 16 declared hard invariants, including exact frozen identity/evidence/lineage, wrong binding,
 read-only and no inherited write authority, zero authority, replay/stale/malformed/timeout handling, and all
 structured review states. A real-route exit other than zero blocks PASS. Preserve limitations truthfully.
+The WSL_QUALIFIED_SNAPSHOT_ID is provenance for the adapter qualification fixture, not a required
+identity for later production review candidates. Prove instead that each dynamically frozen candidate
+is exactly bound throughout its own request and cannot be substituted by that fixture or a neighbor.
+The body-free real-route record includes a unique route_run_id and digest of a separately retained,
+schema-bound route result. Require real_authenticated_route=true; do not infer route absence merely
+because private model response bodies are intentionally excluded.
 Return only the schema with campaign_version={CAMPAIGN!r} and
 candidate_snapshot_id={fixture.provenance['candidate_snapshot_id']!r}."""
         verifier_command = ["codex", "--ask-for-approval", "never", "exec", "--ephemeral",
@@ -71,6 +92,7 @@ candidate_snapshot_id={fixture.provenance['candidate_snapshot_id']!r}."""
                                   env=os.environ, timeout=900)
         result = json.loads(output.read_text(encoding="utf-8")) if output.exists() else {}
         qualified = (deterministic.returncode == real.returncode == verifier.returncode == 0
+            and route_bound
             and result.get("verdict") == "pass"
             and result.get("hard_invariants_passed") == len(WSL_QUALIFICATION_CONTRACT["hard_invariants"])
             and result.get("hard_invariants_total") == len(WSL_QUALIFICATION_CONTRACT["hard_invariants"])

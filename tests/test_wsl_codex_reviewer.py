@@ -157,6 +157,14 @@ class WslFormalReviewerTests(unittest.TestCase):
         self.setUp(); malformed = self.invoke(FakeWslReviewer(malformed=True))
         self.assertEqual(malformed["failure_reason"], "malformed_or_unbound_response")
 
+    def test_dynamic_candidate_is_exact_and_qualification_fixture_cannot_substitute(self):
+        from src.runtime.wsl_codex_reviewer import WSL_QUALIFIED_SNAPSHOT_ID
+        self.assertNotEqual(self.provenance["candidate_snapshot_id"], WSL_QUALIFIED_SNAPSHOT_ID)
+        self.assertEqual(self.invoke()["status"], "delivered")
+        self.setUp()
+        with self.assertRaises(PermissionError):
+            self.invoke(candidate_snapshot_id=WSL_QUALIFIED_SNAPSHOT_ID)
+
     def test_read_only_mutation_timeout_replay_and_production_gate_fail_closed(self):
         changed = self.invoke(FakeWslReviewer(mutate=True))
         self.assertEqual(changed["failure_reason"], "candidate_snapshot_changed")
@@ -245,14 +253,25 @@ class WslFormalReviewerTests(unittest.TestCase):
         with DisposableVerifierWorkspace(self.workspace) as frozen:
             prepared = prepare_wsl_review_package(exchange=self.exchange, campaign_record=self.campaign,
                 candidate_snapshot=frozen.provenance, workspace=self.workspace)
+            route_run_id = os.environ.get("FAWKES_WSL_ROUTE_RUN_ID", "wsl-real-route-test")
+            invocation_id = f"{route_run_id}-invocation"
             result = WslCodexReviewAdapter(self.exchange, timeout_seconds=420).deliver_candidate_once(
                 package_id=prepared["package_id"], transport_authority=prepared["transport_authority"],
                 return_authority=prepared["return_authority"], campaign_id="campaign",
                 builder_return_report_id=self.campaign["builder_runs"][-1]["return_report_id"],
                 candidate_snapshot_id=frozen.provenance["candidate_snapshot_id"],
-                candidate_snapshot_root=frozen.root)
+                candidate_snapshot_root=frozen.root, invocation_id=invocation_id)
         self.assertEqual(result["status"], "delivered")
         self.assertIn(result["review_status"], {"pass", "pass_with_caveats", "correction_required", "insufficient_evidence", "blocked"})
+        evidence_path = os.environ.get("FAWKES_WSL_ROUTE_EVIDENCE_PATH")
+        if evidence_path:
+            evidence = {"schema_version": 1, "route_run_id": route_run_id,
+                "invocation_id": invocation_id, "package_id": prepared["package_id"],
+                "candidate_snapshot_id": frozen.provenance["candidate_snapshot_id"],
+                "result_record_sha256": result["record_sha256"], "status": result["status"],
+                "review_status_present": bool(result.get("review_status")),
+                "creates_authority": result["creates_authority"]}
+            Path(evidence_path).write_text(json.dumps(evidence, sort_keys=True) + "\n")
 
 
 if __name__ == "__main__": unittest.main()
