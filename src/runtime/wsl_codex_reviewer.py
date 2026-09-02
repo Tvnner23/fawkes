@@ -287,6 +287,9 @@ class WslCodexReviewAdapter:
                 return self._failure(result_path, request, package, transport_authority,
                                      "interrupted_timeout_or_transport_failure", type(exc).__name__)
             metadata = {**_process_metadata(completed), "preflight": preflight}
+            if candidate_manifest(snapshot_root)["candidate_snapshot_id"] != candidate_snapshot_id:
+                return self._failure(result_path, request, package, transport_authority,
+                                     "candidate_snapshot_changed", "read-only candidate changed", metadata)
             if completed.returncode != 0:
                 return self._failure(result_path, request, package, transport_authority,
                                      "client_failure", f"exit {completed.returncode}", metadata)
@@ -311,9 +314,6 @@ class WslCodexReviewAdapter:
             except (KeyError, TypeError, ValueError, PermissionError, json.JSONDecodeError) as exc:
                 return self._failure(result_path, request, package, transport_authority,
                                      "malformed_or_unbound_response", str(exc), metadata)
-            if candidate_manifest(snapshot_root)["candidate_snapshot_id"] != candidate_snapshot_id:
-                return self._failure(result_path, request, package, transport_authority,
-                                     "candidate_snapshot_changed", "read-only candidate changed", metadata)
             result = {"schema_version": 1, "record_type": "wsl_codex_review_result",
                 "adapter_id": WSL_ADAPTER_ID, "adapter_version": WSL_ADAPTER_VERSION,
                 "instance_id": package["instance_id"], "campaign_id": campaign_id,

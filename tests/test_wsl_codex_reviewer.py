@@ -160,6 +160,21 @@ class WslFormalReviewerTests(unittest.TestCase):
     def test_read_only_mutation_timeout_replay_and_production_gate_fail_closed(self):
         changed = self.invoke(FakeWslReviewer(mutate=True))
         self.assertEqual(changed["failure_reason"], "candidate_snapshot_changed")
+        deliveries = list((self.exchange.root / "delivery_receipts").glob("*.json"))
+        delivery_records = [json.loads(path.read_text()) for path in deliveries]
+        reviewer_deliveries = [item for item in delivery_records
+                               if item.get("adapter_id") == WSL_ADAPTER_ID]
+        self.assertEqual([item["status"] for item in reviewer_deliveries], ["failed"])
+        verifications = ([json.loads(path.read_text()) for path in
+                          (self.exchange.root / "verification_receipts").glob("*.json")]
+                         if (self.exchange.root / "verification_receipts").exists() else [])
+        self.assertFalse(any(item.get("recipient", {}).get("worker_id") == WSL_REVIEWER_WORKER_ID
+                             for item in verifications))
+        reports = [json.loads(path.read_text()) for path in
+                   (self.exchange.root / "reports").glob("*.json")]
+        self.assertFalse(any(item.get("sender", {}).get("worker_id") == WSL_REVIEWER_WORKER_ID
+                             for item in reports))
+        self.assertNotIn("review_status", changed)
         self.setUp()
         def timeout(*args, **kwargs): raise subprocess.TimeoutExpired("codex", 1)
         failed = self.invoke(timeout); self.assertEqual(failed["failure_reason"], "preflight_failure")
