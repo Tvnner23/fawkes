@@ -92,7 +92,9 @@ class AutonomySupervisionTests(unittest.TestCase):
             self.assertEqual(store.load()["last_active_at"], written["last_active_at"])
 
     def test_needs_tanner_body_is_sanitized_and_deduplicated(self):
-        record = self.record(status="tanner_escalation", needs={"reason": "scope decision required"})
+        attention_id = "attention-" + "b" * 64
+        record = self.record(status="tanner_escalation", needs={
+            "reason": "scope decision required", "attention_id": attention_id})
         record.update({"instance_id": "phoenix", "record_sha256": "a" * 64})
         with tempfile.TemporaryDirectory() as directory:
             first = retain_needs_tanner_notification(record, root=directory)
@@ -100,6 +102,7 @@ class AutonomySupervisionTests(unittest.TestCase):
             self.assertEqual(first["notification_id"], second["notification_id"])
             self.assertNotIn("builder-report", first["message"])
             self.assertNotIn("review-report", first["message"])
+            self.assertIn(attention_id, first["message"])
             self.assertFalse(first["creates_authority"])
 
     def test_registered_transport_fanout_is_extensible_deduplicated_and_tanner_only(self):
@@ -120,6 +123,19 @@ class AutonomySupervisionTests(unittest.TestCase):
         self.assertEqual(received, ["Fawkes needs Tanner. Open exact request."])
         self.assertEqual(len(second["notification"]["attempts"]), 1)
         self.assertFalse(second["creates_authority"])
+
+    def test_ambiguous_accepted_attempt_is_not_blindly_replayed(self):
+        sent = []
+        with tempfile.TemporaryDirectory() as directory:
+            store = RiderNotificationStore("phoenix", root=directory)
+            logical, _ = store.create_once(kind="needs_tanner", campaign_id="campaign-one",
+                state_key="exact-blocker", message="Fawkes needs Tanner.", evidence_refs=[])
+            logical["attempts"] = [{"attempt_id": "attempt-existing",
+                "transport": "discord_webhook", "status": "accepted_receipt_ambiguous"}]
+            result = store.deliver(logical, lambda message: sent.append(message),
+                                   transport_name="discord_webhook")
+        self.assertEqual(sent, [])
+        self.assertEqual(result["attempts"], logical["attempts"])
 
 
 if __name__ == "__main__":

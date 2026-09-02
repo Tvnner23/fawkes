@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import hashlib
 import json
+import re
 import uuid
 
 from src.runtime.worker_exchange import _digest
@@ -113,7 +114,8 @@ class RiderNotificationStore:
 
     def deliver(self, record, sender, *, transport_name="unspecified"):
         for retained in record.get("attempts", []):
-            if retained.get("transport") == transport_name and retained.get("status") == "delivered":
+            if (retained.get("transport") == transport_name
+                    and retained.get("status") in {"delivered", "accepted_receipt_ambiguous"}):
                 return record
         attempt = {"attempt_id": f"notification-attempt-{uuid.uuid4()}",
             "attempted_at": datetime.now(timezone.utc).isoformat(), "transport": transport_name}
@@ -176,11 +178,17 @@ def retain_needs_tanner_notification(record, *, root=NOTIFICATION_ROOT, registry
     if not needs:
         return None
     reason = str(needs.get("reason") or "campaign requires rider review")[:240]
+    attention_id = str(needs.get("attention_id") or "")
+    attention_reference = (
+        f" Attention request: {attention_id}."
+        if re.fullmatch(r"attention-[a-f0-9]{64}", attention_id) else ""
+    )
     state_key = hashlib.sha256(json.dumps(needs, sort_keys=True).encode()).hexdigest()
     store = RiderNotificationStore(record["instance_id"], root=root)
     notification, _ = store.create_once(kind="needs_tanner",
         campaign_id=record["campaign_id"], state_key=state_key,
-        message=(f"Fawkes: {record['campaign_id']} needs Tanner. {reason}. "
+        message=(f"Fawkes: {record['campaign_id']} needs Tanner. {reason}."
+                 f"{attention_reference} "
                  "Work is paused; inspect authenticated Development for details."),
         evidence_refs=[{"reference_type": "development_campaign",
                         "reference_id": record["campaign_id"],
