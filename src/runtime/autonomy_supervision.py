@@ -119,6 +119,7 @@ class RiderNotificationStore:
         return self._write(value), True
 
     def deliver(self, record, sender, *, transport_name="unspecified"):
+        projection_sha256 = hashlib.sha256(record["message"].encode("utf-8")).hexdigest()
         for retained in record.get("attempts", []):
             if retained.get("transport") != transport_name:
                 continue
@@ -130,9 +131,15 @@ class RiderNotificationStore:
                 return self._write({**record, "attempts": attempts})
             if retained.get("status") in {"delivered", "accepted_receipt_ambiguous"}:
                 return record
+            if (retained.get("status") == "failed"
+                    and retained.get("failure_code") == "ValueError"
+                    and retained.get("projection_sha256") == projection_sha256):
+                # A deterministic local projection rejection cannot improve by
+                # retrying unchanged content. A new projection digest may try once.
+                return record
         attempt = {"attempt_id": f"notification-attempt-{uuid.uuid4()}",
             "attempted_at": datetime.now(timezone.utc).isoformat(), "transport": transport_name,
-            "status": "in_flight"}
+            "status": "in_flight", "projection_sha256": projection_sha256}
         current = self._write({**record, "attempts": [*record["attempts"], attempt]})
         try:
             receipt = sender(record["message"])
@@ -222,14 +229,24 @@ def retain_needs_tanner_notification(record, *, root=NOTIFICATION_ROOT, registry
     state_key = hashlib.sha256(json.dumps(
         {"needs": needs, "reminder_stage": reminder_stage}, sort_keys=True).encode()).hexdigest()
     store = RiderNotificationStore(record["instance_id"], root=root)
+    label = reason.split(":", 1)[0].split(" — Allow", 1)[0]
+    deadline = str(needs.get("expires_at") or "")
+    consequence = "If unanswered, this request expires and the action will not run."
+    fixed = ((f"URGENT — DECIDE BEFORE {deadline}\n" if deadline else "")
+             + f"{label}\nFawkes paused because: {{reason}}\n"
+             + (consequence + "\n" if deadline else "")
+             + f"Review and decide: {detail_url}\n"
+             + "Opening or receiving this notification grants no authority.")
+    # Keep the exact label, deadline, consequence, and link; bound only the
+    # explanatory reason because the authenticated decision page owns detail.
+    available = max(0, 479 - len(fixed.format(reason="")))
+    short_reason = reason[:available].rstrip()
+    if len(reason) > len(short_reason) and available > 1:
+        short_reason = short_reason[:-1].rstrip() + "…"
+    message = fixed.format(reason=short_reason)
     notification, _ = store.create_once(kind="needs_tanner",
         campaign_id=record["campaign_id"], state_key=state_key,
-        message=((f"URGENT — TANNER DECISION REQUIRED BEFORE {needs['expires_at']}\n"
-                  if needs.get("expires_at") else "")
-                 + f"Fawkes paused {record['campaign_id']} because {reason}. Tanner's decision is required.\n\n"
-                 f"**Review and decide:** {detail_url}\n"
-                 + ("Open on the Fawkes PC.\n" if detail_url.startswith("http://localhost") else "")
-                 + "Opening this link or receiving this notification grants no authority."),
+        message=message,
         evidence_refs=[{"reference_type": "development_campaign",
                         "reference_id": record["campaign_id"],
                         "record_sha256": record["record_sha256"]}])

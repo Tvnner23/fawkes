@@ -109,9 +109,9 @@ class AutonomySupervisionTests(unittest.TestCase):
             self.assertNotIn("builder-report", first["message"])
             self.assertNotIn("review-report", first["message"])
             self.assertIn(attention_id, first["message"])
-            self.assertIn("**Review and decide:** " + detail_url, first["message"])
+            self.assertIn("Review and decide: " + detail_url, first["message"])
             self.assertIn("Test A — APPROVE ONCE", first["message"])
-            self.assertIn("Open on the Fawkes PC.", first["message"])
+            self.assertLess(len(first["message"]), 480)
             self.assertNotIn("token=", first["message"].lower())
             self.assertIn("grants no authority", first["message"])
             self.assertFalse(first["creates_authority"])
@@ -142,11 +142,33 @@ class AutonomySupervisionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             first = retain_needs_tanner_notification(record, root=directory, registry=registry)
             second = retain_needs_tanner_notification(record, root=directory, registry=registry)
-        self.assertIn("URGENT — TANNER DECISION REQUIRED BEFORE", first["message"])
+        self.assertIn("URGENT — DECIDE BEFORE", first["message"])
+        self.assertIn("If unanswered, this request expires and the action will not run.", first["message"])
+        self.assertLess(len(first["message"]), 480)
         self.assertEqual(len(received["discord"]), 1)
         self.assertEqual(len(received["future"]), 1)
         self.assertEqual(first["notification_id"], second["notification_id"])
         self.assertFalse(first["creates_authority"])
+
+    def test_paired_attention_labels_links_and_expiration_fit_discord_bound(self):
+        for suffix, label in (("a", "Test A — APPROVE ONCE"), ("b", "Test B — DENY")):
+            attention_id = "attention-" + suffix * 64
+            detail_url = ("http://localhost:8787/?view=developer&section=attention&attention="
+                          + attention_id)
+            needs = {"reason": "native approval required", "plain_reason": label +
+                ": Allow one exact harmless PowerShell no-op for this qualification.",
+                "attention_id": attention_id, "detail_url": detail_url,
+                "expires_at": "2026-09-02T09:05:20.060291+00:00"}
+            record = self.record(status="tanner_escalation", needs=needs)
+            record.update({"instance_id": "phoenix-" + suffix, "record_sha256": "a" * 64})
+            with tempfile.TemporaryDirectory() as directory:
+                retained = retain_needs_tanner_notification(record, root=directory)
+            self.assertLess(len(retained["message"]), 480)
+            self.assertIn(label, retained["message"])
+            self.assertIn(detail_url, retained["message"])
+            self.assertIn("URGENT — DECIDE BEFORE " + needs["expires_at"], retained["message"])
+            self.assertIn("action will not run", retained["message"])
+            self.assertIn("grants no authority", retained["message"])
 
     def test_registered_transport_receives_producer_canonical_detail_url(self):
         attention_id = "attention-" + "c" * 64
@@ -198,6 +220,26 @@ class AutonomySupervisionTests(unittest.TestCase):
                                    transport_name="discord_webhook")
         self.assertEqual(sent, [])
         self.assertEqual(result["attempts"], logical["attempts"])
+
+    def test_deterministic_local_projection_failure_waits_for_changed_projection(self):
+        calls = []
+        with tempfile.TemporaryDirectory() as directory:
+            store = RiderNotificationStore("phoenix", root=directory)
+            logical, _ = store.create_once(kind="needs_tanner", campaign_id="campaign-one",
+                state_key="exact-blocker", message="oversized projection", evidence_refs=[])
+            def reject(message):
+                calls.append(message)
+                raise ValueError("bounded projection rejected")
+            first = store.deliver(logical, reject, transport_name="discord_webhook")
+            second = store.deliver(first, reject, transport_name="discord_webhook")
+            changed = store.deliver({**second, "message": "corrected projection"}, reject,
+                                    transport_name="discord_webhook")
+        self.assertEqual(calls, ["oversized projection", "corrected projection"])
+        self.assertEqual(len(first["attempts"]), 1)
+        self.assertEqual(len(second["attempts"]), 1)
+        self.assertEqual(len(changed["attempts"]), 2)
+        self.assertNotEqual(first["attempts"][0]["projection_sha256"],
+                            changed["attempts"][1]["projection_sha256"])
 
     def test_delivery_is_write_ahead_exact_and_uses_configured_state_root(self):
         with tempfile.TemporaryDirectory() as directory:
