@@ -100,6 +100,35 @@ class DevelopmentAttentionTests(unittest.TestCase):
         self.assertEqual(accepted["decision"]["campaign_id"], "campaign-a")
         self.assertFalse(accepted["decision"]["creates_continuing_authority"])
 
+    def test_v10_shaped_pending_event_projects_structured_qualification_choice(self):
+        event = self.store.create(campaign_id="gate1-native-attention-20260902-v10-deny",
+            invocation_id="gate1-native-attention-20260902-v10-deny-builder-1-appserver",
+            worker=self.worker, kind="native_codex_approval_required",
+            blocked_action="powershell.exe -NoProfile -NonInteractive -Command exit 0",
+            why_required="Test B — DENY: exact harmless qualification action",
+            requested_authority="one exact no-op", protocol_binding={
+                "method": "item/commandExecution/requestApproval", "item_id": "item-v10-b",
+                "approved_action_sha256": "b" * 64})
+        annotated = self.store.set_qualification_instruction(event["attention_id"],
+            campaign_id=event["campaign_id"], invocation_id=event["invocation_id"],
+            choice="deny", label="Test B",
+            expected_action_digest=event["protocol_binding"]["approved_action_sha256"])
+        projected = self.store.lifecycle(event["attention_id"])["event"]
+        self.assertEqual(projected["qualification_instruction"], {
+            "choice": "deny", "label": "Test B", "creates_authority": False})
+        self.assertEqual(projected["attention_id"], event["attention_id"])
+        self.assertEqual(projected["protocol_binding_sha256"], event["protocol_binding_sha256"])
+        self.assertEqual(annotated["state"], "needs_tanner")
+        self.assertIsNone(annotated["decision_id"])
+
+    def test_qualification_annotation_fails_closed_on_identity_or_action_mismatch(self):
+        event = self.create()
+        with self.assertRaisesRegex(PermissionError, "identity/state mismatch"):
+            self.store.set_qualification_instruction(event["attention_id"],
+                campaign_id=event["campaign_id"], invocation_id=event["invocation_id"],
+                choice="deny", label="Test B", expected_action_digest="wrong")
+        self.assertIsNone(self.store.get(event["attention_id"])["qualification_instruction"])
+
     def test_concurrent_paired_decisions_remain_isolated_in_reversed_order(self):
         events = {}
         identities = {}

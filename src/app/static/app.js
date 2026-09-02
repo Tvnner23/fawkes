@@ -1080,8 +1080,10 @@ function renderDeveloperSection() {
     const actionSummary=harmlessNoop?'Run one no-op PowerShell command across the protected WSL-to-Windows boundary.':rawAction;
     const reversible=attention.reversible===true?'Confirmed reversible.':attention.reversible===false?'Not reversible.':'Not confirmed; the provider did not declare reversibility.';
     card.append(element('h2', '', 'Tanner: Fawkes is paused and needs your decision'));
-    const qualificationChoice=(attention.why_required||'').includes('Expected qualification choice: Deny')?'Deny':(attention.why_required||'').includes('APPROVE ONCE')?'Approve Once':null;
-    [['Qualification instruction',qualificationChoice?`For this qualification, select ${qualificationChoice}. This instruction is separate from Fawkes’s risk assessment.`:'No qualification-specific choice is prescribed.'],
+    const qualification=attention.qualification_instruction||null;
+    const qualificationChoice=qualification&&qualification.choice==='approve_once'?'Approve Once':qualification&&qualification.choice==='deny'?'Deny':null;
+    const qualificationLabel=qualification&&qualification.label?qualification.label:null;
+    [['Qualification instruction',qualificationChoice?`Select ${qualificationChoice} — ${qualificationLabel}. This synthetic instruction is separate from Fawkes’s low-risk recommendation and overrides neither real policy nor future decisions.`:'No qualification-specific choice is prescribed.'],
      ['What Fawkes wants to do',actionSummary],['Why Fawkes stopped',attention.why_required],
      ['Why Tanner’s permission is required','Crossing this protected operating-system boundary requires an exact authenticated Rider decision.'],
      ['What will change if approved',harmlessNoop?'The one command will run once and should make no persistent change.':'Only the exact requested action may run once.'],

@@ -78,6 +78,23 @@ class FawkesAppClientTests(unittest.TestCase):
         self.assertIn("Fawkes’s risk-based recommendation", source)
         self.assertIn("Approve Once — ${qualificationChoice==='Approve Once'?'Test A'", source)
         self.assertIn("Deny — ${qualificationChoice==='Deny'?'Test B'", source)
+        self.assertNotIn("attention.why_required||'').includes", source)
+
+    def test_v10_structured_qualification_instructions_render_exact_served_text(self):
+        import os
+        expected = {
+            "approve_once": "Select Approve Once — Test A.",
+            "deny": "Select Deny — Test B.",
+        }
+        for choice, text in expected.items():
+            with self.subTest(choice=choice):
+                result = subprocess.run(["node", "tests/js/app_attention_deep_link_harness.js"],
+                    cwd=ROOT, text=True, capture_output=True, timeout=10,
+                    env={**os.environ, "FAWKES_ATTENTION_SCENARIO": "valid",
+                         "FAWKES_ATTENTION_ID": "attention-v10-" + choice,
+                         "FAWKES_EXPECTED_CHOICE": choice})
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("attention-deep-link-ok", result.stdout)
 
     def test_two_concurrent_exact_tabs_submit_only_their_immutable_decision_tuples(self):
         import os

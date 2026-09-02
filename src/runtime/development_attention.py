@@ -19,6 +19,7 @@ ROOT = Path(os.environ.get(
 )).resolve()
 ATTENTION_ROOT = ROOT / "database" / "development_attention"
 CHOICES = {"approve_once", "deny", "cancel_campaign"}
+QUALIFICATION_CHOICES = {"approve_once", "deny"}
 ATTENTION_BASE_URL_ENV = "FAWKES_ATTENTION_BASE_URL"
 REMOTE_AUTHENTICATED_ENV = "FAWKES_ATTENTION_REMOTE_AUTHENTICATED"
 _DECISION_CONDITION = threading.Condition()
@@ -141,7 +142,8 @@ class DevelopmentAttentionStore:
                why_required, requested_authority, resources=(), reversible=None,
                provider_code=None, expires_in_seconds=None, detail_url=None,
                protocol_binding=None, expiration_reason=None,
-               expiration_effect=None, can_request_again=None, work_lost=None):
+               expiration_effect=None, can_request_again=None, work_lost=None,
+               qualification_instruction=None):
         binding = dict(protocol_binding or {})
         binding_sha = _digest(binding) if binding else None
         logical = {"campaign_id": campaign_id, "invocation_id": invocation_id,
@@ -162,6 +164,18 @@ class DevelopmentAttentionStore:
                                                        can_request_again is not None,
                                                        work_lost is not None)):
             raise ValueError("expiring attention requires a complete justification")
+        qualification = None
+        if qualification_instruction is not None:
+            if (not isinstance(qualification_instruction, dict)
+                    or qualification_instruction.get("choice") not in QUALIFICATION_CHOICES
+                    or not isinstance(qualification_instruction.get("label"), str)
+                    or not qualification_instruction["label"].strip()):
+                raise ValueError("qualification instruction must have a bounded label and exact choice")
+            qualification = {
+                "choice": qualification_instruction["choice"],
+                "label": sanitize_action(qualification_instruction["label"]),
+                "creates_authority": False,
+            }
         event = {"schema_version": 1, "record_type": "development_attention_event",
             "attention_id": logical_id, "logical_identity_sha256": _digest(logical),
             "campaign_id": campaign_id, "invocation_id": invocation_id,
@@ -183,6 +197,7 @@ class DevelopmentAttentionStore:
             "expiration_effect": sanitize_action(expiration_effect) if expiration_effect else None,
             "can_request_again": can_request_again,
             "work_lost": work_lost,
+            "qualification_instruction": qualification,
             "consumer_state": "live",
             "approval_outcome": "awaiting_decision",
             "detail_url": canonical_detail,
@@ -191,6 +206,35 @@ class DevelopmentAttentionStore:
         self.events.mkdir(parents=True, exist_ok=True)
         _write_json_atomic(path, event)
         return event
+
+    def set_qualification_instruction(self, attention_id, *, campaign_id, invocation_id,
+                                      choice, label, expected_action_digest):
+        """Attach non-authoritative synthetic-test presentation metadata.
+
+        This can repair a pending qualification display without replacing its
+        identity, protocol binding, consumer, or authority state.
+        """
+        if choice not in QUALIFICATION_CHOICES or not str(label or "").strip():
+            raise ValueError("invalid qualification instruction")
+        path = self.events / f"{attention_id}.json"
+        with _decision_lock(path):
+            event = json.loads(path.read_text(encoding="utf-8"))
+            binding = event.get("protocol_binding") or {}
+            if (event.get("state") != "needs_tanner" or event.get("decision_id") is not None
+                    or event.get("campaign_id") != campaign_id
+                    or event.get("invocation_id") != invocation_id
+                    or binding.get("approved_action_sha256") != expected_action_digest):
+                raise PermissionError("qualification annotation identity/state mismatch")
+            instruction = {"choice": choice, "label": sanitize_action(label),
+                           "creates_authority": False}
+            existing = event.get("qualification_instruction")
+            if existing is not None and existing != instruction:
+                raise PermissionError("qualification instruction is immutable once set")
+            event = {**event, "qualification_instruction": instruction}
+            event.pop("record_sha256", None)
+            event["record_sha256"] = _digest(event)
+            _write_json_atomic(path, event)
+            return event
 
     def list(self, *, pending_only=False):
         if not self.events.exists():
