@@ -1445,6 +1445,21 @@ trust state, presence sessions, event ordering, duplicate suppression,
 attention arbitration, conversation/activity handoff, privacy-aware response
 selection, action leases, offline reconciliation, and conflict handling.
 
+### Deferred companion capability — iPhone Companion
+
+A later roadmap may add an iPhone Companion for mobile/PWA Fawkes chat,
+Tanner-attention push notifications, Share-to-Fawkes from other applications,
+Siri Shortcuts and App Intents, camera/image/file/voice input, optional
+permission-controlled location context, and Live Activities for meaningful
+status. It must use secure revocable trusted-device sessions, explicit
+authentication, least privilege, and rider-visible privacy controls. Attention
+must extend the existing Tanner-attention transport registry rather than create
+a parallel notification system, and notification URLs must never carry approval
+authority. The client architecture should remain reusable for a later Android
+companion without creating a second Phoenix. This capability may occur after
+the current roadmap, is not a v0.1 blocker, and grants no implementation or
+scheduling authority.
+
 ## Phase 30 — Immersive Reading and Guided Learning
 
 Combine Library, locators, voice, presentation, relationship context, and
