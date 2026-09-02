@@ -1249,7 +1249,8 @@ class FawkesChatService:
             lifecycle = DevelopmentAttentionStore().lifecycle(attention_id)
         except FileNotFoundError as exc:
             raise KeyError(attention_id) from exc
-        return {**lifecycle, "creates_authority": False}
+        return {"attention": lifecycle["event"], "decision": lifecycle["decision"],
+                "creates_authority": False}
 
     def decide_development_attention(self, campaign_id, attention_id, choice,
                                      *, authenticated_rider=False):

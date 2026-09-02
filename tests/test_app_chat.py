@@ -343,6 +343,15 @@ class FawkesAppHTTPTests(unittest.TestCase):
             handler.headers.replace_header("Cookie", f"{SESSION_COOKIE}=wrong")
             self.assertFalse(handler._authorized())
 
+    @patch("src.runtime.development_attention.DevelopmentAttentionStore.lifecycle")
+    def test_exact_attention_api_shape_matches_decision_client(self, lifecycle):
+        lifecycle.return_value = {"event": {"attention_id": "attention-test"}, "decision": None}
+        service = object.__new__(FawkesChatService)
+        result = service.development_attention_event("attention-test")
+        self.assertEqual(result["attention"]["attention_id"], "attention-test")
+        self.assertIsNone(result["decision"])
+        self.assertNotIn("event", result)
+
     def test_no_token_configuration_is_local_open_mode(self):
         handler = self._handler()
         handler.server.app_token = ""
