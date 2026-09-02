@@ -271,7 +271,7 @@ class CodexDevelopmentCampaign:
             requested_authority=approval["requested_authority"],
             resources=approval["resources"], reversible=approval["reversible"],
             provider_code=approval["provider_code"],
-            protocol_binding=approval["protocol"])
+            protocol_binding=approval["protocol"], expires_in_seconds=timeout_seconds)
         attention_id = paused["needs_tanner"]["attention_id"]
         result = self.attention_store.wait_for_decision(
             attention_id, timeout_seconds=timeout_seconds, process_alive=process_alive)
@@ -292,9 +292,11 @@ class CodexDevelopmentCampaign:
         def finish(continuation_id, status):
             return self.attention_store.finish_detached_continuation(
                 decision["decision_id"], continuation_id, status=status)
+        def complete(status):
+            return self.attention_store.finish_live_action(decision["decision_id"], status=status)
         return {"choice": decision["choice"], "attention_id": attention_id,
                 "decision_id": decision["decision_id"], "claim": claim,
-                "reserve": reserve, "finish": finish}
+                "reserve": reserve, "finish": finish, "complete": complete}
 
     @staticmethod
     def _event(kind, detail=None):
@@ -398,7 +400,7 @@ class CodexDevelopmentCampaign:
     def require_tanner(self, campaign_id, *, invocation_id, worker, kind,
                        blocked_action, why_required, requested_authority,
                        resources=(), reversible=None, provider_code=None,
-                       protocol_binding=None):
+                       protocol_binding=None, expires_in_seconds=3600):
         """Pause one exact campaign action at the durable Rider boundary."""
         record = self.store.load(campaign_id)
         if record["cancelled"] or record["status"] in {"succeeded", "cancelled"}:
@@ -408,7 +410,7 @@ class CodexDevelopmentCampaign:
             kind=kind, blocked_action=blocked_action, why_required=why_required,
             requested_authority=requested_authority, resources=resources,
             reversible=reversible, provider_code=provider_code,
-            protocol_binding=protocol_binding)
+            protocol_binding=protocol_binding, expires_in_seconds=expires_in_seconds)
         needs = {"urgency": "urgent_blocking_flow", "reason": kind,
                  "decision_needed": "Approve this exact action once, deny it, or cancel the campaign",
                  "attention_id": event["attention_id"], "invocation_id": invocation_id,

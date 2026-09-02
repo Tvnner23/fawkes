@@ -1,4 +1,5 @@
 import json
+import io
 import tempfile
 import threading
 import time
@@ -7,7 +8,9 @@ from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
 from src.runtime.codex_app_server import (
-    CodexAppServerError, PROTOCOL_VERSION, approval_response, typed_approval,
+    AppServerResult, CodexAppServerError, CodexAppServerTransport, PROTOCOL_VERSION,
+    approval_response, typed_approval,
+    extend_deadline_for_attention,
 )
 from src.runtime.development_attention import DevelopmentAttentionStore
 
@@ -34,12 +37,66 @@ class CodexAppServerProtocolTests(unittest.TestCase):
             campaign_id="campaign-1", invocation_id="invocation-1",
             worker={"worker_id": "worker-1", "role": "software_repository"}, process_id=42)
         self.assertEqual(item["protocol"]["version"], PROTOCOL_VERSION)
+        self.assertEqual(item["protocol"]["method"], "item/commandExecution/requestApproval")
         self.assertEqual(approval_response("item/commandExecution/requestApproval", "approve_once", PARAMS),
                          {"decision": "accept"})
         self.assertEqual(approval_response("item/commandExecution/requestApproval", "deny", PARAMS),
                          {"decision": "decline"})
         self.assertEqual(approval_response("item/commandExecution/requestApproval", "cancel_campaign", PARAMS),
                          {"decision": "cancel"})
+
+    def test_tanner_pause_does_not_consume_turn_budget_at_old_boundary(self):
+        original_deadline = 420.0
+        # A decision arriving just beyond the old 420-second turn boundary
+        # retains the exact pre-pause execution budget.
+        extended = extend_deadline_for_attention(original_deadline, 10.0, 430.286)
+        self.assertAlmostEqual(extended, 840.286)
+        self.assertGreater(extended, 430.286)
+
+    def test_live_turn_survives_decision_after_its_original_deadline_and_claims_once(self):
+        frames = [
+            {"id": 1, "result": {}},
+            {"id": 2, "result": {"thread": {"id": "thread-1"}}},
+            {"id": 3, "result": {"turn": {"id": "turn-1"}}},
+            {"id": 90, "method": "item/commandExecution/requestApproval", "params": PARAMS},
+            {"method": "serverRequest/resolved", "params": {}},
+            {"method": "item/completed", "params": {"item": {
+                "id": "item-1", "type": "commandExecution", "status": "completed"}}},
+            {"method": "item/completed", "params": {"item": {
+                "id": "agent-1", "type": "agentMessage", "text": '{"ok":true}'}}},
+            {"method": "turn/completed", "params": {"turn": {"status": "completed"}}},
+        ]
+        class Process:
+            pid = 77
+            returncode = None
+            def __init__(self):
+                self.stdin = io.StringIO()
+                self.stdout = io.StringIO("".join(json.dumps(value) + "\n" for value in frames))
+                self.stderr = io.StringIO()
+            def poll(self): return self.returncode
+            def terminate(self): self.returncode = 0
+            def wait(self, timeout=None): return self.returncode
+            def kill(self): self.returncode = -9
+        class Transport(CodexAppServerTransport):
+            def qualify(self, environment):
+                return {"protocol_version": PROTOCOL_VERSION, "cli_version": "test",
+                        "typed_approval_methods": [], "request_schema_sha256": {}}
+        claimed, completed = [], []
+        def approve(_request, **_kwargs):
+            time.sleep(1.05)  # beyond the original one-second turn budget
+            return {"choice": "approve_once", "claim": lambda: claimed.append(True),
+                    "complete": lambda status: completed.append(status)}
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "last.json"
+            result = Transport(timeout_seconds=1, decision_timeout_seconds=2,
+                               popen=lambda *_args, **_kwargs: Process()).run(
+                cwd=directory, prompt="test", output_schema={"type": "object"},
+                output_path=output, sandbox="workspace-write", campaign_id="campaign-1",
+                invocation_id="invocation-1", worker={"worker_id": "worker-1"},
+                environment={}, approval_handler=approve)
+        self.assertIsInstance(result, AppServerResult)
+        self.assertEqual(claimed, [True])
+        self.assertEqual(completed, ["completed"])
 
     def test_permissions_never_become_broad_authority(self):
         with self.assertRaisesRegex(CodexAppServerError, "one action"):

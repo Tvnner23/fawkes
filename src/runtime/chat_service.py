@@ -1246,10 +1246,10 @@ class FawkesChatService:
     def development_attention_event(self, attention_id):
         from src.runtime.development_attention import DevelopmentAttentionStore
         try:
-            event = DevelopmentAttentionStore().get(attention_id)
+            lifecycle = DevelopmentAttentionStore().lifecycle(attention_id)
         except FileNotFoundError as exc:
             raise KeyError(attention_id) from exc
-        return {"attention": event, "creates_authority": False}
+        return {**lifecycle, "creates_authority": False}
 
     def decide_development_attention(self, campaign_id, attention_id, choice,
                                      *, authenticated_rider=False):

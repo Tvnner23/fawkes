@@ -58,6 +58,13 @@ def _digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
+def extend_deadline_for_attention(deadline, wait_started, wait_finished):
+    """Exclude the durable Tanner pause from the bounded execution budget."""
+    if wait_finished < wait_started:
+        raise ValueError("attention wait clock moved backwards")
+    return deadline + (wait_finished - wait_started)
+
+
 def _available_decisions(params):
     values = params.get("availableDecisions")
     if not isinstance(values, list):
@@ -125,7 +132,7 @@ def typed_approval(method, params, *, campaign_id, invocation_id, worker, proces
         "requested_authority": _safe(json.dumps(authority, sort_keys=True)),
         "resources": [_safe(params.get("cwd"))] if params.get("cwd") else [],
         "reversible": None, "provider_code": method,
-        "protocol": {"version": PROTOCOL_VERSION, "process_id": process_id,
+        "protocol": {"version": PROTOCOL_VERSION, "method": method, "process_id": process_id,
                      "thread_id": thread_id, "turn_id": turn_id,
                      "item_id": item_id, "blocked_action_sha256": _digest(authority),
                      "approved_action_sha256": _digest(action_identity)},
@@ -257,9 +264,15 @@ class CodexAppServerTransport:
                         if approval_handler is None:
                             raise CodexAppServerError("approval", "attention_handler_unavailable",
                                                       "typed approval requires Tanner")
+                        approval_wait_started = time.monotonic()
                         decision = approval_handler(approval,
                             timeout_seconds=self.decision_timeout_seconds,
                             process_alive=lambda: process.poll() is None)
+                        # Tanner's explicitly displayed decision window is a paused
+                        # lifecycle, not Worker execution time. Preserve the entire
+                        # remaining turn budget after the exact decision returns.
+                        deadline = extend_deadline_for_attention(
+                            deadline, approval_wait_started, time.monotonic())
                         response = approval_response(method, decision["choice"], message["params"])
                         lifecycle.append({"stage": "approval_decided", "choice": decision["choice"],
                                           **approval["protocol"]})
@@ -280,7 +293,7 @@ class CodexAppServerTransport:
                     continue
                 if method == "serverRequest/resolved" and pending_grant is not None:
                     pending_grant["decision"]["claim"]()
-                    pending_grant = None
+                    pending_grant["claimed"] = True
                     lifecycle.append({"stage": "approval_claim_consumed"})
                     continue
                 if method == "turn/completed":
@@ -303,9 +316,25 @@ class CodexAppServerTransport:
                     item = (message.get("params") or {}).get("item") or {}
                     if item.get("type") == "agentMessage" and isinstance(item.get("text"), str):
                         last_agent_text = item["text"]
+                    if (pending_grant is not None and pending_grant.get("claimed")
+                            and item.get("id") == pending_grant["approval"]["protocol"]["item_id"]
+                            and item.get("type") in {"commandExecution", "fileChange"}):
+                        complete = pending_grant["decision"].get("complete")
+                        if callable(complete):
+                            complete("completed" if item.get("status") in {None, "completed"} else "failed")
+                        pending_grant = None
                 if method in {"item/commandExecution/outputDelta", "item/commandExecution/completed",
                               "item/fileChange/completed"}:
                     lifecycle.append({"stage": method, "item_id": _safe((message.get("params") or {}).get("itemId"))})
+                    if (method.endswith("/completed") and pending_grant is not None
+                            and pending_grant.get("claimed")
+                            and (message.get("params") or {}).get("itemId") ==
+                                pending_grant["approval"]["protocol"]["item_id"]):
+                        complete = pending_grant["decision"].get("complete")
+                        if callable(complete):
+                            status = (message.get("params") or {}).get("status")
+                            complete("completed" if status in {None, "completed"} else "failed")
+                        pending_grant = None
         finally:
             if process.poll() is None:
                 process.terminate()

@@ -43,6 +43,14 @@ def _digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
+def _write_json_atomic(path, value):
+    """Durably replace one record; callers retain an explicit cross-record state."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    temporary.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    temporary.replace(path)
+
+
 def sanitize_action(value):
     text = "".join(character for character in str(value or "")[:2_000] if character.isprintable())
     text = re.sub(r"(?:https?|wss?)://\S+", "<redacted-endpoint>", text)
@@ -164,13 +172,13 @@ class DevelopmentAttentionStore:
             "protocol_binding_sha256": binding_sha,
             "created_at": created.isoformat(),
             "expires_at": (created + timedelta(seconds=expires_in_seconds)).isoformat(),
+            "consumer_state": "live",
+            "approval_outcome": "awaiting_decision",
             "detail_url": canonical_detail,
             "decision_id": None, "acknowledged": False, "creates_authority": False}
         event["record_sha256"] = _digest(event)
         self.events.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-        temporary.write_text(json.dumps(event, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        temporary.replace(path)
+        _write_json_atomic(path, event)
         return event
 
     def list(self, *, pending_only=False):
@@ -184,35 +192,51 @@ class DevelopmentAttentionStore:
     def get(self, attention_id):
         return json.loads((self.events / f"{attention_id}.json").read_text(encoding="utf-8"))
 
+    def lifecycle(self, attention_id):
+        """Return the event plus its exact decision/consumption outcome for presentation."""
+        event = self.get(attention_id)
+        decision = None
+        if event.get("decision_id"):
+            path = self.decisions / f"{event['decision_id']}.json"
+            if path.exists():
+                decision = json.loads(path.read_text(encoding="utf-8"))
+        return {"event": event, "decision": decision}
+
     def decide(self, attention_id, choice, *, authenticated_rider):
         if authenticated_rider is not True:
             raise PermissionError("authenticated Rider decision required")
         if choice not in CHOICES:
             raise ValueError("decision must be approve_once, deny, or cancel_campaign")
-        event = self.get(attention_id)
-        if event["state"] != "needs_tanner":
-            raise RuntimeError("attention event is no longer awaiting Tanner")
-        if datetime.fromisoformat(event["expires_at"]) <= datetime.now(timezone.utc):
-            raise RuntimeError("attention request is stale")
-        decision = {"schema_version": 1, "record_type": "development_attention_decision",
+        event_path = self.events / f"{attention_id}.json"
+        with _decision_lock(event_path):
+            event = self.get(attention_id)
+            if event["state"] != "needs_tanner":
+                raise RuntimeError("attention event is no longer awaiting Tanner")
+            if datetime.fromisoformat(event["expires_at"]) <= datetime.now(timezone.utc):
+                raise RuntimeError("attention request is stale")
+            if choice == "approve_once" and event.get("consumer_state", "live") == "unavailable":
+                raise RuntimeError("exact action is no longer live or durably resumable")
+            decision = {"schema_version": 1, "record_type": "development_attention_decision",
             "decision_id": f"attention-decision-{uuid.uuid4()}", "attention_id": attention_id,
             "campaign_id": event["campaign_id"], "invocation_id": event["invocation_id"],
             "choice": choice, "bounded_action_sha256": hashlib.sha256(
                 event["blocked_action"].encode()).hexdigest(),
             "protocol_binding_sha256": event.get("protocol_binding_sha256"),
             "one_time": choice == "approve_once", "consumed": False,
+            "lifecycle_state": ("recorded_pending_consumption" if choice == "approve_once"
+                                else "completed"),
             "creates_continuing_authority": False, "decided_by": "authenticated_tanner",
             "decided_at": _now()}
-        decision["record_sha256"] = _digest(decision)
-        self.decisions.mkdir(parents=True, exist_ok=True)
-        (self.decisions / f"{decision['decision_id']}.json").write_text(
-            json.dumps(decision, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        event = {**event, "state": "approved_once" if choice == "approve_once" else choice,
+            decision["record_sha256"] = _digest(decision)
+            # The decision is written first. If interruption occurs before the event
+            # projection, it remains a recoverable, explicitly unconsumed grant.
+            _write_json_atomic(self.decisions / f"{decision['decision_id']}.json", decision)
+            event = {**event, "state": "approved_once" if choice == "approve_once" else choice,
                  "decision_id": decision["decision_id"], "acknowledged": True,
-                 "decided_at": decision["decided_at"]}
-        event.pop("record_sha256", None); event["record_sha256"] = _digest(event)
-        (self.events / f"{attention_id}.json").write_text(
-            json.dumps(event, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+                 "decided_at": decision["decided_at"],
+                 "approval_outcome": decision["lifecycle_state"]}
+            event.pop("record_sha256", None); event["record_sha256"] = _digest(event)
+            _write_json_atomic(event_path, event)
         with _DECISION_CONDITION:
             _DECISION_CONDITION.notify_all()
         return {"event": event, "decision": decision}
@@ -223,9 +247,13 @@ class DevelopmentAttentionStore:
             event = json.loads(path.read_text(encoding="utf-8"))
             if event.get("process_state") == "detached":
                 return event
-            event = {**event, "process_state": "detached", "process_detached_at": _now()}
+            method = (event.get("protocol_binding") or {}).get("method")
+            resumable = method in {"item/commandExecution/requestApproval", "execCommandApproval"}
+            event = {**event, "process_state": "detached",
+                     "consumer_state": "durably_resumable" if resumable else "unavailable",
+                     "process_detached_at": _now()}
             event.pop("record_sha256", None); event["record_sha256"] = _digest(event)
-            path.write_text(json.dumps(event, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            _write_json_atomic(path, event)
             return event
 
     def wait_for_decision(self, attention_id, *, timeout_seconds, process_alive=None):
@@ -265,9 +293,13 @@ class DevelopmentAttentionStore:
                     reserved.get("continuation_id") != continuation_id or reserved.get("state") != "reserved"):
                 raise PermissionError("detached continuation is not the exact reserved process")
             decision = {**decision, "consumed": True, "consumed_at": _now(),
-                        "consumed_by_continuation_id": continuation_id}
+                        "consumed_by_continuation_id": continuation_id,
+                        "lifecycle_state": "resumed" if continuation_id else "consumed"}
             decision.pop("record_sha256", None); decision["record_sha256"] = _digest(decision)
-            path.write_text(json.dumps(decision, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            _write_json_atomic(path, decision)
+            event = {**event, "approval_outcome": decision["lifecycle_state"]}
+            event.pop("record_sha256", None); event["record_sha256"] = _digest(event)
+            _write_json_atomic(self.events / f"{attention_id}.json", event)
             return decision
 
     def reserve_detached_continuation(self, decision_id, *, attention_id, invocation_id,
@@ -287,7 +319,7 @@ class DevelopmentAttentionStore:
             decision["continuation"] = {"continuation_id": continuation_id, "state": "reserved",
                 "reserved_at": _now(), "original_protocol_binding_sha256": protocol_binding_sha256}
             decision.pop("record_sha256", None); decision["record_sha256"] = _digest(decision)
-            path.write_text(json.dumps(decision, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            _write_json_atomic(path, decision)
             return decision
 
     def finish_detached_continuation(self, decision_id, continuation_id, *, status):
@@ -300,6 +332,31 @@ class DevelopmentAttentionStore:
             if continuation.get("continuation_id") != continuation_id:
                 raise PermissionError("continuation identity mismatch")
             decision["continuation"] = {**continuation, "state": status, "finished_at": _now()}
+            decision["lifecycle_state"] = "completed" if status == "completed" else "failed_safe"
             decision.pop("record_sha256", None); decision["record_sha256"] = _digest(decision)
-            path.write_text(json.dumps(decision, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            _write_json_atomic(path, decision)
+            event = self.get(decision["attention_id"])
+            event = {**event, "approval_outcome": decision["lifecycle_state"]}
+            event.pop("record_sha256", None); event["record_sha256"] = _digest(event)
+            _write_json_atomic(self.events / f"{decision['attention_id']}.json", event)
+            return decision
+
+    def finish_live_action(self, decision_id, *, status):
+        if status not in {"completed", "failed"}:
+            raise ValueError("invalid live action status")
+        path = self.decisions / f"{decision_id}.json"
+        with _decision_lock(path):
+            decision = json.loads(path.read_text(encoding="utf-8"))
+            if not decision.get("consumed"):
+                raise RuntimeError("unconsumed approval cannot be completed")
+            if decision.get("lifecycle_state") in {"completed", "failed_safe"}:
+                return decision
+            decision["lifecycle_state"] = "completed" if status == "completed" else "failed_safe"
+            decision["finished_at"] = _now()
+            decision.pop("record_sha256", None); decision["record_sha256"] = _digest(decision)
+            _write_json_atomic(path, decision)
+            event = self.get(decision["attention_id"])
+            event = {**event, "approval_outcome": decision["lifecycle_state"]}
+            event.pop("record_sha256", None); event["record_sha256"] = _digest(event)
+            _write_json_atomic(self.events / f"{decision['attention_id']}.json", event)
             return decision

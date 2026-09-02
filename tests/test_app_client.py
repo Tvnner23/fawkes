@@ -38,6 +38,15 @@ class FawkesAppClientTests(unittest.TestCase):
         self.assertIn('"Cache-Control", "no-store"', server)
         self.assertIn("BUILD MISMATCH", source)
 
+    def test_attention_decision_outcomes_are_plain_and_fail_closed(self):
+        source = (ROOT / "src/app/static/app.js").read_text()
+        self.assertIn("recorded_pending_consumption", source)
+        self.assertIn("The exact one-time grant was consumed", source)
+        self.assertIn("restart-safe bounded continuation", source)
+        self.assertIn("exact approved action completed", source)
+        self.assertIn("approval is no longer available", source)
+        self.assertIn("Fawkes did not record an approval", source)
+
     def test_client_avoids_known_older_safari_parse_breakers(self):
         source = (ROOT / "src" / "app" / "static" / "app.js").read_text()
         self.assertNotIn("?.", source)

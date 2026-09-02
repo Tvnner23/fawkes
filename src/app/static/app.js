@@ -1047,10 +1047,21 @@ function renderDeveloperSection() {
       developerContent.append(card); return;
     }
     const attention = exactAttentionState && exactAttentionState.attention;
+    const attentionDecision = exactAttentionState && exactAttentionState.decision;
     if (!attention) { card.append(element('h2', '', 'Loading exact Tanner decision…')); developerContent.append(card); return; }
     if (attention.state !== 'needs_tanner') {
       card.append(element('h2', '', 'This attention request is already resolved'));
-      card.append(element('p', '', `Current state: ${readable(attention.state)}. No new authority can be granted from this resolved request.`));
+      const outcome=(attentionDecision&&attentionDecision.lifecycle_state)||attention.approval_outcome||attention.state;
+      const outcomeText={recorded_pending_consumption:'Tanner approved this exact action; delivery to its live or resumable consumer is pending.',consumed:'The exact one-time grant was consumed by the live invocation.',resumed:'A restart-safe bounded continuation consumed the exact one-time grant.',completed:'The exact approved action completed.',failed_safe:'The approved action or continuation failed safely without continuing authority.'}[outcome]||`Current state: ${readable(outcome)}.`;
+      card.append(element('h3', '', 'Decision outcome'),element('p', '', outcomeText));
+      card.append(element('p', '', 'No continuing authority was created, and this resolved request cannot authorize another action.'));
+      if(attentionDecision){const details=document.createElement('details');details.append(element('summary','','Technical lifecycle evidence'),element('pre','',JSON.stringify(attentionDecision,null,2)));card.append(details);}
+      developerContent.append(card); return;
+    }
+    if (attention.consumer_state === 'unavailable' || (attention.expires_at && Date.parse(attention.expires_at) <= Date.now())) {
+      card.append(element('h2', '', 'This approval is no longer available'));
+      card.append(element('p', '', attention.consumer_state === 'unavailable' ? 'The exact action is no longer live or safely resumable. Fawkes did not record an approval.' : 'The displayed decision period expired. Fawkes did not record an approval.'));
+      card.append(element('p', '', 'Deny or cancel remains available through the campaign boundary; a new action requires a new typed request.'));
       developerContent.append(card); return;
     }
     const rawAction=String(attention.blocked_action||'');

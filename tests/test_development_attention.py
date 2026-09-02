@@ -68,9 +68,48 @@ class DevelopmentAttentionTests(unittest.TestCase):
         consumed = self.store.consume_approve_once(decision["decision_id"],
             attention_id=event["attention_id"], invocation_id="synthetic-worker-1")
         self.assertTrue(consumed["consumed"])
+        self.assertEqual(consumed["lifecycle_state"], "consumed")
+        lifecycle = self.store.lifecycle(event["attention_id"])
+        self.assertEqual(lifecycle["event"]["approval_outcome"], "consumed")
         with self.assertRaises(PermissionError):
             self.store.consume_approve_once(decision["decision_id"],
                 attention_id=event["attention_id"], invocation_id="synthetic-worker-1")
+
+    def test_detached_unreconstructable_action_rejects_misleading_approval(self):
+        event = self.store.create(campaign_id="synthetic-attention-campaign-2",
+            invocation_id="synthetic-reviewer-1", worker=self.worker,
+            kind="native_codex_approval_required", blocked_action="change candidate",
+            why_required="write requested", requested_authority="one file change",
+            protocol_binding={"method": "item/fileChange/requestApproval"})
+        detached = self.store.mark_process_detached(event["attention_id"])
+        self.assertEqual(detached["consumer_state"], "unavailable")
+        with self.assertRaisesRegex(RuntimeError, "no longer live or durably resumable"):
+            self.store.decide(event["attention_id"], "approve_once", authenticated_rider=True)
+        self.assertEqual(self.store.get(event["attention_id"])["state"], "needs_tanner")
+
+    def test_detached_exact_command_remains_boundedly_resumable(self):
+        event = self.store.create(campaign_id="synthetic-attention-campaign-3",
+            invocation_id="synthetic-worker-3", worker=self.worker,
+            kind="native_codex_approval_required", blocked_action="echo harmless",
+            why_required="protected boundary", requested_authority="one command",
+            protocol_binding={"method": "item/commandExecution/requestApproval"})
+        detached = self.store.mark_process_detached(event["attention_id"])
+        self.assertEqual(detached["consumer_state"], "durably_resumable")
+        result = self.store.decide(event["attention_id"], "approve_once", authenticated_rider=True)
+        self.assertEqual(result["decision"]["lifecycle_state"], "recorded_pending_consumption")
+
+    def test_live_action_completion_is_visible_and_execute_at_most_once(self):
+        event = self.create()
+        decision = self.store.decide(event["attention_id"], "approve_once",
+                                     authenticated_rider=True)["decision"]
+        self.store.consume_approve_once(decision["decision_id"], attention_id=event["attention_id"],
+                                        invocation_id="synthetic-worker-1")
+        completed = self.store.finish_live_action(decision["decision_id"], status="completed")
+        self.assertEqual(completed["lifecycle_state"], "completed")
+        self.assertEqual(self.store.lifecycle(event["attention_id"])["event"]["approval_outcome"],
+                         "completed")
+        self.assertEqual(self.store.finish_live_action(decision["decision_id"], status="completed"),
+                         completed)
 
     def test_deny_and_cancel_are_exact_choices(self):
         event = self.create()
