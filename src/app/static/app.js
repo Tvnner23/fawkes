@@ -1058,6 +1058,18 @@ function renderDeveloperSection() {
       if(attentionDecision){const details=document.createElement('details');details.append(element('summary','','Technical lifecycle evidence'),element('pre','',JSON.stringify(attentionDecision,null,2)));card.append(details);}
       developerContent.append(card); return;
     }
+    if (attention.expires_at) {
+      const deadline=element('section','attention-urgent');
+      const timezone=Intl.DateTimeFormat().resolvedOptions().timeZone||'local timezone';
+      const remaining=element('p','attention-countdown');
+      const updateRemaining=()=>{const seconds=Math.max(0,Math.ceil((Date.parse(attention.expires_at)-Date.now())/1000));const minutes=Math.floor(seconds/60);remaining.textContent=`Time remaining: ${minutes}m ${seconds%60}s`;if(seconds>0)window.setTimeout(updateRemaining,1000);};
+      deadline.append(element('h2','',`URGENT — TANNER DECISION REQUIRED BEFORE ${dateLabel(attention.expires_at)} (${timezone})`),remaining,
+        element('p','',`Why this deadline exists: ${attention.expiration_reason||'The exact action has a bounded safety lifetime.'}`),
+        element('p','',`If Tanner does nothing: ${attention.expiration_effect||'The request expires and fails closed.'}`),
+        element('p','',attention.can_request_again===true?'Fawkes may create a new exact request with new evidence if the action is still required.':'A replacement request is not currently confirmed.'),
+        element('p','',attention.work_lost===true?'Some work or opportunity may be lost at expiry.':'No completed work or opportunity is expected to be lost; the blocked action remains unperformed.'));
+      card.append(deadline);updateRemaining();
+    }
     if (attention.consumer_state === 'unavailable' || (attention.expires_at && Date.parse(attention.expires_at) <= Date.now())) {
       card.append(element('h2', '', 'This approval is no longer available'));
       card.append(element('p', '', attention.consumer_state === 'unavailable' ? 'The exact action is no longer live or safely resumable. Fawkes did not record an approval.' : 'The displayed decision period expired. Fawkes did not record an approval.'));
@@ -1075,7 +1087,7 @@ function renderDeveloperSection() {
      ['What will not change','No continuing authority, campaign scope, production release, credentials, or default policy will change.'],
      ['Who or what is affected','Only this Development campaign and its current Worker attempt.'],
      ['Risk level',harmlessNoop?'Low — the command exits successfully without writing files or changing configuration.':'Not automatically classified — review the stated action and material risks before deciding.'],
-     ['Reversibility',reversible],['Permission duration',`One use before ${dateLabel(attention.expires_at)}; afterward it is stale.`],
+     ['Reversibility',reversible],['Permission duration',attention.expires_at?`One use before ${dateLabel(attention.expires_at)}; afterward it is stale.`:'No arbitrary countdown. This request remains pending until resolved or its underlying action becomes unavailable.'],
      ['Continuing authority','None. Approval is consumed by this exact action and cannot authorize later work.'],
      ['Fawkes’s recommendation',harmlessNoop?'Approve Once is reasonable for this qualification because the exact command is a no-op and creates no continuing authority.':'No recommendation is available; Tanner should decide from the stated risk and scope.']].forEach(([label,value])=>{const section=element('section','attention-summary');section.append(element('h3','',label),element('p','',value));card.append(section);});
     const technical=document.createElement('details');technical.className='attention-technical';technical.append(element('summary','','Technical details'),element('pre','',JSON.stringify({campaign_id:attention.campaign_id,invocation_id:attention.invocation_id,worker:attention.worker,exact_action:attention.blocked_action,requested_authority:attention.requested_authority,resources:attention.resources,reversible:attention.reversible,expires_at:attention.expires_at,provider_code:attention.provider_code,protocol_binding:attention.protocol_binding},null,2)));card.append(technical);

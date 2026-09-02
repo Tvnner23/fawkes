@@ -271,7 +271,12 @@ class CodexDevelopmentCampaign:
             requested_authority=approval["requested_authority"],
             resources=approval["resources"], reversible=approval["reversible"],
             provider_code=approval["provider_code"],
-            protocol_binding=approval["protocol"], expires_in_seconds=timeout_seconds)
+            protocol_binding=approval["protocol"], expires_in_seconds=timeout_seconds,
+            expiration_reason=("This exact typed request is bound to a frozen candidate and one "
+                               "app-server invocation; indefinite reuse would become stale authority."),
+            expiration_effect=("The exact request and any unconsumed grant become invalid and the "
+                               "blocked action remains unperformed."),
+            can_request_again=True, work_lost=False)
         attention_id = paused["needs_tanner"]["attention_id"]
         result = self.attention_store.wait_for_decision(
             attention_id, timeout_seconds=timeout_seconds, process_alive=process_alive)
@@ -400,7 +405,9 @@ class CodexDevelopmentCampaign:
     def require_tanner(self, campaign_id, *, invocation_id, worker, kind,
                        blocked_action, why_required, requested_authority,
                        resources=(), reversible=None, provider_code=None,
-                       protocol_binding=None, expires_in_seconds=3600):
+                       protocol_binding=None, expires_in_seconds=None,
+                       expiration_reason=None, expiration_effect=None,
+                       can_request_again=None, work_lost=None):
         """Pause one exact campaign action at the durable Rider boundary."""
         record = self.store.load(campaign_id)
         if record["cancelled"] or record["status"] in {"succeeded", "cancelled"}:
@@ -410,11 +417,17 @@ class CodexDevelopmentCampaign:
             kind=kind, blocked_action=blocked_action, why_required=why_required,
             requested_authority=requested_authority, resources=resources,
             reversible=reversible, provider_code=provider_code,
-            protocol_binding=protocol_binding, expires_in_seconds=expires_in_seconds)
+            protocol_binding=protocol_binding, expires_in_seconds=expires_in_seconds,
+            expiration_reason=expiration_reason, expiration_effect=expiration_effect,
+            can_request_again=can_request_again, work_lost=work_lost)
         needs = {"urgency": "urgent_blocking_flow", "reason": kind,
                  "decision_needed": "Approve this exact action once, deny it, or cancel the campaign",
                  "attention_id": event["attention_id"], "invocation_id": invocation_id,
                  "detail_url": event["detail_url"],
+                 "urgency": event["urgency"], "expires_at": event["expires_at"],
+                 "expiration_reason": event["expiration_reason"],
+                 "expiration_effect": event["expiration_effect"],
+                 "can_request_again": event["can_request_again"], "work_lost": event["work_lost"],
                  "worker_id": worker["worker_id"], "requested_authority": event["requested_authority"]}
         return self._update(record, event_kind="tanner_attention_required",
             event_detail={"attention_id": event["attention_id"], "invocation_id": invocation_id,

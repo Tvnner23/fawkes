@@ -7,7 +7,7 @@ import unittest
 from src.runtime.autonomy_supervision import (
     PROGRESS_INTERVAL_SECONDS, RiderActivityStore, RiderNotificationStore,
     TannerAttentionTransportRegistry,
-    campaign_activity_projection, notification_eligibility,
+    campaign_activity_projection, expiration_reminder_stage, notification_eligibility,
     retain_needs_tanner_notification,
 )
 
@@ -52,6 +52,7 @@ class AutonomySupervisionTests(unittest.TestCase):
         intent = notification_eligibility(record, now=now, rider_last_active_at=now)
         self.assertEqual(intent["kind"], "needs_tanner")
         self.assertTrue(intent["bypasses_quiet_hours"])
+        self.assertIsNone(expiration_reminder_stage(record["needs_tanner"]))
 
     def test_progress_requires_three_hours_inactivity_and_quiet_configuration(self):
         now = datetime(2026, 9, 1, 12, tzinfo=timezone.utc)
@@ -112,6 +113,30 @@ class AutonomySupervisionTests(unittest.TestCase):
             self.assertNotIn("token=", first["message"].lower())
             self.assertIn("grants no authority", first["message"])
             self.assertFalse(first["creates_authority"])
+
+    def test_expiring_attention_is_urgent_on_every_transport_and_stage_deduplicates(self):
+        attention_id = "attention-" + "e" * 64
+        expires = datetime.now(timezone.utc) + timedelta(minutes=10)
+        needs = {"reason": "exact typed action is paused", "attention_id": attention_id,
+            "detail_url": "http://localhost:8787/?view=developer&section=attention&attention=" + attention_id,
+            "expires_at": expires.isoformat(), "urgency": "urgent_expiring"}
+        self.assertEqual(expiration_reminder_stage(needs), "fifteen_minutes")
+        record = self.record(status="tanner_escalation", needs=needs)
+        record.update({"instance_id": "phoenix", "record_sha256": "a" * 64})
+        received = {"discord": [], "future": []}
+        registry = TannerAttentionTransportRegistry()
+        registry.register("discord", lambda message: received["discord"].append(message) or {},
+                          endpoint_authorized=True)
+        registry.register("future", lambda message: received["future"].append(message) or {},
+                          endpoint_authorized=True)
+        with tempfile.TemporaryDirectory() as directory:
+            first = retain_needs_tanner_notification(record, root=directory, registry=registry)
+            second = retain_needs_tanner_notification(record, root=directory, registry=registry)
+        self.assertIn("URGENT — TANNER DECISION REQUIRED BEFORE", first["message"])
+        self.assertEqual(len(received["discord"]), 1)
+        self.assertEqual(len(received["future"]), 1)
+        self.assertEqual(first["notification_id"], second["notification_id"])
+        self.assertFalse(first["creates_authority"])
 
     def test_registered_transport_receives_producer_canonical_detail_url(self):
         attention_id = "attention-" + "c" * 64

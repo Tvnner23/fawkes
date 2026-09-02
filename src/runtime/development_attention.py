@@ -139,8 +139,9 @@ class DevelopmentAttentionStore:
 
     def create(self, *, campaign_id, invocation_id, worker, kind, blocked_action,
                why_required, requested_authority, resources=(), reversible=None,
-               provider_code=None, expires_in_seconds=3600, detail_url=None,
-               protocol_binding=None):
+               provider_code=None, expires_in_seconds=None, detail_url=None,
+               protocol_binding=None, expiration_reason=None,
+               expiration_effect=None, can_request_again=None, work_lost=None):
         binding = dict(protocol_binding or {})
         binding_sha = _digest(binding) if binding else None
         logical = {"campaign_id": campaign_id, "invocation_id": invocation_id,
@@ -157,6 +158,10 @@ class DevelopmentAttentionStore:
             logical_id, environment=self.environment)
         if detail_url is not None and detail_url != canonical_detail:
             raise ValueError("supplied attention detail URL conflicts with canonical route")
+        if expires_in_seconds is not None and not all((expiration_reason, expiration_effect,
+                                                       can_request_again is not None,
+                                                       work_lost is not None)):
+            raise ValueError("expiring attention requires a complete justification")
         event = {"schema_version": 1, "record_type": "development_attention_event",
             "attention_id": logical_id, "logical_identity_sha256": _digest(logical),
             "campaign_id": campaign_id, "invocation_id": invocation_id,
@@ -171,7 +176,13 @@ class DevelopmentAttentionStore:
             "protocol_binding": binding or None,
             "protocol_binding_sha256": binding_sha,
             "created_at": created.isoformat(),
-            "expires_at": (created + timedelta(seconds=expires_in_seconds)).isoformat(),
+            "expires_at": ((created + timedelta(seconds=expires_in_seconds)).isoformat()
+                           if expires_in_seconds is not None else None),
+            "urgency": "urgent_expiring" if expires_in_seconds is not None else "normal",
+            "expiration_reason": sanitize_action(expiration_reason) if expiration_reason else None,
+            "expiration_effect": sanitize_action(expiration_effect) if expiration_effect else None,
+            "can_request_again": can_request_again,
+            "work_lost": work_lost,
             "consumer_state": "live",
             "approval_outcome": "awaiting_decision",
             "detail_url": canonical_detail,
@@ -184,7 +195,7 @@ class DevelopmentAttentionStore:
     def list(self, *, pending_only=False):
         if not self.events.exists():
             return []
-        records = [json.loads(path.read_text(encoding="utf-8")) for path in self.events.glob("*.json")]
+        records = [self.refresh_expiration(path.stem) for path in self.events.glob("*.json")]
         if pending_only:
             records = [item for item in records if item["state"] == "needs_tanner"]
         return sorted(records, key=lambda item: item["created_at"], reverse=True)
@@ -192,9 +203,22 @@ class DevelopmentAttentionStore:
     def get(self, attention_id):
         return json.loads((self.events / f"{attention_id}.json").read_text(encoding="utf-8"))
 
+    def refresh_expiration(self, attention_id, *, now=None):
+        path = self.events / f"{attention_id}.json"
+        with _decision_lock(path):
+            event = json.loads(path.read_text(encoding="utf-8"))
+            current = datetime.now(timezone.utc) if now is None else now
+            if (event.get("state") == "needs_tanner" and event.get("expires_at")
+                    and datetime.fromisoformat(event["expires_at"]) <= current):
+                event = {**event, "state": "expired", "approval_outcome": "expired",
+                         "expired_at": current.isoformat(), "creates_authority": False}
+                event.pop("record_sha256", None); event["record_sha256"] = _digest(event)
+                _write_json_atomic(path, event)
+            return event
+
     def lifecycle(self, attention_id):
         """Return the event plus its exact decision/consumption outcome for presentation."""
-        event = self.get(attention_id)
+        event = self.refresh_expiration(attention_id)
         decision = None
         if event.get("decision_id"):
             path = self.decisions / f"{event['decision_id']}.json"
@@ -212,7 +236,11 @@ class DevelopmentAttentionStore:
             event = self.get(attention_id)
             if event["state"] != "needs_tanner":
                 raise RuntimeError("attention event is no longer awaiting Tanner")
-            if datetime.fromisoformat(event["expires_at"]) <= datetime.now(timezone.utc):
+            if event.get("expires_at") and datetime.fromisoformat(event["expires_at"]) <= datetime.now(timezone.utc):
+                event = {**event, "state": "expired", "approval_outcome": "expired",
+                         "expired_at": _now(), "creates_authority": False}
+                event.pop("record_sha256", None); event["record_sha256"] = _digest(event)
+                _write_json_atomic(event_path, event)
                 raise RuntimeError("attention request is stale")
             if choice == "approve_once" and event.get("consumer_state", "live") == "unavailable":
                 raise RuntimeError("exact action is no longer live or durably resumable")
@@ -260,12 +288,12 @@ class DevelopmentAttentionStore:
         deadline = time.monotonic() + timeout_seconds
         with _DECISION_CONDITION:
             while True:
-                event = self.get(attention_id)
+                event = self.refresh_expiration(attention_id)
+                if event["state"] == "expired":
+                    raise TimeoutError("Tanner decision request expired")
                 if event["state"] != "needs_tanner":
                     decision = json.loads((self.decisions / f"{event['decision_id']}.json").read_text(encoding="utf-8"))
                     return {"event": event, "decision": decision}
-                if datetime.fromisoformat(event["expires_at"]) <= datetime.now(timezone.utc):
-                    raise TimeoutError("Tanner decision request expired")
                 if process_alive is not None and not process_alive():
                     event = self.mark_process_detached(attention_id)
                 remaining = deadline - time.monotonic()
@@ -313,7 +341,8 @@ class DevelopmentAttentionStore:
                     or decision.get("invocation_id") != invocation_id
                     or decision.get("protocol_binding_sha256") != protocol_binding_sha256
                     or event.get("state") != "approved_once"
-                    or datetime.fromisoformat(event["expires_at"]) <= datetime.now(timezone.utc)
+                    or (event.get("expires_at") and
+                        datetime.fromisoformat(event["expires_at"]) <= datetime.now(timezone.utc))
                     or decision.get("continuation") is not None):
                 raise PermissionError("detached continuation grant is stale, mismatched, or replayed")
             decision["continuation"] = {"continuation_id": continuation_id, "state": "reserved",

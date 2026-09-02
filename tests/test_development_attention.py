@@ -2,6 +2,7 @@ import json
 import subprocess
 import tempfile
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from src.runtime.development_attention import (
@@ -36,6 +37,8 @@ class DevelopmentAttentionTests(unittest.TestCase):
         self.assertEqual(len(self.store.list()), 1)
         self.assertFalse(first["creates_authority"])
         self.assertEqual(first["state"], "needs_tanner")
+        self.assertIsNone(first["expires_at"])
+        self.assertEqual(first["urgency"], "normal")
         self.assertIn("section=attention&attention=" + first["attention_id"], first["detail_url"])
 
     def test_attention_detail_url_enforces_local_and_authenticated_remote_origins(self):
@@ -92,11 +95,43 @@ class DevelopmentAttentionTests(unittest.TestCase):
             invocation_id="synthetic-worker-3", worker=self.worker,
             kind="native_codex_approval_required", blocked_action="echo harmless",
             why_required="protected boundary", requested_authority="one command",
-            protocol_binding={"method": "item/commandExecution/requestApproval"})
+            protocol_binding={"method": "item/commandExecution/requestApproval"},
+            expires_in_seconds=3600, expiration_reason="candidate staleness",
+            expiration_effect="request fails closed", can_request_again=True, work_lost=False)
         detached = self.store.mark_process_detached(event["attention_id"])
         self.assertEqual(detached["consumer_state"], "durably_resumable")
         result = self.store.decide(event["attention_id"], "approve_once", authenticated_rider=True)
         self.assertEqual(result["decision"]["lifecycle_state"], "recorded_pending_consumption")
+
+    def test_expiration_requires_justification_and_silence_never_approves(self):
+        with self.assertRaisesRegex(ValueError, "complete justification"):
+            self.store.create(campaign_id="expiring", invocation_id="invocation",
+                worker=self.worker, kind="native_codex_approval_required",
+                blocked_action="noop", why_required="boundary",
+                requested_authority="once", expires_in_seconds=60)
+        event = self.store.create(campaign_id="expiring-valid", invocation_id="invocation",
+            worker=self.worker, kind="native_codex_approval_required",
+            blocked_action="noop", why_required="boundary", requested_authority="once",
+            expires_in_seconds=60, expiration_reason="exact action staleness",
+            expiration_effect="action remains unperformed", can_request_again=True,
+            work_lost=False)
+        self.assertEqual(event["urgency"], "urgent_expiring")
+        self.assertEqual(event["approval_outcome"], "awaiting_decision")
+        self.assertFalse(event["creates_authority"])
+        expired = self.store.refresh_expiration(event["attention_id"],
+            now=datetime.fromisoformat(event["expires_at"]) + timedelta(seconds=1))
+        self.assertEqual(expired["state"], "expired")
+        self.assertFalse(expired["creates_authority"])
+        with self.assertRaisesRegex(RuntimeError, "no longer awaiting"):
+            self.store.decide(event["attention_id"], "approve_once", authenticated_rider=True)
+        replacement = self.store.create(campaign_id="expiring-valid",
+            invocation_id="invocation-new", worker=self.worker,
+            kind="native_codex_approval_required", blocked_action="noop",
+            why_required="boundary", requested_authority="once", expires_in_seconds=60,
+            expiration_reason="exact action staleness",
+            expiration_effect="action remains unperformed", can_request_again=True,
+            work_lost=False)
+        self.assertNotEqual(replacement["attention_id"], event["attention_id"])
 
     def test_live_action_completion_is_visible_and_execute_at_most_once(self):
         event = self.create()

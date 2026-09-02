@@ -185,6 +185,26 @@ def configured_attention_transports(environment=None):
     return registry
 
 
+def expiration_reminder_stage(needs, *, now=None):
+    """Return one stable escalation stage; ordinary attention has no countdown."""
+    if not needs.get("expires_at"):
+        return None
+    now = _utc(now or datetime.now(timezone.utc))
+    expires = _utc(needs["expires_at"])
+    remaining = (expires - now).total_seconds()
+    if remaining <= 0:
+        return "expired"
+    # Typed approval windows are currently one hour. Stable thresholds make
+    # repeated projections idempotent within each increasingly urgent stage.
+    if remaining <= 300:
+        return "five_minutes"
+    if remaining <= 900:
+        return "fifteen_minutes"
+    if remaining <= 1800:
+        return "half_window"
+    return "initial"
+
+
 def retain_needs_tanner_notification(record, *, root=NOTIFICATION_ROOT, registry=None):
     """Retain one sanitized logical alert for each material blocker state."""
     needs = record.get("needs_tanner")
@@ -197,11 +217,15 @@ def retain_needs_tanner_notification(record, *, root=NOTIFICATION_ROOT, registry
         validate_attention_detail_url(detail_url, attention_id)
     else:
         detail_url = ""
-    state_key = hashlib.sha256(json.dumps(needs, sort_keys=True).encode()).hexdigest()
+    reminder_stage = expiration_reminder_stage(needs)
+    state_key = hashlib.sha256(json.dumps(
+        {"needs": needs, "reminder_stage": reminder_stage}, sort_keys=True).encode()).hexdigest()
     store = RiderNotificationStore(record["instance_id"], root=root)
     notification, _ = store.create_once(kind="needs_tanner",
         campaign_id=record["campaign_id"], state_key=state_key,
-        message=(f"Fawkes paused {record['campaign_id']} because {reason}. Tanner's decision is required.\n\n"
+        message=((f"URGENT — TANNER DECISION REQUIRED BEFORE {needs['expires_at']}\n"
+                  if needs.get("expires_at") else "")
+                 + f"Fawkes paused {record['campaign_id']} because {reason}. Tanner's decision is required.\n\n"
                  f"**Review and decide:** {detail_url}\n"
                  + ("Open on the Fawkes PC.\n" if detail_url.startswith("http://localhost") else "")
                  + "Opening this link or receiving this notification grants no authority."),
