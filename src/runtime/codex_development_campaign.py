@@ -21,6 +21,9 @@ from src.runtime.disposable_verifier import DisposableVerifierWorkspace
 from src.runtime.worker_exchange import WorkerExchange, _digest, body_free_references
 from src.runtime.autonomy_supervision import campaign_activity_projection, retain_needs_tanner_notification
 from src.runtime.development_attention import DevelopmentAttentionStore
+from src.runtime.codex_worker_adapter import (
+    DEFAULT_TIMEOUT_SECONDS, _runtime_state_root, minimal_subprocess_environment,
+)
 
 
 ROOT = Path(os.environ.get(
@@ -244,7 +247,8 @@ class CodexDevelopmentCampaign:
     """Deterministic coordinator for one fixed builder and reviewer slot."""
 
     def __init__(self, instance_id, *, root=None, exchange=None, builder_runner=None,
-                 builder_modes=None, attention_store=None):
+                 builder_modes=None, attention_store=None, runtime_state_root=None,
+                 worker_timeout_seconds=DEFAULT_TIMEOUT_SECONDS):
         self.instance_id = require_id(instance_id, "instance_id")
         self.store = DevelopmentCampaignStore(instance_id, root=root)
         self.supervision_root = (Path(root).parent / "component_supervision"
@@ -253,13 +257,19 @@ class CodexDevelopmentCampaign:
         self.builder_runner = builder_runner or self._run_promoted_builder
         self.builder_modes = set(builder_modes or {"read_only", "repository_write"})
         self.attention_store = attention_store or DevelopmentAttentionStore()
+        self.runtime_state_root = _runtime_state_root(runtime_state_root, workspace=ROOT)
+        self.worker_timeout_seconds = int(worker_timeout_seconds)
+        if self.worker_timeout_seconds <= 0:
+            raise ValueError("worker timeout must be positive")
         if not self.builder_modes <= BUILDER_MODES:
             raise ValueError("invalid builder execution mode")
 
     def _run_promoted_builder(self, payload):
         return run_codex_development_handoff(instance_id=self.instance_id, payload=payload,
             authenticated_rider=True, exchange=self.exchange,
-            approval_handler=self._handle_typed_approval)
+            approval_handler=self._handle_typed_approval,
+            worker_timeout_seconds=self.worker_timeout_seconds,
+            runtime_state_root=self.runtime_state_root)
 
     def _handle_typed_approval(self, approval, *, timeout_seconds, process_alive=None):
         """Project one exact typed request into the accepted Rider boundary."""
@@ -596,11 +606,11 @@ class CodexDevelopmentCampaign:
             builder_runs=runs, active_builder_task_scope_id=None, cache_lifecycle_events=cache_events,
             event_detail={"iteration": next_iteration, "return_report_id": run["return_report_id"]})
 
-    @staticmethod
-    def _run_validation(commands):
+    def _run_validation(self, commands):
         evidence = []
-        environment = {key: os.environ[key] for key in ("PATH", "LANG", "LC_ALL") if key in os.environ}
-        environment["PYTHONDONTWRITEBYTECODE"] = "1"
+        environment = minimal_subprocess_environment(
+            runtime_state_root=self.runtime_state_root, workspace=ROOT,
+            PYTHONDONTWRITEBYTECODE="1")
         for argv in commands:
             completed = subprocess.run(argv, cwd=ROOT, env=environment, capture_output=True,
                                        text=True, encoding="utf-8", errors="replace",

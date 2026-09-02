@@ -7,11 +7,13 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from src.runtime.codex_development_campaign import (
     CAMPAIGN_ACCEPTANCE_CONTRACT, CAMPAIGN_CONTRACT_VERSION, MAX_ITERATIONS,
     DEFAULT_REVIEWER_BINDING_ASSURANCE, DEFAULT_REVIEWER_ROLE, DEFAULT_REVIEWER_WORKER_ID,
     FORMAL_REVIEW_ROLE,
+    ROOT,
     CodexDevelopmentCampaign,
     _cleanup_python_cache,
 )
@@ -133,6 +135,39 @@ class CampaignFixture:
 
 
 class CodexDevelopmentCampaignTests(unittest.TestCase):
+    def test_campaign_validation_uses_shared_external_environment_without_secrets(self):
+        external = Path(self.tmp.name) / "external-state"
+        external.mkdir()
+        campaign = CodexDevelopmentCampaign("fawkes",
+            root=Path(self.tmp.name) / "validation-campaigns",
+            runtime_state_root=external, worker_timeout_seconds=1800)
+        captured = []
+
+        def run(argv, **kwargs):
+            captured.append((argv, kwargs))
+            return type("Completed", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+        with patch.dict(os.environ, {"UNRELATED_HOST_SETTING": "not-forwarded"}, clear=False), patch(
+                                         "src.runtime.codex_development_campaign.subprocess.run",
+                                         side_effect=run):
+            evidence = campaign._run_validation([["python3", "-m", "unittest"]])
+        self.assertEqual(evidence[0]["exit_status"], 0)
+        environment = captured[0][1]["env"]
+        self.assertEqual(environment["FAWKES_RUNTIME_STATE_ROOT"], str(external.resolve()))
+        self.assertNotIn("UNRELATED_HOST_SETTING", environment)
+        self.assertEqual(campaign.worker_timeout_seconds, 1800)
+
+    def test_campaign_validation_preserves_default_and_rejects_invalid_roots(self):
+        campaign = CodexDevelopmentCampaign("fawkes",
+            root=Path(self.tmp.name) / "default-campaigns")
+        self.assertIsNone(campaign.runtime_state_root)
+        self.assertEqual(campaign.worker_timeout_seconds, 180)
+        for value in ("relative", ROOT, Path(self.tmp.name) / "missing"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                CodexDevelopmentCampaign("fawkes",
+                    root=Path(self.tmp.name) / "invalid-campaigns",
+                    runtime_state_root=value)
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
         self.fixture = CampaignFixture(Path(self.tmp.name))

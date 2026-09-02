@@ -113,7 +113,9 @@ def _presentation(*, target, package, result, exchange):
 
 def run_codex_development_handoff(*, instance_id, payload, authenticated_rider,
                                   workspace=ROOT, exchange=None, adapter=None,
-                                  now=None, approval_handler=None):
+                                  now=None, approval_handler=None,
+                                  worker_timeout_seconds=180,
+                                  runtime_state_root=None):
     """Prepare, send, retain, and present one explicitly selected Codex task."""
     if authenticated_rider is not True:
         raise PermissionError("authenticated rider authority is required")
@@ -147,9 +149,12 @@ def run_codex_development_handoff(*, instance_id, payload, authenticated_rider,
         runner = exec_compatible_app_server_runner(campaign_id=payload.get("campaign_id") or task_scope_id,
             invocation_id=invocation_id, worker=target["worker"],
             approval_handler=approval_handler)
-        adapter = (CodexWriteBuilderAdapter(exchange, workspace=workspace, run_process=runner)
+        adapter_arguments = {"workspace": workspace, "run_process": runner,
+            "timeout_seconds": worker_timeout_seconds,
+            "runtime_state_root": runtime_state_root}
+        adapter = (CodexWriteBuilderAdapter(exchange, **adapter_arguments)
                    if execution_mode == "repository_write"
-                   else CodexExecWorkerAdapter(exchange, workspace=workspace, run_process=runner))
+                   else CodexExecWorkerAdapter(exchange, **adapter_arguments))
     timestamp = now or datetime.now(timezone.utc)
     expires_at = (timestamp + timedelta(minutes=30)).isoformat()
     authorization_reference = f"rider-codex-development-{request_id}"
