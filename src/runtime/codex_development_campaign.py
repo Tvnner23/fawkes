@@ -423,6 +423,7 @@ class CodexDevelopmentCampaign:
             expiration_reason=expiration_reason, expiration_effect=expiration_effect,
             can_request_again=can_request_again, work_lost=work_lost)
         needs = {"urgency": "urgent_blocking_flow", "reason": kind,
+                 "plain_reason": event["why_required"],
                  "decision_needed": "Approve this exact action once, deny it, or cancel the campaign",
                  "attention_id": event["attention_id"], "invocation_id": invocation_id,
                  "detail_url": event["detail_url"],

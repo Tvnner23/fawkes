@@ -6,6 +6,8 @@ import json
 import os
 import socket
 import hashlib
+import secrets
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
@@ -16,6 +18,36 @@ from src.runtime.autonomy_supervision import RiderActivityStore
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 MAX_BODY_BYTES = 22 * 1024 * 1024
+SESSION_COOKIE = "fawkes_app_session"
+SESSION_MAX_AGE_SECONDS = 30 * 24 * 60 * 60
+
+
+class BrowserSessionStore:
+    """Protected revocable browser sessions; only token digests reach disk."""
+    def __init__(self, root):
+        self.root = Path(root)
+
+    def create(self):
+        token = secrets.token_urlsafe(32)
+        digest = hashlib.sha256(token.encode()).hexdigest()
+        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.root.chmod(0o700)
+        path = self.root / f"{digest}.json"
+        temporary = self.root / f".{digest}.{secrets.token_hex(8)}.tmp"
+        temporary.write_text(json.dumps({"schema_version": 1, "expires_epoch": int(time.time()) + SESSION_MAX_AGE_SECONDS}), encoding="utf-8")
+        temporary.chmod(0o600); temporary.replace(path)
+        path.chmod(0o600)
+        return token
+
+    def valid(self, token):
+        if not token:
+            return False
+        path = self.root / f"{hashlib.sha256(token.encode()).hexdigest()}.json"
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+            return value.get("schema_version") == 1 and int(value["expires_epoch"]) > int(time.time())
+        except (OSError, ValueError, KeyError, json.JSONDecodeError):
+            return False
 
 
 def build_identity():
@@ -62,9 +94,21 @@ class FawkesAppHandler(BaseHTTPRequestHandler):
             return True
         supplied = self.headers.get("Authorization", "")
         prefix = "Bearer "
-        return supplied.startswith(prefix) and hmac.compare_digest(
-            supplied[len(prefix):], expected
-        )
+        if supplied.startswith(prefix) and hmac.compare_digest(supplied[len(prefix):], expected):
+            return True
+        cookies = {}
+        for part in self.headers.get("Cookie", "").split(";"):
+            name, separator, value = part.strip().partition("=")
+            if separator: cookies[name] = value
+        return self.server.app_session_store.valid(cookies.get(SESSION_COOKIE, ""))
+
+    def _establish_session(self):
+        value = self.server.app_session_store.create()
+        secure = "; Secure" if self.headers.get("X-Forwarded-Proto", "").lower() == "https" else ""
+        self.send_response(204)
+        self.send_header("Set-Cookie", f"{SESSION_COOKIE}={value}; Path=/; HttpOnly; SameSite=Strict; Max-Age={SESSION_MAX_AGE_SECONDS}{secure}")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
 
     def _require_auth(self):
         if self._authorized():
@@ -99,6 +143,7 @@ class FawkesAppHandler(BaseHTTPRequestHandler):
         if path == "/api/status":
             self._json(200, {"service": "fawkes", "state": "ready", "build": build_identity()})
             return
+
         if path == "/api/chat":
             if not self._require_auth():
                 return
@@ -270,6 +315,17 @@ class FawkesAppHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
+        if path == "/api/session":
+            try:
+                credential = self._read_json().get("credential", "")
+            except ChatServiceError:
+                self._json(400, {"error": {"code": "invalid_session_request", "message": "A Fawkes app credential is required."}})
+                return
+            if not self.server.app_token or not hmac.compare_digest(str(credential), self.server.app_token):
+                self._json(401, {"error": {"code": "unauthorized", "message": "That Fawkes app credential was not accepted."}})
+                return
+            self._establish_session()
+            return
         observation_prefix = "/api/development/observations/"
         proposal_prefix = "/api/development/proposals/"
         test_prefix = "/api/development/test-center/tests/"
@@ -603,10 +659,13 @@ class FawkesAppHandler(BaseHTTPRequestHandler):
 class FawkesAppServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, address, *, chat_service, app_token):
+    def __init__(self, address, *, chat_service, app_token, app_session_store=None):
         super().__init__(address, FawkesAppHandler)
         self.chat_service = chat_service
         self.app_token = app_token
+        state_root = Path(os.environ.get("FAWKES_DEVELOPMENT_ROOT", Path.cwd()))
+        self.app_session_store = app_session_store or BrowserSessionStore(
+            os.environ.get("FAWKES_APP_SESSION_ROOT", state_root / "database" / "app_sessions"))
 
 
 def main():

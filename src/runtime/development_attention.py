@@ -284,6 +284,25 @@ class DevelopmentAttentionStore:
             _write_json_atomic(path, event)
             return event
 
+    def cancel_unresolved_qualification(self, attention_id, *, authorization_reference):
+        """Close an explicitly cancelled synthetic request without fabricating a Rider decision."""
+        if not isinstance(authorization_reference, str) or not authorization_reference.strip():
+            raise PermissionError("exact qualification-cancellation authority is required")
+        path = self.events / f"{attention_id}.json"
+        with _decision_lock(path):
+            event = json.loads(path.read_text(encoding="utf-8"))
+            if event.get("state") != "needs_tanner" or event.get("decision_id") is not None:
+                raise RuntimeError("only an unresolved decision-free qualification request may be cancelled")
+            event = {**event, "state": "cancelled_qualification",
+                     "approval_outcome": "cancelled_without_decision",
+                     "consumer_state": "stopped", "acknowledged": False,
+                     "qualification_cancelled_at": _now(),
+                     "qualification_cancellation_reference": sanitize_action(authorization_reference),
+                     "creates_authority": False}
+            event.pop("record_sha256", None); event["record_sha256"] = _digest(event)
+            _write_json_atomic(path, event)
+            return event
+
     def wait_for_decision(self, attention_id, *, timeout_seconds, process_alive=None,
                           reminder_handler=None):
         deadline = time.monotonic() + timeout_seconds

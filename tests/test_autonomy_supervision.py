@@ -99,6 +99,7 @@ class AutonomySupervisionTests(unittest.TestCase):
                       + attention_id)
         record = self.record(status="tanner_escalation", needs={
             "reason": "scope decision required", "attention_id": attention_id,
+            "plain_reason": "Test A — APPROVE ONCE: exact harmless action",
             "detail_url": detail_url})
         record.update({"instance_id": "phoenix", "record_sha256": "a" * 64})
         with tempfile.TemporaryDirectory() as directory:
@@ -109,6 +110,7 @@ class AutonomySupervisionTests(unittest.TestCase):
             self.assertNotIn("review-report", first["message"])
             self.assertIn(attention_id, first["message"])
             self.assertIn("**Review and decide:** " + detail_url, first["message"])
+            self.assertIn("Test A — APPROVE ONCE", first["message"])
             self.assertIn("Open on the Fawkes PC.", first["message"])
             self.assertNotIn("token=", first["message"].lower())
             self.assertIn("grants no authority", first["message"])

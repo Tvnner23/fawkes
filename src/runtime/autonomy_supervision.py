@@ -210,7 +210,8 @@ def retain_needs_tanner_notification(record, *, root=NOTIFICATION_ROOT, registry
     needs = record.get("needs_tanner")
     if not needs:
         return None
-    reason = str(needs.get("reason") or "campaign requires rider review")[:240]
+    reason = str(needs.get("plain_reason") or needs.get("reason")
+                 or "campaign requires rider review")[:240]
     attention_id = str(needs.get("attention_id") or "")
     detail_url = str(needs.get("detail_url") or "")
     if re.fullmatch(r"attention-[a-f0-9]{64}", attention_id):

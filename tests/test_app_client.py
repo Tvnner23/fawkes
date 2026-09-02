@@ -20,11 +20,15 @@ class FawkesAppClientTests(unittest.TestCase):
 
     def test_exact_attention_deep_link_renders_decision_and_resolved_unknown_states(self):
         import os
-        for scenario in ("valid", "resolved", "unknown", "auth"):
-            with self.subTest(scenario=scenario):
+        for scenario, attention_id in (("valid", "attention-test-a"),
+                ("valid", "attention-test-b"), ("auth-login", "attention-test-a"),
+                ("resolved", "attention-test"), ("unknown", "attention-test"),
+                ("auth", "attention-test")):
+            with self.subTest(scenario=scenario, attention_id=attention_id):
                 result = subprocess.run(["node", "tests/js/app_attention_deep_link_harness.js"],
                     cwd=ROOT, text=True, capture_output=True, timeout=10,
-                    env={**os.environ, "FAWKES_ATTENTION_SCENARIO": scenario})
+                    env={**os.environ, "FAWKES_ATTENTION_SCENARIO": scenario,
+                         "FAWKES_ATTENTION_ID": attention_id})
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertIn("attention-deep-link-ok " + scenario, result.stdout)
 
@@ -46,6 +50,23 @@ class FawkesAppClientTests(unittest.TestCase):
         self.assertIn("exact approved action completed", source)
         self.assertIn("approval is no longer available", source)
         self.assertIn("Fawkes did not record an approval", source)
+
+    def test_authentication_uses_protected_cookie_session_and_preserves_deep_link(self):
+        source = (ROOT / "src/app/static/app.js").read_text()
+        server = (ROOT / "src/app/server.py").read_text()
+        self.assertNotIn("fawkes-app-token", source)
+        self.assertIn("/api/session", source)
+        self.assertIn("credentials: 'same-origin'", source)
+        self.assertIn("requestedAttentionId = startup.get('attention')", source)
+        self.assertIn("if(connected&&requestedAttentionId)await loadExactAttention()", source)
+        self.assertIn("HttpOnly; SameSite=Strict", server)
+        self.assertIn("Max-Age={SESSION_MAX_AGE_SECONDS}", server)
+
+    def test_attention_identity_mismatch_and_request_failure_cannot_load_forever(self):
+        source = (ROOT / "src/app/static/app.js").read_text()
+        self.assertIn("Fawkes returned a different attention identity", source)
+        self.assertIn("Fawkes did not answer within 15 seconds", source)
+        self.assertIn("exactAttentionLoadGeneration", source)
 
     def test_client_avoids_known_older_safari_parse_breakers(self):
         source = (ROOT / "src" / "app" / "static" / "app.js").read_text()

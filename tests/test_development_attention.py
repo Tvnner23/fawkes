@@ -225,3 +225,12 @@ class DevelopmentAttentionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+    def test_synthetic_qualification_cancellation_records_no_rider_decision_or_authority(self):
+        event = self._event()
+        cancelled = self.store.cancel_unresolved_qualification(
+            event["attention_id"], authorization_reference="tanner-cancelled-incomplete-test")
+        self.assertEqual(cancelled["state"], "cancelled_qualification")
+        self.assertEqual(cancelled["approval_outcome"], "cancelled_without_decision")
+        self.assertIsNone(cancelled["decision_id"])
+        self.assertFalse(cancelled["creates_authority"])
+        self.assertFalse(self.store.decisions.exists())

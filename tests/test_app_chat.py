@@ -5,7 +5,7 @@ from email.message import Message
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from src.app.server import FawkesAppHandler, bind_requires_token, default_bind_host
+from src.app.server import BrowserSessionStore, FawkesAppHandler, SESSION_COOKIE, bind_requires_token, default_bind_host
 from src.runtime.chat_service import ChatServiceError, FawkesChatService
 from src.memory.correction import CorrectionAssessment
 
@@ -321,7 +321,8 @@ class FawkesChatServiceTests(unittest.TestCase):
 class FawkesAppHTTPTests(unittest.TestCase):
     def _handler(self, authorization=None):
         handler = object.__new__(FawkesAppHandler)
-        handler.server = SimpleNamespace(app_token="correct-token")
+        handler.server = SimpleNamespace(app_token="correct-token", app_session_store=Mock())
+        handler.server.app_session_store.valid.return_value = False
         handler.headers = Message()
         if authorization:
             handler.headers["Authorization"] = authorization
@@ -331,6 +332,16 @@ class FawkesAppHTTPTests(unittest.TestCase):
         self.assertFalse(self._handler()._authorized())
         self.assertFalse(self._handler("Bearer wrong-token")._authorized())
         self.assertTrue(self._handler("Bearer correct-token")._authorized())
+
+    def test_revocable_httponly_session_authenticates_without_browser_stored_credential(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            handler = self._handler(); handler.server.app_session_store = BrowserSessionStore(directory)
+            session = handler.server.app_session_store.create()
+            handler.headers["Cookie"] = f"{SESSION_COOKIE}={session}"
+            self.assertTrue(handler._authorized())
+            handler.headers.replace_header("Cookie", f"{SESSION_COOKIE}=wrong")
+            self.assertFalse(handler._authorized())
 
     def test_no_token_configuration_is_local_open_mode(self):
         handler = self._handler()

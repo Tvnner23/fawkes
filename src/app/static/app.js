@@ -23,21 +23,13 @@ const historyContent = document.querySelector('#history-content');
 const historySearchForm = document.querySelector('#history-search-form');
 const historyQuery = document.querySelector('#history-query');
 const historyDomain = document.querySelector('#history-domain');
-function readStoredToken() {
-  try { return window.localStorage.getItem('fawkes-app-token') || ''; }
-  catch (error) { return ''; }
-}
-function storeToken(value) {
-  try { window.localStorage.setItem('fawkes-app-token', value); return true; }
-  catch (error) { return false; }
-}
 function clearNode(node) { while (node.firstChild) node.removeChild(node.firstChild); }
 function replaceContent(node, ...children) { clearNode(node); children.forEach(child => node.append(child)); }
 function setAuthError(message) {
   authError.textContent = message || '';
   authError.classList.toggle('hidden', !message);
 }
-let token = readStoredToken();
+let token = '';
 let conversationId = null;
 let developerData = null;
 let testCenterData = null;
@@ -45,6 +37,7 @@ const testProbePreviews = {};
 let developerSection = 'observations';
 let requestedAttentionId = null;
 let exactAttentionState = null;
+let exactAttentionLoadGeneration = 0;
 let campaignPoll = null;
 let testCenterPoll = null;
 let recoveryGeneration = 0;
@@ -664,7 +657,12 @@ function renderContextInspector(node, message) {
 }
 function showError(message) { addMessage('error', message); }
 async function request(url, options = {}) {
-  const response = await fetch(url, { ...options, headers: { ...headers(), ...(options.headers || {}) } });
+  const controller = typeof AbortController === 'function' ? new AbortController() : null;
+  const timer = controller ? window.setTimeout(() => controller.abort(), 15000) : null;
+  let response;
+  try { response = await fetch(url, { credentials: 'same-origin', ...options, signal: controller ? controller.signal : options.signal, headers: { ...headers(), ...(options.headers || {}) } }); }
+  catch (error) { const safe = new Error(error && error.name === 'AbortError' ? 'Fawkes did not answer within 15 seconds. Reload this exact decision link or check Fawkes Status.' : 'Fawkes could not be reached. Reload this exact decision link or check Fawkes Status.'); safe.code='request_unavailable'; throw safe; }
+  finally { if (timer) window.clearTimeout(timer); }
   const data = await response.json().catch(() => ({ error: { message: 'Fawkes is unavailable right now.' } }));
   if (response.status === 401) { auth.classList.remove('hidden'); throw new Error('Access token required.'); }
   if (!response.ok) {
@@ -1259,7 +1257,8 @@ async function loadDeveloper() {
     developerData.autonomous_campaigns = (campaignData.campaigns || []).map(item => item.live_activity);
     developerData.attention = attentionData.attention || [];
     auth.classList.add('hidden');
-    renderDeveloperSection();
+    if (developerSection === 'attention' && requestedAttentionId) await loadExactAttention();
+    else renderDeveloperSection();
     if (developerSection === 'tests') await loadTestCenter();
     status.textContent = 'Development observatory';
   } catch (error) {
@@ -1282,10 +1281,17 @@ async function verifyBuildIdentity() {
 }
 async function loadExactAttention() {
   if (!requestedAttentionId) { exactAttentionState=null; renderDeveloperSection(); return; }
-  try { exactAttentionState = await request(`/api/development/attention/${encodeURIComponent(requestedAttentionId)}`); }
-  catch (error) { exactAttentionState={error:error.status===404?'This attention ID is unknown or no longer retained.':error.message}; }
+  const requested = requestedAttentionId; const generation = ++exactAttentionLoadGeneration;
+  exactAttentionState={loading:true}; renderDeveloperSection();
+  try {
+    const result = await request(`/api/development/attention/${encodeURIComponent(requested)}`);
+    if (generation !== exactAttentionLoadGeneration || requested !== requestedAttentionId) return;
+    if (!result.attention || result.attention.attention_id !== requested) throw new Error('Fawkes returned a different attention identity. No decision controls were shown.');
+    exactAttentionState = result;
+  }
+  catch (error) { if(generation!==exactAttentionLoadGeneration||requested!==requestedAttentionId)return; exactAttentionState={error:error.status===404?'This attention ID is unknown or no longer retained.':error.message}; }
   renderDeveloperSection();
-  window.setTimeout(()=>{ const card=document.getElementById(`attention-${requestedAttentionId}`); if(card) card.scrollIntoView({block:'center'}); },0);
+  window.setTimeout(()=>{ const card=document.getElementById(`attention-${requested}`); if(card) card.scrollIntoView({block:'center'}); },0);
 }
 async function openObservation(observationId) {
   detailPanel.classList.remove('hidden');
@@ -1366,9 +1372,13 @@ async function submitChatTurn(text, media = [], retrievalClarification = null) {
 
 authForm.addEventListener('submit', async event => {
   event.preventDefault();
-  token = tokenInput.value.trim();
-  storeToken(token);
-  await loadChat(true);
+  const credential = tokenInput.value.trim(); tokenInput.value = '';
+  connect.disabled=true; connect.textContent='Connecting…'; setAuthError('');
+  try {
+    await request('/api/session', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({credential})});
+    token=''; const connected=await loadChat(true); if(connected&&requestedAttentionId)await loadExactAttention();
+  } catch(error) { setAuthError(error.message); auth.classList.remove('hidden'); }
+  finally { connect.disabled=false; connect.textContent='Connect'; }
 });
 composer.addEventListener('submit', async event => {
   event.preventDefault(); const text = input.value.trim(); if (!text || send.disabled) return;
@@ -1450,14 +1460,21 @@ const liveActivity = document.querySelector('#open-live-activity');
 if (liveActivity) liveActivity.addEventListener('click', () => { developerSection = 'campaigns'; loadDeveloper(); if (!campaignPoll) campaignPoll = window.setInterval(loadDeveloper, 2000); });
 const runtimeStatus = document.querySelector('#open-runtime-status');
 if (runtimeStatus) runtimeStatus.addEventListener('click', openRuntimeStatus);
-loadChat().then(() => {
-  const startup = new URLSearchParams(window.location.search);
+const startup = new URLSearchParams(window.location.search);
+if (startup.get('view') === 'developer') {
+  requestedAttentionId = startup.get('attention');
+  if (startup.get('section') === 'attention' || requestedAttentionId) developerSection = 'attention';
+}
+loadChat().then(connected => {
   if (startup.get('view') === 'developer') {
-    requestedAttentionId = startup.get('attention');
-    if (startup.get('section') === 'attention' || requestedAttentionId) developerSection = 'attention';
-    const developerButton=document.querySelector('.app-nav [data-view="developer"]'); if(developerButton) developerButton.click();
+    const developerButton=document.querySelector('.app-nav [data-view="developer"]');
+    if(connected&&developerButton)developerButton.click();
+    else {
+      const chatView=document.querySelector('#chat-view');const developerView=document.querySelector('#developer-view');
+      if(chatView)chatView.classList.add('hidden');if(developerView)developerView.classList.remove('hidden');
+      exactAttentionState={error:'Authenticate to inspect this exact Tanner attention request.'};renderDeveloperSection();
+    }
     document.querySelectorAll('#developer-sections [data-section]').forEach(item => item.classList.toggle('active', item.dataset.section === developerSection));
-    if (developerSection === 'attention') loadExactAttention();
   }
 });
 verifyBuildIdentity();
