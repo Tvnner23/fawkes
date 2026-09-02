@@ -1,9 +1,15 @@
 (() => {
   let lastCapturedText = "";
+  let pendingCapturedText = "";
   let snapshotTimer = null;
   let messageTimer = null;
 
   const lastMessageStates = new Map();
+  const pendingMessageStates = new Map();
+
+  function createCaptureEventId() {
+    return crypto.randomUUID();
+  }
 
   function getConversationTitle() {
     const title = document.title?.trim();
@@ -50,21 +56,29 @@
   function captureConversation() {
     const conversation = buildConversation();
 
-    if (!conversation || conversation === lastCapturedText) {
+    if (
+      !conversation ||
+      conversation === lastCapturedText ||
+      conversation === pendingCapturedText
+    ) {
       return;
     }
 
-    lastCapturedText = conversation;
+    pendingCapturedText = conversation;
 
     chrome.runtime.sendMessage(
       {
         type: "fawkes_capture",
         title: getConversationTitle(),
         conversation,
-        conversation_id: getConversationId()
+        conversation_id: getConversationId(),
+        capture_event_id: createCaptureEventId()
       },
       (response) => {
         if (chrome.runtime.lastError) {
+          if (pendingCapturedText === conversation) {
+            pendingCapturedText = "";
+          }
           console.error(
             "Fawkes snapshot capture error:",
             chrome.runtime.lastError.message
@@ -73,8 +87,23 @@
         }
 
         if (!response?.ok) {
+          if (response?.queued) {
+            console.warn(
+              "Fawkes snapshot capture queued for retry:",
+              response
+            );
+            return;
+          }
+          if (pendingCapturedText === conversation) {
+            pendingCapturedText = "";
+          }
           console.error("Fawkes snapshot capture failed:", response);
           return;
+        }
+
+        lastCapturedText = conversation;
+        if (pendingCapturedText === conversation) {
+          pendingCapturedText = "";
         }
 
         console.log(
@@ -135,11 +164,14 @@
         text
       });
 
-      if (lastMessageStates.get(messageId) === state) {
+      if (
+        lastMessageStates.get(messageId) === state ||
+        pendingMessageStates.get(messageId) === state
+      ) {
         continue;
       }
 
-      lastMessageStates.set(messageId, state);
+      pendingMessageStates.set(messageId, state);
 
       chrome.runtime.sendMessage(
         {
@@ -149,10 +181,14 @@
           message_id: messageId,
           role,
           text,
-          model_slug: modelSlug
+          model_slug: modelSlug,
+          capture_event_id: createCaptureEventId()
         },
         (response) => {
           if (chrome.runtime.lastError) {
+            if (pendingMessageStates.get(messageId) === state) {
+              pendingMessageStates.delete(messageId);
+            }
             console.error(
               "Fawkes structured capture error:",
               chrome.runtime.lastError.message
@@ -161,11 +197,26 @@
           }
 
           if (!response?.ok) {
+            if (response?.queued) {
+              console.warn(
+                "Fawkes structured capture queued for retry:",
+                response
+              );
+              return;
+            }
+            if (pendingMessageStates.get(messageId) === state) {
+              pendingMessageStates.delete(messageId);
+            }
             console.error(
               "Fawkes structured capture failed:",
               response
             );
             return;
+          }
+
+          lastMessageStates.set(messageId, state);
+          if (pendingMessageStates.get(messageId) === state) {
+            pendingMessageStates.delete(messageId);
           }
 
           console.log(

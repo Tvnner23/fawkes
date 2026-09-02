@@ -4,7 +4,8 @@
   "version": "0.1.0",
   "description": "Captures ChatGPT conversations into the local Fawkes Archive.",
   "permissions": [
-    "storage"
+    "storage",
+    "alarms"
   ],
   "host_permissions": [
     "https://chatgpt.com/*",
