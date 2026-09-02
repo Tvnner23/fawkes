@@ -79,6 +79,25 @@ class FawkesAppClientTests(unittest.TestCase):
         self.assertIn("Approve Once — ${qualificationChoice==='Approve Once'?'Test A'", source)
         self.assertIn("Deny — ${qualificationChoice==='Deny'?'Test B'", source)
 
+    def test_two_concurrent_exact_tabs_submit_only_their_immutable_decision_tuples(self):
+        import os
+        import subprocess
+        runs = [
+            subprocess.Popen(["node", "tests/js/app_attention_deep_link_harness.js"],
+                cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                env={**os.environ, "FAWKES_ATTENTION_ID": "attention-tab-a",
+                     "FAWKES_EXPECTED_CHOICE": "approve_once"}),
+            subprocess.Popen(["node", "tests/js/app_attention_deep_link_harness.js"],
+                cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                env={**os.environ, "FAWKES_ATTENTION_ID": "attention-tab-b",
+                     "FAWKES_EXPECTED_CHOICE": "deny"}),
+        ]
+        # Collect in reverse launch order to cover overlapping responses and tab switching.
+        for process in reversed(runs):
+            stdout, stderr = process.communicate(timeout=10)
+            self.assertEqual(process.returncode, 0, stdout + stderr)
+            self.assertIn("attention-deep-link-ok", stdout)
+
     def test_client_avoids_known_older_safari_parse_breakers(self):
         source = (ROOT / "src" / "app" / "static" / "app.js").read_text()
         self.assertNotIn("?.", source)
