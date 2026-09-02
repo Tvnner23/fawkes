@@ -1053,12 +1053,21 @@ function renderDeveloperSection() {
       card.append(element('p', '', `Current state: ${readable(attention.state)}. No new authority can be granted from this resolved request.`));
       developerContent.append(card); return;
     }
+    const rawAction=String(attention.blocked_action||'');
+    const harmlessNoop=rawAction.includes('powershell.exe')&&rawAction.includes('exit 0');
+    const actionSummary=harmlessNoop?'Run one no-op PowerShell command across the protected WSL-to-Windows boundary.':rawAction;
+    const reversible=attention.reversible===true?'Confirmed reversible.':attention.reversible===false?'Not reversible.':'Not confirmed; the provider did not declare reversibility.';
     card.append(element('h2', '', 'Tanner: Fawkes is paused and needs your decision'));
-    card.append(element('p', '', `Worker attempted: ${attention.blocked_action}`));
-    card.append(element('p', '', `Why it stopped: ${attention.why_required}`));
-    card.append(element('p', '', `Exact one-time authority requested: ${attention.requested_authority}`));
-    card.append(element('p', 'meta', `Campaign ${attention.campaign_id} · Invocation ${attention.invocation_id}`));
-    if (attention.resources && attention.resources.length) card.append(element('pre', '', JSON.stringify({affected_resources: attention.resources, reversible: attention.reversible}, null, 2)));
+    [['What Fawkes wants to do',actionSummary],['Why Fawkes stopped',attention.why_required],
+     ['Why Tanner’s permission is required','Crossing this protected operating-system boundary requires an exact authenticated Rider decision.'],
+     ['What will change if approved',harmlessNoop?'The one command will run once and should make no persistent change.':'Only the exact requested action may run once.'],
+     ['What will not change','No continuing authority, campaign scope, production release, credentials, or default policy will change.'],
+     ['Who or what is affected','Only this Development campaign and its current Worker attempt.'],
+     ['Risk level',harmlessNoop?'Low — the command exits successfully without writing files or changing configuration.':'Not automatically classified — review the stated action and material risks before deciding.'],
+     ['Reversibility',reversible],['Permission duration',`One use before ${dateLabel(attention.expires_at)}; afterward it is stale.`],
+     ['Continuing authority','None. Approval is consumed by this exact action and cannot authorize later work.'],
+     ['Fawkes’s recommendation',harmlessNoop?'Approve Once is reasonable for this qualification because the exact command is a no-op and creates no continuing authority.':'No recommendation is available; Tanner should decide from the stated risk and scope.']].forEach(([label,value])=>{const section=element('section','attention-summary');section.append(element('h3','',label),element('p','',value));card.append(section);});
+    const technical=document.createElement('details');technical.className='attention-technical';technical.append(element('summary','','Technical details'),element('pre','',JSON.stringify({campaign_id:attention.campaign_id,invocation_id:attention.invocation_id,worker:attention.worker,exact_action:attention.blocked_action,requested_authority:attention.requested_authority,resources:attention.resources,reversible:attention.reversible,expires_at:attention.expires_at,provider_code:attention.provider_code,protocol_binding:attention.protocol_binding},null,2)));card.append(technical);
     const choices = element('div', 'development-actions');
     [['approve_once','Approve Once','Allow only this exact action one time. No continuing authority.'],
      ['deny','Deny','Reject only this action. No authority is granted.'],

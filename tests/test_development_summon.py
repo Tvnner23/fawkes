@@ -40,7 +40,7 @@ class DevelopmentSummonTests(unittest.TestCase):
         self.assertIn("ProjectFawkes.Attention", installer)
         self.assertIn("FawkesAttentionLauncher.exe", installer)
         self.assertIn("HKCU:\\Software\\Classes\\fawkes-attention", installer)
-        self.assertIn("^attention-[a-f0-9]{64}$", installer)
+        self.assertIn("^attention-(?:[a-f0-9]{64}|test)$", installer)
 
     def test_attention_deep_link_renders_plain_language_bounded_choices(self):
         javascript = (ROOT / "src/app/static/app.js").read_text()

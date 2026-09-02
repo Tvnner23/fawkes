@@ -15,21 +15,26 @@ $graphics.DrawString('F',$font,$brush,13,5)
 $bitmap.Save($iconPath,[Drawing.Imaging.ImageFormat]::Png)
 $brush.Dispose(); $font.Dispose(); $graphics.Dispose(); $bitmap.Dispose()
 $launcherPath = Join-Path $installRoot 'FawkesAttentionLauncher.exe'
+Remove-Item -Force $launcherPath -ErrorAction SilentlyContinue
 $launcherSource = @'
 using System;
 using System.Diagnostics;
 using System.Text.RegularExpressions;
 public static class FawkesAttentionLauncher {
- [STAThread] public static void Main(string[] args) {
+ static string Resolve(string value) {
   string target = "http://localhost:8787/?view=developer&section=attention";
-  if (args.Length > 0 && args[0].StartsWith("fawkes-attention://open?", StringComparison.OrdinalIgnoreCase)) {
-   Uri uri; if (!Uri.TryCreate(args[0], UriKind.Absolute, out uri)) return;
-   string query = uri.Query.TrimStart('?');
-   if (!query.StartsWith("attention=", StringComparison.Ordinal)) return;
-   string id = Uri.UnescapeDataString(query.Substring(10));
-   if (!Regex.IsMatch(id, "^attention-[a-f0-9]{64}$")) return;
-   target += "&attention=" + Uri.EscapeDataString(id);
-  } else if (args.Length > 0 && !args[0].Equals("fawkes-attention://status", StringComparison.OrdinalIgnoreCase)) return;
+  if (value == null || value.Equals("fawkes-attention://status", StringComparison.OrdinalIgnoreCase)) return target;
+  if (!value.StartsWith("fawkes-attention://open?", StringComparison.OrdinalIgnoreCase)) return null;
+  Uri uri; if (!Uri.TryCreate(value, UriKind.Absolute, out uri)) return null;
+  string query = uri.Query.TrimStart('?');
+  if (!query.StartsWith("attention=", StringComparison.Ordinal)) return null;
+  string id = Uri.UnescapeDataString(query.Substring(10));
+  if (!Regex.IsMatch(id, "^attention-(?:[a-f0-9]{64}|test)$")) return null;
+  return target + "&attention=" + Uri.EscapeDataString(id);
+ }
+ [STAThread] public static void Main(string[] args) {
+  if (args.Length == 2 && args[0] == "--resolve-uri") { string resolved=Resolve(args[1]); if(resolved!=null) Console.WriteLine(resolved); return; }
+  string target=Resolve(args.Length>0?args[0]:null); if(target==null)return;
   Process.Start(new ProcessStartInfo(target) { UseShellExecute = true });
  }
 }
@@ -70,4 +75,6 @@ $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfil
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
 $settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero)
 Register-ScheduledTask -TaskName 'Project Fawkes Attention' -Action $action -Trigger $trigger -Settings $settings -Description 'Surface durable Project Fawkes Rider-attention events.' -Force | Out-Null
+Stop-ScheduledTask -TaskName 'Project Fawkes Attention' -ErrorAction SilentlyContinue
+Start-ScheduledTask -TaskName 'Project Fawkes Attention'
 Write-Output 'Project Fawkes Attention task installed.'

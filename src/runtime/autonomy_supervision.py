@@ -1,0 +1,213 @@
+"""Rider-facing projections and phone-alert intent for bounded Development.
+
+Campaign records and Worker Exchange remain canonical.  This module stores only
+logical notification delivery state; it grants no campaign or rider authority.
+"""
+
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+import hashlib
+import json
+import uuid
+
+from src.runtime.worker_exchange import _digest
+
+
+PROGRESS_INTERVAL_SECONDS = 10_800
+NOTIFICATION_ROOT = Path(__file__).resolve().parents[2] / "database" / "rider_notifications"
+
+
+class RiderActivityStore:
+    """Authenticated rider-presence signal; absence of campaign input is irrelevant."""
+
+    def __init__(self, instance_id, *, root):
+        self.instance_id = instance_id
+        self.path = Path(root) / instance_id / "rider-activity.json"
+
+    def touch(self, *, authenticated_rider):
+        if authenticated_rider is not True:
+            raise PermissionError("authenticated rider activity is required")
+        value = {"schema_version": 1, "record_type": "rider_activity",
+                 "instance_id": self.instance_id,
+                 "last_active_at": datetime.now(timezone.utc).isoformat()}
+        value["record_sha256"] = _digest(value)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.path.with_name(f".{self.path.name}.{uuid.uuid4().hex}.tmp")
+        temporary.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
+        temporary.replace(self.path)
+        return value
+
+    def load(self):
+        value = json.loads(self.path.read_text(encoding="utf-8"))
+        claimed = value.get("record_sha256")
+        if claimed != _digest({key: item for key, item in value.items() if key != "record_sha256"}):
+            raise ValueError("rider activity integrity mismatch")
+        return value
+
+
+def _utc(value):
+    parsed = value if isinstance(value, datetime) else datetime.fromisoformat(value)
+    return parsed.astimezone(timezone.utc)
+
+
+def campaign_activity_projection(record):
+    """Derive a bounded, body-free activity view from durable campaign state."""
+    builder_by_iteration = {item["iteration"]: item for item in record.get("builder_runs", [])}
+    review_by_iteration = {item["iteration"]: item for item in record.get("reviews", [])}
+    activity = []
+    for event in record.get("events", []):
+        detail = event.get("detail") or {}
+        item = {"event_id": event["event_id"], "kind": event["kind"],
+                "created_at": event["created_at"], "detail": detail}
+        iteration = detail.get("iteration")
+        if event["kind"] in {"builder_return_retained", "builder_failed_safe"} and iteration in builder_by_iteration:
+            run = builder_by_iteration[iteration]
+            item["worker"] = record["builder"]
+            item["summary"] = {key: run.get(key) for key in (
+                "status", "task_scope_id", "return_report_id", "verification_status",
+                "failure", "transport_result_reference", "validation_evidence")}
+        if event["kind"] == "independent_review_retained" and iteration in review_by_iteration:
+            review = review_by_iteration[iteration]
+            item["worker"] = review["reviewer"]
+            item["summary"] = {key: review.get(key) for key in (
+                "status", "review_report_id", "acceptance_condition_ids_satisfied",
+                "violated_acceptance_condition_ids", "defects")}
+        activity.append(item)
+    return {"campaign_id": record["campaign_id"], "objective": record["objective"],
+            "status": record["status"], "current_stage": record["status"],
+            "iteration": record["iteration"], "maximum_iterations": record["maximum_iterations"],
+            "builder": record["builder"], "reviewer": record["reviewer_requirement"],
+            "needs_tanner": record["needs_tanner"], "cancelled": record["cancelled"],
+            "recovery_references": record["recovery_references"], "activity": activity,
+            "exact_worker_bodies_remain_in_worker_exchange": True,
+            "hidden_chain_of_thought_exposed": False, "creates_authority": False}
+
+
+class RiderNotificationStore:
+    """Durable logical notifications and distinct delivery attempts."""
+
+    def __init__(self, instance_id, *, root):
+        self.instance_id = instance_id
+        self.root = Path(root) / instance_id
+
+    def _path(self, logical_id):
+        return self.root / f"{logical_id}.json"
+
+    def create_once(self, *, kind, campaign_id, state_key, message, evidence_refs):
+        logical_id = "rider-notification-" + hashlib.sha256(
+            f"{self.instance_id}\0{kind}\0{campaign_id}\0{state_key}".encode()).hexdigest()
+        path = self._path(logical_id)
+        if path.exists():
+            return json.loads(path.read_text(encoding="utf-8")), False
+        value = {"schema_version": 1, "record_type": "rider_notification",
+            "notification_id": logical_id, "instance_id": self.instance_id, "kind": kind,
+            "campaign_id": campaign_id, "state_key": state_key, "message": message,
+            "evidence_references": evidence_refs, "attempts": [], "delivered": False,
+            "creates_authority": False, "created_at": datetime.now(timezone.utc).isoformat()}
+        value["record_sha256"] = _digest(value)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        temporary.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
+        temporary.replace(path)
+        return value, True
+
+    def deliver(self, record, sender, *, transport_name="unspecified"):
+        for retained in record.get("attempts", []):
+            if retained.get("transport") == transport_name and retained.get("status") == "delivered":
+                return record
+        attempt = {"attempt_id": f"notification-attempt-{uuid.uuid4()}",
+            "attempted_at": datetime.now(timezone.utc).isoformat(), "transport": transport_name}
+        try:
+            receipt = sender(record["message"])
+            attempt.update({"status": "delivered", "provider_receipt": receipt})
+            delivered = True
+        except Exception as exc:
+            attempt.update({"status": "failed", "failure_code": type(exc).__name__})
+            delivered = False
+        value = {**record, "attempts": [*record["attempts"], attempt],
+                 "delivered": record["delivered"] or delivered}
+        value.pop("record_sha256", None)
+        value["record_sha256"] = _digest(value)
+        self._path(record["notification_id"]).write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
+        return value
+
+
+class TannerAttentionTransportRegistry:
+    """Explicit zero-authority fan-out for one canonical Tanner notification."""
+
+    def __init__(self):
+        self._transports = {}
+
+    def register(self, name, sender, *, endpoint_authorized, recipient_identity="tanner"):
+        if endpoint_authorized is not True:
+            raise PermissionError("Tanner endpoint authorization is required")
+        if recipient_identity != "tanner":
+            raise PermissionError("Development attention may be delivered only to Tanner")
+        if not name or name in self._transports:
+            raise ValueError("attention transport identity must be unique")
+        self._transports[name] = sender
+        return self
+
+    def dispatch(self, record, store):
+        results = {}
+        current = record
+        for name, sender in self._transports.items():
+            current = store.deliver(current, sender, transport_name=name)
+            results[name] = current["attempts"][-1] if current.get("attempts") else None
+        return {"notification": current, "transport_results": results,
+                "creates_authority": False}
+
+
+def configured_attention_transports(environment=None):
+    import os
+    values = os.environ if environment is None else environment
+    registry = TannerAttentionTransportRegistry()
+    if values.get("FAWKES_DISCORD_WEBHOOK_URL"):
+        from src.runtime.discord_webhook import DiscordWebhookConfiguration, DiscordWebhookSender
+        registry.register("discord_webhook",
+            DiscordWebhookSender(DiscordWebhookConfiguration.from_environment(values)),
+            endpoint_authorized=True)
+    return registry
+
+
+def retain_needs_tanner_notification(record, *, root=NOTIFICATION_ROOT, registry=None):
+    """Retain one sanitized logical alert for each material blocker state."""
+    needs = record.get("needs_tanner")
+    if not needs:
+        return None
+    reason = str(needs.get("reason") or "campaign requires rider review")[:240]
+    state_key = hashlib.sha256(json.dumps(needs, sort_keys=True).encode()).hexdigest()
+    store = RiderNotificationStore(record["instance_id"], root=root)
+    notification, _ = store.create_once(kind="needs_tanner",
+        campaign_id=record["campaign_id"], state_key=state_key,
+        message=(f"Fawkes: {record['campaign_id']} needs Tanner. {reason}. "
+                 "Work is paused; inspect authenticated Development for details."),
+        evidence_refs=[{"reference_type": "development_campaign",
+                        "reference_id": record["campaign_id"],
+                        "record_sha256": record["record_sha256"]}])
+    active = registry if registry is not None else configured_attention_transports()
+    return active.dispatch(notification, store)["notification"] if active._transports else notification
+
+
+def notification_eligibility(record, *, now, rider_last_active_at, quiet_hours=None):
+    """Return logical phone intents; caller supplies an actual configured sender."""
+    now = _utc(now)
+    last_active = _utc(rider_last_active_at)
+    needs = record.get("needs_tanner")
+    if needs:
+        state_key = hashlib.sha256(json.dumps(needs, sort_keys=True).encode()).hexdigest()
+        return {"kind": "needs_tanner", "state_key": state_key, "eligible": True,
+                "bypasses_quiet_hours": True}
+    if record.get("status") in {"succeeded", "cancelled", "failed_safe", "tanner_escalation"}:
+        return None
+    inactive = (now - last_active).total_seconds() >= PROGRESS_INTERVAL_SECONDS
+    if not inactive:
+        return None
+    if quiet_hours is None:
+        return {"kind": "periodic_progress", "eligible": False,
+                "reason": "quiet_hours_unconfigured"}
+    in_quiet = quiet_hours["is_quiet"](now)
+    bucket = int(now.timestamp()) // PROGRESS_INTERVAL_SECONDS
+    return {"kind": "morning_summary" if quiet_hours.get("ended_with_suppressed") else "periodic_progress",
+            "state_key": str(bucket), "eligible": not in_quiet, "suppressed": in_quiet,
+            "bypasses_quiet_hours": False}
