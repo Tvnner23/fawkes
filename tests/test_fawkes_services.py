@@ -10,6 +10,7 @@ class FawkesServiceDefinitionTests(unittest.TestCase):
         discord = (ROOT / "deploy/systemd/fawkes-discord.service").read_text()
         notifier = (ROOT / "deploy/systemd/fawkes-failure-notifier.service").read_text()
         self.assertIn("EnvironmentFile=/home/tvnner/.config/fawkes/app.env", app)
+        self.assertIn("EnvironmentFile=-/home/tvnner/.config/fawkes/notification.env", app)
         self.assertIn("EnvironmentFile=/home/tvnner/.config/fawkes/discord-bot.env", discord)
         self.assertIn("EnvironmentFile=/home/tvnner/.config/fawkes/notification.env", notifier)
         self.assertNotIn("WEBHOOK", discord)

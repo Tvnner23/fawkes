@@ -19,6 +19,7 @@ Environment=FAWKES_APP_HOST=0.0.0.0
 Environment=FAWKES_APP_PORT=8787
 Environment=FAWKES_DEVELOPMENT_ROOT=/home/tvnner/fawkes
 EnvironmentFile=/home/tvnner/.config/fawkes/app.env
+EnvironmentFile=-/home/tvnner/.config/fawkes/notification.env
 ExecStart=/home/tvnner/.local/lib/fawkes-production/venv/bin/python -B -m src.app.server --host 0.0.0.0 --port 8787
 ExecStartPost=/home/tvnner/.local/lib/fawkes-production/venv/bin/python -B scripts/wait_fawkes_app_ready.py
 ExecStopPost=/home/tvnner/.local/lib/fawkes-production/venv/bin/python -B scripts/fawkes_component_failure.py app_server --result ${SERVICE_RESULT} --exit-code ${EXIT_CODE} --exit-status ${EXIT_STATUS}
