@@ -75,7 +75,15 @@ def project(*, root=ROOT, attention_store=None, receipt_store=None):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--seen", action="append", default=[])
+    parser.add_argument("--pending-attention")
     args = parser.parse_args()
+    if args.pending_attention:
+        pending = {item["attention_id"] for item in DevelopmentAttentionStore().list(pending_only=True)}
+        print(json.dumps({"schema_version": 1,
+            "attention_id": args.pending_attention,
+            "pending": args.pending_attention in pending,
+            "creates_authority": False}, separators=(",", ":")))
+        return
     seen = set(args.seen)
     print(json.dumps({"schema_version": 1,
         "events": [item for item in project() if item["event_id"] not in seen],

@@ -124,6 +124,18 @@ class DevelopmentAttentionTests(unittest.TestCase):
                             receipt_store=receipt_store)
         self.assertEqual([item["kind"] for item in projected], ["needs_tanner"])
 
+    def test_windows_pending_probe_excludes_resolved_attention(self):
+        event = self.create()
+        self.assertTrue(any(item["source_id"] == event["attention_id"]
+                            for item in project(attention_store=self.store,
+                                              receipt_store=ComponentReceiptStore(
+                                                  Path(self.temporary.name) / "empty-receipts"))))
+        self.store.decide(event["attention_id"], "deny", authenticated_rider=True)
+        self.assertFalse(any(item["source_id"] == event["attention_id"]
+                             for item in project(attention_store=self.store,
+                                               receipt_store=ComponentReceiptStore(
+                                                   Path(self.temporary.name) / "empty-receipts"))))
+
     def test_process_detachment_and_interface_reopen_preserve_one_pending_event(self):
         event = self.create()
         with self.assertRaises(TimeoutError):
