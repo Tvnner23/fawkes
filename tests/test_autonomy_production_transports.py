@@ -1,5 +1,6 @@
 import hashlib
 import json
+import re
 import os
 import tempfile
 import unittest
@@ -156,7 +157,9 @@ class FakeWindowsCodex:
         package_text = prompt.split("----- BEGIN EXACT WORKER EXCHANGE PACKAGE (UTF-8) -----\n", 1)[1].split(
             "\n----- END EXACT WORKER EXCHANGE PACKAGE -----", 1)[0]
         package = json.loads(package_text); package_bytes = package_text.encode()
-        response = {"schema_version": 1, "package_id": package["package_id"],
+        invocation = re.search(r"Exact review invocation: ([^\n]+)", prompt).group(1)
+        response = {"schema_version": 1, "review_invocation_id": invocation,
+            "package_id": package["package_id"],
             "package_sha256": hashlib.sha256(package_bytes).hexdigest(),
             "source_report_id": package["source_report_id"], "task_scope_id": package["task_scope_id"],
             "recipient": {"worker_id": package["recipient"]["worker_id"],
@@ -680,6 +683,23 @@ class AutonomyProductionTransportTests(unittest.TestCase):
         self.assertFalse(result["candidate_qualified"]); self.assertFalse(result["adapter_promoted"])
         self.assertIn(self.exchange.export_package(package["package_id"]).decode(), fake.prompt)
         self.assertFalse(self.exchange._load("reports", result["return_report_id"])["creates_authority"])
+        self.assertEqual(len(result["review_response_sha256"]), 64)
+
+    def test_windows_response_invocation_and_cached_replay_are_exact(self):
+        builder, package, transport, snapshot_id = self.windows_fixture()
+        adapter = WindowsCodexReviewAdapter(
+            self.exchange, run_process=FakeWindowsCodex(), timeout_seconds=5)
+        arguments = {"package_id": package["package_id"], "transport_authority": transport,
+            "return_authority": authority("fawkes", package["task_scope_id"], WINDOWS_REVIEWER_WORKER_ID),
+            "campaign_id": self.campaign, "builder_return_report_id": builder["report_id"],
+            "candidate_snapshot_id": snapshot_id, "candidate_snapshot_root": self.workspace,
+            "invocation_id": "windows-review-exact"}
+        first = adapter.deliver_candidate_once(**arguments)
+        replay = adapter.deliver_candidate_once(**arguments)
+        self.assertTrue(replay["idempotent_replay"])
+        self.assertEqual(first["record_sha256"], replay["record_sha256"])
+        with self.assertRaises(PermissionError):
+            adapter.deliver_candidate_once(**{**arguments, "invocation_id": "windows-review-neighbor"})
 
     def test_windows_insufficient_evidence_cannot_claim_accepted_complete_review(self):
         builder, package, transport, snapshot_id = self.windows_fixture()

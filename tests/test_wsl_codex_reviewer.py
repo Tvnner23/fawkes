@@ -4,6 +4,7 @@ import os
 import subprocess
 import tempfile
 import unittest
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -40,7 +41,9 @@ class FakeWslReviewer:
             (Path(command[command.index("--cd") + 1]) / "src/allowed.py").write_text("reviewer mutation\n")
         violated = ["done"] if self.status == "correction_required" else []
         satisfied = ["done"] if self.status == "pass" else []
-        response = {"schema_version": 1, "package_id": package["package_id"],
+        invocation = re.search(r"Review invocation: ([^\n]+)", prompt).group(1)
+        response = {"schema_version": 1, "review_invocation_id": invocation,
+            "package_id": package["package_id"],
             "package_sha256": hashlib.sha256(package_text.encode()).hexdigest(),
             "source_report_id": package["source_report_id"], "task_scope_id": package["task_scope_id"],
             "recipient": {"worker_id": WSL_REVIEWER_WORKER_ID, "role": WSL_REVIEWER_ROLE,
@@ -156,6 +159,20 @@ class WslFormalReviewerTests(unittest.TestCase):
         self.assertEqual(insufficient["review_status"], "insufficient_evidence")
         self.setUp(); malformed = self.invoke(FakeWslReviewer(malformed=True))
         self.assertEqual(malformed["failure_reason"], "malformed_or_unbound_response")
+
+    def test_response_invocation_freshness_fails_closed(self):
+        class WrongInvocation(FakeWslReviewer):
+            def __call__(self, command, **kwargs):
+                completed = super().__call__(command, **kwargs)
+                if "--output-last-message" in command:
+                    output = Path(command[command.index("--output-last-message") + 1])
+                    response = json.loads(output.read_text())
+                    response["review_invocation_id"] = "wsl-review-stale-neighbor"
+                    output.write_text(json.dumps(response))
+                return completed
+        result = self.invoke(WrongInvocation(), invocation_id="wsl-review-current")
+        self.assertEqual(result["failure_reason"], "malformed_or_unbound_response")
+        self.assertNotIn("review_status", result)
 
     def test_dynamic_candidate_is_exact_and_qualification_fixture_cannot_substitute(self):
         from src.runtime.wsl_codex_reviewer import WSL_QUALIFIED_SNAPSHOT_ID
