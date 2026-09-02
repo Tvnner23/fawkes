@@ -226,7 +226,7 @@ class DevelopmentAttentionStore:
                 decision = json.loads(path.read_text(encoding="utf-8"))
         return {"event": event, "decision": decision}
 
-    def decide(self, attention_id, choice, *, authenticated_rider):
+    def decide(self, attention_id, choice, *, authenticated_rider, expected_identity=None):
         if authenticated_rider is not True:
             raise PermissionError("authenticated Rider decision required")
         if choice not in CHOICES:
@@ -234,6 +234,19 @@ class DevelopmentAttentionStore:
         event_path = self.events / f"{attention_id}.json"
         with _decision_lock(event_path):
             event = self.get(attention_id)
+            if expected_identity is not None:
+                binding = event.get("protocol_binding") or {}
+                canonical = {
+                    "attention_id": event.get("attention_id"),
+                    "campaign_id": event.get("campaign_id"),
+                    "invocation_id": event.get("invocation_id"),
+                    "method": binding.get("method"),
+                    "item_id": binding.get("item_id"),
+                    "action_digest": binding.get("approved_action_sha256"),
+                    "protocol_binding_sha256": event.get("protocol_binding_sha256"),
+                }
+                if expected_identity != canonical:
+                    raise PermissionError("decision identity tuple does not match the canonical pending request")
             if event["state"] != "needs_tanner":
                 raise RuntimeError("attention event is no longer awaiting Tanner")
             if event.get("expires_at") and datetime.fromisoformat(event["expires_at"]) <= datetime.now(timezone.utc):

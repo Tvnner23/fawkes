@@ -2,6 +2,7 @@ import json
 import subprocess
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -77,6 +78,62 @@ class DevelopmentAttentionTests(unittest.TestCase):
         with self.assertRaises(PermissionError):
             self.store.consume_approve_once(decision["decision_id"],
                 attention_id=event["attention_id"], invocation_id="synthetic-worker-1")
+
+    def test_complete_decision_identity_tuple_rejects_cross_request_binding(self):
+        event = self.store.create(campaign_id="campaign-a", invocation_id="invocation-a",
+            worker=self.worker, kind="native_codex_approval_required",
+            blocked_action="run exact noop", why_required="typed approval",
+            requested_authority="one exact action", protocol_binding={
+                "method": "item/commandExecution/requestApproval", "item_id": "item-a",
+                "approved_action_sha256": "a" * 64})
+        binding = event["protocol_binding"]
+        identity = {"attention_id": event["attention_id"], "campaign_id": "campaign-a",
+            "invocation_id": "invocation-a", "method": binding["method"],
+            "item_id": binding["item_id"], "action_digest": binding["approved_action_sha256"],
+            "protocol_binding_sha256": event["protocol_binding_sha256"]}
+        with self.assertRaisesRegex(PermissionError, "identity tuple"):
+            self.store.decide(event["attention_id"], "approve_once", authenticated_rider=True,
+                              expected_identity={**identity, "campaign_id": "campaign-b"})
+        self.assertEqual(self.store.get(event["attention_id"])["state"], "needs_tanner")
+        accepted = self.store.decide(event["attention_id"], "approve_once",
+                                     authenticated_rider=True, expected_identity=identity)
+        self.assertEqual(accepted["decision"]["campaign_id"], "campaign-a")
+        self.assertFalse(accepted["decision"]["creates_continuing_authority"])
+
+    def test_concurrent_paired_decisions_remain_isolated_in_reversed_order(self):
+        events = {}
+        identities = {}
+        for suffix in ("a", "b"):
+            event = self.store.create(campaign_id="campaign-" + suffix,
+                invocation_id="invocation-" + suffix, worker=self.worker,
+                kind="native_codex_approval_required", blocked_action="noop-" + suffix,
+                why_required="paired qualification", requested_authority="one exact action",
+                protocol_binding={"method": "item/commandExecution/requestApproval",
+                    "item_id": "item-" + suffix, "approved_action_sha256": suffix * 64})
+            binding = event["protocol_binding"]
+            events[suffix] = event
+            identities[suffix] = {"attention_id": event["attention_id"],
+                "campaign_id": event["campaign_id"], "invocation_id": event["invocation_id"],
+                "method": binding["method"], "item_id": binding["item_id"],
+                "action_digest": binding["approved_action_sha256"],
+                "protocol_binding_sha256": event["protocol_binding_sha256"]}
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            denied = pool.submit(self.store.decide, events["b"]["attention_id"], "deny",
+                authenticated_rider=True, expected_identity=identities["b"])
+            approved = pool.submit(self.store.decide, events["a"]["attention_id"], "approve_once",
+                authenticated_rider=True, expected_identity=identities["a"])
+        self.assertEqual(denied.result()["decision"]["choice"], "deny")
+        decision_a = approved.result()["decision"]
+        self.assertEqual(decision_a["choice"], "approve_once")
+        consumed = self.store.consume_approve_once(decision_a["decision_id"],
+            attention_id=events["a"]["attention_id"], invocation_id="invocation-a",
+            protocol_binding_sha256=events["a"]["protocol_binding_sha256"],
+            approved_action_sha256="a" * 64)
+        self.assertTrue(consumed["consumed"])
+        self.assertFalse(denied.result()["decision"]["consumed"])
+        with self.assertRaises(PermissionError):
+            self.store.consume_approve_once(decision_a["decision_id"],
+                attention_id=events["b"]["attention_id"], invocation_id="invocation-b")
 
     def test_detached_unreconstructable_action_rejects_misleading_approval(self):
         event = self.store.create(campaign_id="synthetic-attention-campaign-2",

@@ -68,6 +68,17 @@ class FawkesAppClientTests(unittest.TestCase):
         self.assertIn("Fawkes did not answer within 15 seconds", source)
         self.assertIn("exactAttentionLoadGeneration", source)
 
+    def test_attention_decision_submission_is_immutable_tuple_bound(self):
+        source = (ROOT / "src/app/static/app.js").read_text()
+        self.assertIn("const immutableIdentity={attention_id:attention.attention_id", source)
+        self.assertIn("identity:immutableIdentity", source)
+        self.assertIn("protocol_binding_sha256", source)
+        self.assertIn("action_digest", source)
+        self.assertIn("Qualification instruction", source)
+        self.assertIn("Fawkes’s risk-based recommendation", source)
+        self.assertIn("Approve Once — ${qualificationChoice==='Approve Once'?'Test A'", source)
+        self.assertIn("Deny — ${qualificationChoice==='Deny'?'Test B'", source)
+
     def test_client_avoids_known_older_safari_parse_breakers(self):
         source = (ROOT / "src" / "app" / "static" / "app.js").read_text()
         self.assertNotIn("?.", source)

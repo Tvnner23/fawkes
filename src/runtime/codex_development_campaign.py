@@ -438,12 +438,14 @@ class CodexDevelopmentCampaign:
             status="tanner_escalation", needs_tanner=needs,
             attention_event_ids=[*record.get("attention_event_ids", []), event["attention_id"]])
 
-    def decide_attention(self, campaign_id, attention_id, choice, *, authenticated_rider):
+    def decide_attention(self, campaign_id, attention_id, choice, *, authenticated_rider,
+                         expected_identity=None):
         record = self.store.load(campaign_id)
         if (record.get("needs_tanner") or {}).get("attention_id") != attention_id:
             raise PermissionError("attention decision is not bound to this campaign state")
         result = self.attention_store.decide(
-            attention_id, choice, authenticated_rider=authenticated_rider)
+            attention_id, choice, authenticated_rider=authenticated_rider,
+            expected_identity=expected_identity)
         if choice == "cancel_campaign":
             return {"campaign": self.cancel(campaign_id, authenticated_rider=True), **result}
         # Approval is retained as one consumable grant. It does not automatically

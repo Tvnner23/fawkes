@@ -413,9 +413,11 @@ class FawkesAppHandler(BaseHTTPRequestHandler):
                 self._json(400, {"error": {"code": "invalid_attention_decision", "message": "Attention identity is required."}}); return
             try:
                 payload = self._read_json()
+                if not isinstance(payload.get("identity"), dict):
+                    raise ValueError("complete immutable attention identity is required")
                 self._json(200, self.server.chat_service.decide_development_attention(
                     unquote(campaign_id), unquote(attention_id), payload.get("choice"),
-                    authenticated_rider=True))
+                    authenticated_rider=True, expected_identity=payload.get("identity")))
             except PermissionError as exc:
                 self._json(403, {"error": {"code": "attention_decision_denied", "message": str(exc)}})
             except (KeyError, ValueError, RuntimeError) as exc:

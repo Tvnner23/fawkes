@@ -1253,10 +1253,11 @@ class FawkesChatService:
                 "creates_authority": False}
 
     def decide_development_attention(self, campaign_id, attention_id, choice,
-                                     *, authenticated_rider=False):
+                                     *, authenticated_rider=False, expected_identity=None):
         campaign = CodexDevelopmentCampaign(self.instance_id)
         result = campaign.decide_attention(campaign_id, attention_id, choice,
-                                           authenticated_rider=authenticated_rider)
+                                           authenticated_rider=authenticated_rider,
+                                           expected_identity=expected_identity)
         return {"campaign": campaign.presentation(campaign_id),
                 "attention": result["event"], "decision": result["decision"]}
 
