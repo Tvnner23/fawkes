@@ -5,7 +5,9 @@ import unittest
 from pathlib import Path
 
 from src.runtime.development_attention import (
-    DevelopmentAttentionStore, native_approval_from_jsonl, sanitize_action,
+    ATTENTION_BASE_URL_ENV, REMOTE_AUTHENTICATED_ENV,
+    DevelopmentAttentionStore, canonical_attention_detail_url,
+    native_approval_from_jsonl, sanitize_action,
 )
 from src.runtime.component_supervision import ComponentReceiptStore
 from scripts.fawkes_attention_events import project
@@ -35,6 +37,27 @@ class DevelopmentAttentionTests(unittest.TestCase):
         self.assertFalse(first["creates_authority"])
         self.assertEqual(first["state"], "needs_tanner")
         self.assertIn("section=attention&attention=" + first["attention_id"], first["detail_url"])
+
+    def test_attention_detail_url_enforces_local_and_authenticated_remote_origins(self):
+        attention_id = "attention-" + "a" * 64
+        self.assertEqual(canonical_attention_detail_url(attention_id),
+            "http://localhost:8787/?view=developer&section=attention&attention=" + attention_id)
+        with self.assertRaisesRegex(ValueError, "requires HTTPS"):
+            canonical_attention_detail_url(attention_id, environment={
+                ATTENTION_BASE_URL_ENV: "http://fawkes.example"})
+        with self.assertRaisesRegex(ValueError, "authenticated boundary"):
+            canonical_attention_detail_url(attention_id, environment={
+                ATTENTION_BASE_URL_ENV: "https://fawkes.example"})
+        remote = canonical_attention_detail_url(attention_id, environment={
+            ATTENTION_BASE_URL_ENV: "https://fawkes.example",
+            REMOTE_AUTHENTICATED_ENV: "true"})
+        self.assertEqual(remote,
+            "https://fawkes.example/?view=developer&section=attention&attention=" + attention_id)
+        credential_bearing_origin = "https://" + ":".join(("user", "placeholder")) + "@fawkes.example"
+        with self.assertRaisesRegex(ValueError, "must not contain credentials"):
+            canonical_attention_detail_url(attention_id, environment={
+                ATTENTION_BASE_URL_ENV: credential_bearing_origin,
+                REMOTE_AUTHENTICATED_ENV: "true"})
 
     def test_approve_once_is_bound_and_consumable_once(self):
         event = self.create()

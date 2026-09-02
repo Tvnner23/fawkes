@@ -11,6 +11,7 @@ import threading
 import time
 import fcntl
 from contextlib import contextmanager
+from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 
 
 ROOT = Path(os.environ.get(
@@ -18,6 +19,8 @@ ROOT = Path(os.environ.get(
 )).resolve()
 ATTENTION_ROOT = ROOT / "database" / "development_attention"
 CHOICES = {"approve_once", "deny", "cancel_campaign"}
+ATTENTION_BASE_URL_ENV = "FAWKES_ATTENTION_BASE_URL"
+REMOTE_AUTHENTICATED_ENV = "FAWKES_ATTENTION_REMOTE_AUTHENTICATED"
 _DECISION_CONDITION = threading.Condition()
 _SECRET = re.compile(r"(?i)(authorization|token|api[_ -]?key|webhook|password|secret)\s*[:=]\s*\S+")
 
@@ -44,6 +47,46 @@ def sanitize_action(value):
     text = "".join(character for character in str(value or "")[:2_000] if character.isprintable())
     text = re.sub(r"(?:https?|wss?)://\S+", "<redacted-endpoint>", text)
     return _SECRET.sub(lambda match: match.group(1) + "=<redacted>", text) or "unspecified protected action"
+
+
+def canonical_attention_detail_url(attention_id, *, environment=None):
+    """Build one credential-free decision URL under the authenticated app boundary."""
+    if not re.fullmatch(r"attention-[a-f0-9]{64}", str(attention_id or "")):
+        raise ValueError("invalid attention identity")
+    values = os.environ if environment is None else environment
+    base = str(values.get(ATTENTION_BASE_URL_ENV) or "http://localhost:8787").strip()
+    parsed = urlsplit(base)
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise ValueError("attention base URL must not contain credentials, query, or fragment")
+    if parsed.path not in {"", "/"}:
+        raise ValueError("attention base URL must be an origin without a path")
+    loopback = (parsed.hostname or "").lower() in {"localhost", "127.0.0.1", "::1"}
+    if parsed.scheme == "http" and not loopback:
+        raise ValueError("remote attention base URL requires HTTPS")
+    if parsed.scheme == "https" and not loopback:
+        if str(values.get(REMOTE_AUTHENTICATED_ENV, "")).lower() != "true":
+            raise ValueError("remote attention base URL must declare its authenticated boundary")
+    elif parsed.scheme not in {"http", "https"}:
+        raise ValueError("attention base URL must use HTTP loopback or authenticated HTTPS")
+    origin = urlunsplit((parsed.scheme, parsed.netloc, "/", "", ""))
+    return origin + "?" + urlencode({
+        "view": "developer", "section": "attention", "attention": attention_id})
+
+
+def validate_attention_detail_url(detail_url, attention_id):
+    parsed = urlsplit(str(detail_url or ""))
+    query = parse_qs(parsed.query, strict_parsing=True)
+    if query != {"view": ["developer"], "section": ["attention"],
+                 "attention": [attention_id]}:
+        raise ValueError("attention detail URL is not bound to the exact request")
+    environment = {ATTENTION_BASE_URL_ENV: urlunsplit(
+        (parsed.scheme, parsed.netloc, parsed.path, "", ""))}
+    if parsed.scheme == "https":
+        environment[REMOTE_AUTHENTICATED_ENV] = "true"
+    expected = canonical_attention_detail_url(attention_id, environment=environment)
+    if expected != detail_url:
+        raise ValueError("attention detail URL is not canonical")
+    return detail_url
 
 
 def native_approval_from_jsonl(stdout, stderr=""):
@@ -80,10 +123,11 @@ def native_approval_from_jsonl(stdout, stderr=""):
 
 
 class DevelopmentAttentionStore:
-    def __init__(self, root=None):
+    def __init__(self, root=None, *, environment=None):
         self.root = Path(root) if root is not None else ATTENTION_ROOT
         self.events = self.root / "events"
         self.decisions = self.root / "decisions"
+        self.environment = os.environ if environment is None else environment
 
     def create(self, *, campaign_id, invocation_id, worker, kind, blocked_action,
                why_required, requested_authority, resources=(), reversible=None,
@@ -101,6 +145,10 @@ class DevelopmentAttentionStore:
         if path.exists():
             return json.loads(path.read_text(encoding="utf-8"))
         created = datetime.now(timezone.utc)
+        canonical_detail = canonical_attention_detail_url(
+            logical_id, environment=self.environment)
+        if detail_url is not None and detail_url != canonical_detail:
+            raise ValueError("supplied attention detail URL conflicts with canonical route")
         event = {"schema_version": 1, "record_type": "development_attention_event",
             "attention_id": logical_id, "logical_identity_sha256": _digest(logical),
             "campaign_id": campaign_id, "invocation_id": invocation_id,
@@ -116,7 +164,7 @@ class DevelopmentAttentionStore:
             "protocol_binding_sha256": binding_sha,
             "created_at": created.isoformat(),
             "expires_at": (created + timedelta(seconds=expires_in_seconds)).isoformat(),
-            "detail_url": detail_url or f"http://localhost:8787/?view=developer&section=attention&attention={logical_id}",
+            "detail_url": canonical_detail,
             "decision_id": None, "acknowledged": False, "creates_authority": False}
         event["record_sha256"] = _digest(event)
         self.events.mkdir(parents=True, exist_ok=True)

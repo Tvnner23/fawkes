@@ -12,6 +12,7 @@ import re
 import uuid
 
 from src.runtime.worker_exchange import _digest
+from src.runtime.development_attention import validate_attention_detail_url
 
 
 PROGRESS_INTERVAL_SECONDS = 10_800
@@ -94,6 +95,16 @@ class RiderNotificationStore:
     def _path(self, logical_id):
         return self.root / f"{logical_id}.json"
 
+    def _write(self, value):
+        path = self._path(value["notification_id"])
+        value = {key: item for key, item in value.items() if key != "record_sha256"}
+        value["record_sha256"] = _digest(value)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        temporary.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
+        temporary.replace(path)
+        return value
+
     def create_once(self, *, kind, campaign_id, state_key, message, evidence_refs):
         logical_id = "rider-notification-" + hashlib.sha256(
             f"{self.instance_id}\0{kind}\0{campaign_id}\0{state_key}".encode()).hexdigest()
@@ -105,20 +116,24 @@ class RiderNotificationStore:
             "campaign_id": campaign_id, "state_key": state_key, "message": message,
             "evidence_references": evidence_refs, "attempts": [], "delivered": False,
             "creates_authority": False, "created_at": datetime.now(timezone.utc).isoformat()}
-        value["record_sha256"] = _digest(value)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-        temporary.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
-        temporary.replace(path)
-        return value, True
+        return self._write(value), True
 
     def deliver(self, record, sender, *, transport_name="unspecified"):
         for retained in record.get("attempts", []):
-            if (retained.get("transport") == transport_name
-                    and retained.get("status") in {"delivered", "accepted_receipt_ambiguous"}):
+            if retained.get("transport") != transport_name:
+                continue
+            if retained.get("status") == "in_flight":
+                attempts = [({**item, "status": "accepted_receipt_ambiguous",
+                              "retry_permitted": False}
+                             if item.get("attempt_id") == retained.get("attempt_id") else item)
+                            for item in record["attempts"]]
+                return self._write({**record, "attempts": attempts})
+            if retained.get("status") in {"delivered", "accepted_receipt_ambiguous"}:
                 return record
         attempt = {"attempt_id": f"notification-attempt-{uuid.uuid4()}",
-            "attempted_at": datetime.now(timezone.utc).isoformat(), "transport": transport_name}
+            "attempted_at": datetime.now(timezone.utc).isoformat(), "transport": transport_name,
+            "status": "in_flight"}
+        current = self._write({**record, "attempts": [*record["attempts"], attempt]})
         try:
             receipt = sender(record["message"])
             attempt.update({"status": "delivered", "provider_receipt": receipt})
@@ -126,12 +141,9 @@ class RiderNotificationStore:
         except Exception as exc:
             attempt.update({"status": "failed", "failure_code": type(exc).__name__})
             delivered = False
-        value = {**record, "attempts": [*record["attempts"], attempt],
+        value = {**current, "attempts": [*record["attempts"], attempt],
                  "delivered": record["delivered"] or delivered}
-        value.pop("record_sha256", None)
-        value["record_sha256"] = _digest(value)
-        self._path(record["notification_id"]).write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
-        return value
+        return self._write(value)
 
 
 class TannerAttentionTransportRegistry:
@@ -155,7 +167,8 @@ class TannerAttentionTransportRegistry:
         current = record
         for name, sender in self._transports.items():
             current = store.deliver(current, sender, transport_name=name)
-            results[name] = current["attempts"][-1] if current.get("attempts") else None
+            results[name] = next((item for item in reversed(current.get("attempts", []))
+                                  if item.get("transport") == name), None)
         return {"notification": current, "transport_results": results,
                 "creates_authority": False}
 
@@ -179,17 +192,19 @@ def retain_needs_tanner_notification(record, *, root=NOTIFICATION_ROOT, registry
         return None
     reason = str(needs.get("reason") or "campaign requires rider review")[:240]
     attention_id = str(needs.get("attention_id") or "")
-    attention_reference = (
-        f" Attention request: {attention_id}."
-        if re.fullmatch(r"attention-[a-f0-9]{64}", attention_id) else ""
-    )
+    detail_url = str(needs.get("detail_url") or "")
+    if re.fullmatch(r"attention-[a-f0-9]{64}", attention_id):
+        validate_attention_detail_url(detail_url, attention_id)
+    else:
+        detail_url = ""
     state_key = hashlib.sha256(json.dumps(needs, sort_keys=True).encode()).hexdigest()
     store = RiderNotificationStore(record["instance_id"], root=root)
     notification, _ = store.create_once(kind="needs_tanner",
         campaign_id=record["campaign_id"], state_key=state_key,
-        message=(f"Fawkes: {record['campaign_id']} needs Tanner. {reason}."
-                 f"{attention_reference} "
-                 "Work is paused; inspect authenticated Development for details."),
+        message=(f"Fawkes paused {record['campaign_id']} because {reason}. Tanner's decision is required.\n\n"
+                 f"**Review and decide:** {detail_url}\n"
+                 + ("Open on the Fawkes PC.\n" if detail_url.startswith("http://localhost") else "")
+                 + "Opening this link or receiving this notification grants no authority."),
         evidence_refs=[{"reference_type": "development_campaign",
                         "reference_id": record["campaign_id"],
                         "record_sha256": record["record_sha256"]}])

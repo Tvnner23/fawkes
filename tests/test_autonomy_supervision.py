@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import json
 import tempfile
 import unittest
 
@@ -93,8 +94,11 @@ class AutonomySupervisionTests(unittest.TestCase):
 
     def test_needs_tanner_body_is_sanitized_and_deduplicated(self):
         attention_id = "attention-" + "b" * 64
+        detail_url = ("http://localhost:8787/?view=developer&section=attention&attention="
+                      + attention_id)
         record = self.record(status="tanner_escalation", needs={
-            "reason": "scope decision required", "attention_id": attention_id})
+            "reason": "scope decision required", "attention_id": attention_id,
+            "detail_url": detail_url})
         record.update({"instance_id": "phoenix", "record_sha256": "a" * 64})
         with tempfile.TemporaryDirectory() as directory:
             first = retain_needs_tanner_notification(record, root=directory)
@@ -103,7 +107,30 @@ class AutonomySupervisionTests(unittest.TestCase):
             self.assertNotIn("builder-report", first["message"])
             self.assertNotIn("review-report", first["message"])
             self.assertIn(attention_id, first["message"])
+            self.assertIn("**Review and decide:** " + detail_url, first["message"])
+            self.assertIn("Open on the Fawkes PC.", first["message"])
+            self.assertNotIn("token=", first["message"].lower())
+            self.assertIn("grants no authority", first["message"])
             self.assertFalse(first["creates_authority"])
+
+    def test_registered_transport_receives_producer_canonical_detail_url(self):
+        attention_id = "attention-" + "c" * 64
+        detail_url = ("https://fawkes.example/?view=developer&section=attention&attention="
+                      + attention_id)
+        record = self.record(status="tanner_escalation", needs={
+            "reason": "exact decision required", "attention_id": attention_id,
+            "detail_url": detail_url})
+        record.update({"instance_id": "phoenix", "record_sha256": "a" * 64})
+        received = []
+        registry = TannerAttentionTransportRegistry().register(
+            "future_transport", lambda message: received.append(message) or
+            {"provider": "future", "http_status": 202}, endpoint_authorized=True)
+        with tempfile.TemporaryDirectory() as directory:
+            retained = retain_needs_tanner_notification(
+                record, root=directory, registry=registry)
+        self.assertEqual(len(received), 1)
+        self.assertIn(detail_url, received[0])
+        self.assertEqual(retained["attempts"][0]["provider_receipt"]["http_status"], 202)
 
     def test_registered_transport_fanout_is_extensible_deduplicated_and_tanner_only(self):
         received = []
@@ -136,6 +163,48 @@ class AutonomySupervisionTests(unittest.TestCase):
                                    transport_name="discord_webhook")
         self.assertEqual(sent, [])
         self.assertEqual(result["attempts"], logical["attempts"])
+
+    def test_delivery_is_write_ahead_exact_and_uses_configured_state_root(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = RiderNotificationStore("phoenix", root=directory)
+            logical, _ = store.create_once(kind="needs_tanner", campaign_id="campaign-one",
+                state_key="exact", message="safe", evidence_refs=[])
+            delivered = store.deliver(logical,
+                lambda message: {"provider": "discord", "http_status": 204},
+                transport_name="discord_webhook")
+            retained = json.loads((Path(directory) / "phoenix" /
+                f"{logical['notification_id']}.json").read_text())
+        self.assertEqual(delivered["attempts"][0]["provider_receipt"]["http_status"], 204)
+        self.assertEqual(retained["attempts"][0]["status"], "delivered")
+
+    def test_acceptance_followed_by_receipt_failure_stays_in_flight_and_deduplicates(self):
+        sent = []
+        with tempfile.TemporaryDirectory() as directory:
+            normal = RiderNotificationStore("phoenix", root=directory)
+            logical, _ = normal.create_once(kind="needs_tanner", campaign_id="campaign-one",
+                state_key="exact", message="safe", evidence_refs=[])
+            class FailingFinalWriteStore(RiderNotificationStore):
+                writes = 0
+                def _write(self, value):
+                    self.writes += 1
+                    if self.writes == 2:
+                        raise OSError("simulated receipt persistence failure")
+                    return super()._write(value)
+            failing = FailingFinalWriteStore("phoenix", root=directory)
+            with self.assertRaises(OSError):
+                failing.deliver(logical,
+                    lambda message: sent.append(message) or
+                    {"provider": "discord", "http_status": 204},
+                    transport_name="discord_webhook")
+            retained = json.loads((Path(directory) / "phoenix" /
+                f"{logical['notification_id']}.json").read_text())
+            replayed = normal.deliver(retained,
+                lambda message: sent.append("duplicate"), transport_name="discord_webhook")
+        self.assertEqual(sent, ["safe"])
+        self.assertEqual(retained["attempts"][0]["status"], "in_flight")
+        self.assertEqual(replayed["attempts"][0]["status"], "accepted_receipt_ambiguous")
+        self.assertFalse(replayed["attempts"][0]["retry_permitted"])
+        self.assertEqual(len(replayed["attempts"]), 1)
 
 
 if __name__ == "__main__":

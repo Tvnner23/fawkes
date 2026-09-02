@@ -412,6 +412,7 @@ class CodexDevelopmentCampaign:
         needs = {"urgency": "urgent_blocking_flow", "reason": kind,
                  "decision_needed": "Approve this exact action once, deny it, or cancel the campaign",
                  "attention_id": event["attention_id"], "invocation_id": invocation_id,
+                 "detail_url": event["detail_url"],
                  "worker_id": worker["worker_id"], "requested_authority": event["requested_authority"]}
         return self._update(record, event_kind="tanner_attention_required",
             event_detail={"attention_id": event["attention_id"], "invocation_id": invocation_id,
