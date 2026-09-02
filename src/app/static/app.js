@@ -1096,12 +1096,13 @@ function renderDeveloperSection() {
      ['Fawkes’s risk-based recommendation',harmlessNoop?(qualificationChoice==='Deny'?'The action is low risk, but this qualification explicitly requires Deny; follow the qualification instruction.':'Approve Once is reasonable because the exact command is a no-op and creates no continuing authority.'):'No recommendation is available; Tanner should decide from the stated risk and scope.']].forEach(([label,value])=>{const section=element('section','attention-summary');section.append(element('h3','',label),element('p','',value));card.append(section);});
     const technical=document.createElement('details');technical.className='attention-technical';technical.append(element('summary','','Technical details'),element('pre','',JSON.stringify({campaign_id:attention.campaign_id,invocation_id:attention.invocation_id,worker:attention.worker,exact_action:attention.blocked_action,requested_authority:attention.requested_authority,resources:attention.resources,reversible:attention.reversible,expires_at:attention.expires_at,provider_code:attention.provider_code,protocol_binding:attention.protocol_binding},null,2)));card.append(technical);
     const choices = element('div', 'development-actions');
-    [['approve_once',`Approve Once — ${qualificationChoice==='Approve Once'?'Test A':attention.campaign_id}`,'Allow only this exact action one time. No continuing authority.'],
-     ['deny',`Deny — ${qualificationChoice==='Deny'?'Test B':attention.campaign_id}`,'Reject only this action. No authority is granted.'],
-     ['cancel_campaign',`Cancel Campaign — ${qualificationChoice?`Test ${qualificationChoice==='Deny'?'B':'A'}`:attention.campaign_id}`,'Stop this campaign safely. No authority is granted.']].forEach(([choice,label,consequence]) => {
+    [['approve_once','Approve Once','Allow only this exact action one time. No continuing authority.'],
+     ['deny','Deny','Reject only this action. No authority is granted.'],
+     ['cancel_campaign','Cancel Campaign','Stop this campaign safely. No authority is granted.']].forEach(([choice,label,consequence]) => {
       const immutableIdentity={attention_id:attention.attention_id,campaign_id:attention.campaign_id,invocation_id:attention.invocation_id,method:(attention.protocol_binding||{}).method||null,item_id:(attention.protocol_binding||{}).item_id||null,action_digest:(attention.protocol_binding||{}).approved_action_sha256||null,protocol_binding_sha256:attention.protocol_binding_sha256||null};
       const box=element('div','attention-choice'); const button=element('button','',label); button.type='button';
-      button.addEventListener('click', async()=>{if(window.confirm&&!window.confirm(`${label}\n\n${consequence}`))return;button.disabled=true; try{const result=await request(`/api/development/codex-campaigns/${encodeURIComponent(immutableIdentity.campaign_id)}/attention/${encodeURIComponent(immutableIdentity.attention_id)}/decision`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({choice,identity:immutableIdentity})});exactAttentionState=result;renderDeveloperSection();}catch(error){showError(error.message);button.disabled=false;}});
+      const humanTarget=qualificationLabel||'this Fawkes request';
+      button.addEventListener('click', async()=>{if(window.confirm&&!window.confirm(`${label} for ${humanTarget}\n\n${consequence}`))return;button.disabled=true; try{const result=await request(`/api/development/codex-campaigns/${encodeURIComponent(immutableIdentity.campaign_id)}/attention/${encodeURIComponent(immutableIdentity.attention_id)}/decision`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({choice,identity:immutableIdentity})});exactAttentionState=result;renderDeveloperSection();}catch(error){showError(error.message);button.disabled=false;}});
       box.append(button,element('p','meta',consequence)); choices.append(box);
     });
     card.append(choices, element('p','meta','Notification delivery and opening this page grant no authority. Only an authenticated choice above can decide this exact request.'));
@@ -1162,9 +1163,9 @@ function renderDeveloperSection() {
           reversible: attention.reversible, expires_at: attention.expires_at}, null, 2)));
         const choices = element('div', 'development-actions');
         const embeddedIdentity={attention_id:attention.attention_id,campaign_id:attention.campaign_id,invocation_id:attention.invocation_id,method:(attention.protocol_binding||{}).method||null,item_id:(attention.protocol_binding||{}).item_id||null,action_digest:(attention.protocol_binding||{}).approved_action_sha256||null,protocol_binding_sha256:attention.protocol_binding_sha256||null};
-        [['approve_once',`Approve Once — ${record.campaign_id}`],
-         ['deny',`Deny — ${record.campaign_id}`],
-         ['cancel_campaign',`Cancel Campaign — ${record.campaign_id}`]].forEach(([choice,label]) => {
+        [['approve_once','Approve Once'],
+         ['deny','Deny'],
+         ['cancel_campaign','Cancel Campaign']].forEach(([choice,label]) => {
           const button = element('button', '', label); button.type = 'button';
           button.addEventListener('click', async () => { button.disabled = true;
             try { await request(`/api/development/codex-campaigns/${encodeURIComponent(embeddedIdentity.campaign_id)}/attention/${encodeURIComponent(embeddedIdentity.attention_id)}/decision`,

@@ -82,8 +82,11 @@ class FawkesAppClientTests(unittest.TestCase):
         self.assertIn("action_digest", source)
         self.assertIn("Qualification instruction", source)
         self.assertIn("Fawkes’s risk-based recommendation", source)
-        self.assertIn("Approve Once — ${qualificationChoice==='Approve Once'?'Test A'", source)
-        self.assertIn("Deny — ${qualificationChoice==='Deny'?'Test B'", source)
+        self.assertIn("['approve_once','Approve Once'", source)
+        self.assertIn("['deny','Deny'", source)
+        self.assertIn("humanTarget=qualificationLabel||'this Fawkes request'", source)
+        self.assertNotIn("`Approve Once — ${record.campaign_id}`", source)
+        self.assertNotIn("`Deny — ${record.campaign_id}`", source)
         self.assertNotIn("attention.why_required||'').includes", source)
 
     def test_v10_structured_qualification_instructions_render_exact_served_text(self):
