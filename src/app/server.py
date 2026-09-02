@@ -5,6 +5,7 @@ import hmac
 import json
 import os
 import socket
+import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
@@ -15,6 +16,20 @@ from src.runtime.autonomy_supervision import RiderActivityStore
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 MAX_BODY_BYTES = 22 * 1024 * 1024
+
+
+def build_identity():
+    release = next((parent / "release.json" for parent in Path(__file__).resolve().parents
+                    if (parent / "release.json").is_file()), None)
+    if release:
+        value = json.loads(release.read_text(encoding="utf-8"))
+        return {"mode": "approved_release", "release_id": value.get("release_id"),
+                "manifest_sha256": value.get("manifest_sha256")}
+    files = [Path(__file__), STATIC_DIR / "index.html", STATIC_DIR / "app.js", STATIC_DIR / "app.css"]
+    digest = hashlib.sha256()
+    for item in files: digest.update(item.read_bytes())
+    return {"mode": "development_checkout", "release_id": "development-" + digest.hexdigest(),
+            "manifest_sha256": None}
 
 
 def default_bind_host(*, app_token, configured_host=None):
@@ -81,6 +96,9 @@ class FawkesAppHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
         path = parsed.path
+        if path == "/api/status":
+            self._json(200, {"service": "fawkes", "state": "ready", "build": build_identity()})
+            return
         if path == "/api/chat":
             if not self._require_auth():
                 return
@@ -214,6 +232,18 @@ class FawkesAppHandler(BaseHTTPRequestHandler):
                 query = parse_qs(parsed.query)
                 self._json(200, self.server.chat_service.development_attention(
                     pending_only=query.get("pending", ["false"])[0].lower() == "true"))
+            except Exception:
+                self._json(503, {"error": {"code": "attention_unavailable", "message": "Development attention state is unavailable right now."}})
+            return
+        attention_prefix = "/api/development/attention/"
+        if path.startswith(attention_prefix) and path.count("/") == 4:
+            if not self._require_auth():
+                return
+            attention_id = unquote(path[len(attention_prefix):])
+            try:
+                self._json(200, self.server.chat_service.development_attention_event(attention_id))
+            except KeyError:
+                self._json(404, {"error": {"code": "attention_not_found", "message": "That Tanner attention request does not exist in this Fawkes build."}})
             except Exception:
                 self._json(503, {"error": {"code": "attention_unavailable", "message": "Development attention state is unavailable right now."}})
             return
@@ -556,10 +586,14 @@ class FawkesAppHandler(BaseHTTPRequestHandler):
             self._json(404, {"error": {"code": "not_found", "message": "Not found."}})
             return
         body = (STATIC_DIR / item[0]).read_bytes()
+        identity = build_identity()["release_id"]
+        if item[0] == "index.html":
+            body = body.replace(b"__FAWKES_BUILD_ID__", identity.encode("ascii"))
         self.send_response(200)
         self.send_header("Content-Type", item[1])
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Fawkes-Build-ID", identity)
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Content-Security-Policy", "default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:")
         self.end_headers()

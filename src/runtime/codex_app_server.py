@@ -109,12 +109,14 @@ def typed_approval(method, params, *, campaign_id, invocation_id, worker, proces
     if not all(isinstance(v, str) and v for v in (thread_id, turn_id, item_id)):
         raise CodexAppServerError("approval", "approval_mapping_failure",
                                   "typed approval request lacks exact lineage")
-    action = (params.get("command") or params.get("changes") or params.get("fileChanges")
-              or params.get("permissions") or params.get("reason"))
+    raw_action = (params.get("command") or params.get("changes") or params.get("fileChanges")
+                  or params.get("permissions") or params.get("reason"))
+    action = (params.get("commandActions") or params.get("parsedCmd") or raw_action)
     authority = {
         "method": method, "thread_id": thread_id, "turn_id": turn_id,
         "item_id": item_id, "action": action, "cwd": params.get("cwd"),
     }
+    action_identity = {"method": method, "action": action, "cwd": params.get("cwd")}
     return {
         "campaign_id": campaign_id, "invocation_id": invocation_id,
         "worker": worker, "kind": "native_codex_approval_required",
@@ -125,7 +127,9 @@ def typed_approval(method, params, *, campaign_id, invocation_id, worker, proces
         "reversible": None, "provider_code": method,
         "protocol": {"version": PROTOCOL_VERSION, "process_id": process_id,
                      "thread_id": thread_id, "turn_id": turn_id,
-                     "item_id": item_id, "blocked_action_sha256": _digest(authority)},
+                     "item_id": item_id, "blocked_action_sha256": _digest(authority),
+                     "approved_action_sha256": _digest(action_identity)},
+        "exact_action": action_identity,
     }
 
 
@@ -163,7 +167,8 @@ class CodexAppServerTransport:
                 "request_schema_sha256": dict(PROTOCOL_SCHEMA_SHA256)}
 
     def run(self, *, cwd, prompt, output_schema, output_path, sandbox,
-            campaign_id, invocation_id, worker, environment, approval_handler=None):
+            campaign_id, invocation_id, worker, environment, approval_handler=None,
+            allow_detached_continuation=True):
         qualification = self.qualify(environment)
         process = self.popen([self.codex_binary, "app-server", "--listen", "stdio://"],
             cwd=str(cwd), env=environment, text=True, bufsize=1,
@@ -174,6 +179,7 @@ class CodexAppServerTransport:
         next_id, pending, lifecycle = 1, {}, [{"stage": "launched", **qualification}]
         thread_id = turn_id = None
         last_agent_text = None
+        pending_grant = None
         deadline = time.monotonic() + self.timeout_seconds
 
         def send(value):
@@ -195,7 +201,17 @@ class CodexAppServerTransport:
                     raise CodexAppServerError("turn", "timeout", "bounded app-server turn timed out")
                 try: line = inbox.get(timeout=min(1.0, max(0.01, deadline-time.monotonic())))
                 except queue.Empty:
+                    if process.poll() is None:
+                        try: process.wait(timeout=0.15)
+                        except subprocess.TimeoutExpired: pass
                     if process.poll() is not None:
+                        if pending_grant is not None and allow_detached_continuation:
+                            return self._continue_detached(cwd=cwd, original_prompt=prompt,
+                                output_schema=output_schema, output_path=output_path, sandbox=sandbox,
+                                campaign_id=campaign_id, invocation_id=invocation_id, worker=worker,
+                                environment=environment, approval_handler=approval_handler,
+                                original_approval=pending_grant["approval"],
+                                decision=pending_grant["decision"])
                         time.sleep(0.05)
                         detail = "".join(stderr_lines).strip()
                         raise CodexAppServerError("process", "unexpected_exit",
@@ -241,13 +257,31 @@ class CodexAppServerTransport:
                         if approval_handler is None:
                             raise CodexAppServerError("approval", "attention_handler_unavailable",
                                                       "typed approval requires Tanner")
-                        decision = approval_handler(approval, timeout_seconds=self.decision_timeout_seconds)
+                        decision = approval_handler(approval,
+                            timeout_seconds=self.decision_timeout_seconds,
+                            process_alive=lambda: process.poll() is None)
                         response = approval_response(method, decision["choice"], message["params"])
                         lifecycle.append({"stage": "approval_decided", "choice": decision["choice"],
                                           **approval["protocol"]})
+                    if process.poll() is not None:
+                        if decision.get("choice") == "approve_once" and allow_detached_continuation:
+                            return self._continue_detached(cwd=cwd, original_prompt=prompt,
+                                output_schema=output_schema, output_path=output_path, sandbox=sandbox,
+                                campaign_id=campaign_id, invocation_id=invocation_id, worker=worker,
+                                environment=environment, approval_handler=approval_handler,
+                                original_approval=approval, decision=decision)
+                        raise CodexAppServerError("approval", "stale_app_server_process",
+                                                  "approval process is no longer alive")
                     send({"id": message["id"], "result": response})
+                    if decision.get("choice") == "approve_once" and callable(decision.get("claim")):
+                        pending_grant = {"approval": approval, "decision": decision}
                     if response.get("decision") in {"cancel", "abort"} and decision.get("choice") == "cancel_campaign":
                         raise CodexAppServerError("approval", "campaign_cancelled", "campaign cancelled by Tanner")
+                    continue
+                if method == "serverRequest/resolved" and pending_grant is not None:
+                    pending_grant["decision"]["claim"]()
+                    pending_grant = None
+                    lifecycle.append({"stage": "approval_claim_consumed"})
                     continue
                 if method == "turn/completed":
                     params = message.get("params") or {}
@@ -283,6 +317,62 @@ class CodexAppServerTransport:
                 except (AttributeError, OSError): pass
         return AppServerResult(0, json.dumps(lifecycle),
                                "".join(stderr_lines), lifecycle, thread_id, turn_id)
+
+    def _continue_detached(self, *, cwd, original_prompt, output_schema, output_path,
+                           sandbox, campaign_id, invocation_id, worker, environment,
+                           approval_handler, original_approval, decision):
+        if original_approval["provider_code"] not in {
+                "item/commandExecution/requestApproval", "execCommandApproval"}:
+            raise CodexAppServerError("continuation", "action_not_reconstructable",
+                                      "detached approval action cannot be reconstructed safely")
+        for name in ("reserve", "claim", "finish"):
+            if not callable(decision.get(name)):
+                raise CodexAppServerError("continuation", "continuation_store_unavailable",
+                                          "durable continuation claim is unavailable")
+        action_sha = original_approval["protocol"]["approved_action_sha256"]
+        continuation_id = f"{invocation_id}-continuation-{action_sha[:16]}"
+        decision["reserve"](continuation_id)
+        claimed = False
+
+        def continuation_handler(request, *, timeout_seconds, process_alive=None):
+            nonlocal claimed
+            if (claimed or request["campaign_id"] != campaign_id
+                    or request["worker"]["worker_id"] != worker["worker_id"]
+                    or request["protocol"]["approved_action_sha256"] != action_sha):
+                raise CodexAppServerError("continuation", "approved_action_mismatch",
+                    "fresh continuation requested a different action: expected "
+                    f"{_safe(original_approval['exact_action'])}; received {_safe(request['exact_action'])}")
+            claimed = True
+            return {"choice": "approve_once",
+                    "claim": lambda: decision["claim"](continuation_id)}
+
+        exact_action = json.dumps(original_approval["exact_action"], ensure_ascii=False,
+                                  sort_keys=True)
+        continuation_prompt = (
+            "This is one restart-safe bounded continuation. First request and perform ONLY the exact "
+            f"previously Rider-approved action represented by this JSON: {exact_action}. "
+            "Do not substitute a different command, cwd, file, or resource. After that exact action "
+            "succeeds, continue the original authorized task without repeating completed mutations.\n\n"
+            "ORIGINAL AUTHORIZED TASK:\n" + original_prompt)
+        try:
+            result = self.run(cwd=cwd, prompt=continuation_prompt,
+                output_schema=output_schema, output_path=output_path, sandbox=sandbox,
+                campaign_id=campaign_id, invocation_id=continuation_id, worker=worker,
+                environment=environment, approval_handler=continuation_handler,
+                allow_detached_continuation=False)
+            if not claimed:
+                raise CodexAppServerError("continuation", "approved_action_not_claimed",
+                                          "fresh continuation did not claim the exact action")
+            decision["finish"](continuation_id, "completed")
+            result.lifecycle.insert(0, {"stage": "detached_continuation",
+                "continuation_id": continuation_id,
+                "original_invocation_id": invocation_id,
+                "approved_action_sha256": action_sha})
+            result.stdout = json.dumps(result.lifecycle)
+            return result
+        except Exception:
+            decision["finish"](continuation_id, "failed")
+            raise
 
 
 def exec_compatible_app_server_runner(*, campaign_id, invocation_id, worker,

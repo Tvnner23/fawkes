@@ -9,6 +9,8 @@ import re
 import uuid
 import threading
 import time
+import fcntl
+from contextlib import contextmanager
 
 
 ROOT = Path(os.environ.get(
@@ -18,6 +20,16 @@ ATTENTION_ROOT = ROOT / "database" / "development_attention"
 CHOICES = {"approve_once", "deny", "cancel_campaign"}
 _DECISION_CONDITION = threading.Condition()
 _SECRET = re.compile(r"(?i)(authorization|token|api[_ -]?key|webhook|password|secret)\s*[:=]\s*\S+")
+
+
+@contextmanager
+def _decision_lock(path):
+    lock = Path(str(path) + ".lock")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    with lock.open("a+") as descriptor:
+        fcntl.flock(descriptor.fileno(), fcntl.LOCK_EX)
+        try: yield
+        finally: fcntl.flock(descriptor.fileno(), fcntl.LOCK_UN)
 
 
 def _now():
@@ -104,7 +116,7 @@ class DevelopmentAttentionStore:
             "protocol_binding_sha256": binding_sha,
             "created_at": created.isoformat(),
             "expires_at": (created + timedelta(seconds=expires_in_seconds)).isoformat(),
-            "detail_url": detail_url or f"http://localhost:8787/?view=developer&attention={logical_id}",
+            "detail_url": detail_url or f"http://localhost:8787/?view=developer&section=attention&attention={logical_id}",
             "decision_id": None, "acknowledged": False, "creates_authority": False}
         event["record_sha256"] = _digest(event)
         self.events.mkdir(parents=True, exist_ok=True)
@@ -157,7 +169,18 @@ class DevelopmentAttentionStore:
             _DECISION_CONDITION.notify_all()
         return {"event": event, "decision": decision}
 
-    def wait_for_decision(self, attention_id, *, timeout_seconds):
+    def mark_process_detached(self, attention_id):
+        path = self.events / f"{attention_id}.json"
+        with _decision_lock(path):
+            event = json.loads(path.read_text(encoding="utf-8"))
+            if event.get("process_state") == "detached":
+                return event
+            event = {**event, "process_state": "detached", "process_detached_at": _now()}
+            event.pop("record_sha256", None); event["record_sha256"] = _digest(event)
+            path.write_text(json.dumps(event, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            return event
+
+    def wait_for_decision(self, attention_id, *, timeout_seconds, process_alive=None):
         deadline = time.monotonic() + timeout_seconds
         with _DECISION_CONDITION:
             while True:
@@ -167,18 +190,68 @@ class DevelopmentAttentionStore:
                     return {"event": event, "decision": decision}
                 if datetime.fromisoformat(event["expires_at"]) <= datetime.now(timezone.utc):
                     raise TimeoutError("Tanner decision request expired")
+                if process_alive is not None and not process_alive():
+                    event = self.mark_process_detached(attention_id)
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise TimeoutError("Tanner decision window expired")
-                _DECISION_CONDITION.wait(timeout=remaining)
+                _DECISION_CONDITION.wait(timeout=min(remaining, 0.5) if process_alive else remaining)
 
-    def consume_approve_once(self, decision_id, *, attention_id, invocation_id):
+    def consume_approve_once(self, decision_id, *, attention_id, invocation_id,
+                             protocol_binding_sha256=None, approved_action_sha256=None,
+                             continuation_id=None):
         path = self.decisions / f"{decision_id}.json"
-        decision = json.loads(path.read_text(encoding="utf-8"))
-        if (decision["choice"] != "approve_once" or decision["attention_id"] != attention_id
-                or decision["invocation_id"] != invocation_id or decision["consumed"]):
-            raise PermissionError("one-time approval is invalid, mismatched, or already consumed")
-        decision = {**decision, "consumed": True, "consumed_at": _now()}
-        decision.pop("record_sha256", None); decision["record_sha256"] = _digest(decision)
-        path.write_text(json.dumps(decision, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        return decision
+        with _decision_lock(path):
+            decision = json.loads(path.read_text(encoding="utf-8"))
+            event = self.get(attention_id)
+            binding = event.get("protocol_binding") or {}
+            if (decision["choice"] != "approve_once" or decision["attention_id"] != attention_id
+                    or decision["invocation_id"] != invocation_id or decision["consumed"]
+                    or (protocol_binding_sha256 is not None and
+                        decision.get("protocol_binding_sha256") != protocol_binding_sha256)
+                    or (approved_action_sha256 is not None and
+                        binding.get("approved_action_sha256") != approved_action_sha256)):
+                raise PermissionError("one-time approval is invalid, mismatched, or already consumed")
+            reserved = decision.get("continuation")
+            if continuation_id is not None and (not reserved or
+                    reserved.get("continuation_id") != continuation_id or reserved.get("state") != "reserved"):
+                raise PermissionError("detached continuation is not the exact reserved process")
+            decision = {**decision, "consumed": True, "consumed_at": _now(),
+                        "consumed_by_continuation_id": continuation_id}
+            decision.pop("record_sha256", None); decision["record_sha256"] = _digest(decision)
+            path.write_text(json.dumps(decision, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            return decision
+
+    def reserve_detached_continuation(self, decision_id, *, attention_id, invocation_id,
+                                      protocol_binding_sha256, continuation_id):
+        path = self.decisions / f"{decision_id}.json"
+        with _decision_lock(path):
+            decision = json.loads(path.read_text(encoding="utf-8"))
+            event = self.get(attention_id)
+            if (decision.get("choice") != "approve_once" or decision.get("consumed")
+                    or decision.get("attention_id") != attention_id
+                    or decision.get("invocation_id") != invocation_id
+                    or decision.get("protocol_binding_sha256") != protocol_binding_sha256
+                    or event.get("state") != "approved_once"
+                    or datetime.fromisoformat(event["expires_at"]) <= datetime.now(timezone.utc)
+                    or decision.get("continuation") is not None):
+                raise PermissionError("detached continuation grant is stale, mismatched, or replayed")
+            decision["continuation"] = {"continuation_id": continuation_id, "state": "reserved",
+                "reserved_at": _now(), "original_protocol_binding_sha256": protocol_binding_sha256}
+            decision.pop("record_sha256", None); decision["record_sha256"] = _digest(decision)
+            path.write_text(json.dumps(decision, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            return decision
+
+    def finish_detached_continuation(self, decision_id, continuation_id, *, status):
+        if status not in {"completed", "failed", "cancelled"}:
+            raise ValueError("invalid continuation status")
+        path = self.decisions / f"{decision_id}.json"
+        with _decision_lock(path):
+            decision = json.loads(path.read_text(encoding="utf-8"))
+            continuation = decision.get("continuation") or {}
+            if continuation.get("continuation_id") != continuation_id:
+                raise PermissionError("continuation identity mismatch")
+            decision["continuation"] = {**continuation, "state": status, "finished_at": _now()}
+            decision.pop("record_sha256", None); decision["record_sha256"] = _digest(decision)
+            path.write_text(json.dumps(decision, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            return decision

@@ -36,6 +36,19 @@ SCRIPT_NAMES = {
     "fawkes_stack_status.sh", "fawkes_attention_events.py",
     "verify_fawkes_production_prerequisites.py",
 }
+DEVELOPMENT_RUNTIME_CLOSURE = frozenset({
+    "src/runtime/codex_app_server.py",
+    "src/runtime/development_attention.py",
+    "src/runtime/codex_development_campaign.py",
+    "src/runtime/codex_development_handoff.py",
+    "src/runtime/codex_worker_adapter.py",
+    "src/runtime/codex_write_builder_adapter.py",
+    "src/runtime/wsl_codex_reviewer.py",
+    "src/runtime/worker_exchange.py",
+    "src/app/server.py",
+    "src/app/static/app.js",
+    "scripts/fawkes_attention_events.py",
+})
 
 
 def _digest_bytes(value):
@@ -56,6 +69,11 @@ def release_files(source=DEVELOPMENT_ROOT):
         if not resolved.is_file():
             raise ValueError(f"production source is not a regular file: {path}")
         result.append((path.relative_to(source).as_posix(), resolved))
+    if source == DEVELOPMENT_ROOT:
+        included = {relative for relative, _ in result}
+        missing = DEVELOPMENT_RUNTIME_CLOSURE - included
+        if missing:
+            raise ValueError("production Development runtime closure is incomplete: " + ", ".join(sorted(missing)))
     return result
 
 

@@ -1,6 +1,9 @@
 import io
 import tempfile
 import unittest
+import errno
+from unittest.mock import patch
+from pathlib import Path
 from contextlib import redirect_stdout
 
 from src.runtime.component_supervision import ComponentReceiptStore
@@ -41,3 +44,18 @@ class ComponentSupervisionTests(unittest.TestCase):
             recovery, _ = store.recovery(failure)
             self.assertEqual(recovery["failure_id"], failure["failure_id"])
             self.assertTrue(recovery["recovered"])
+
+    def test_read_only_receipt_boundary_fails_without_partial_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = ComponentReceiptStore(directory)
+            original = Path.write_text
+            def reject_temporary(path, *args, **kwargs):
+                if path.name.startswith(".") and path.name.endswith(".tmp"):
+                    raise OSError(errno.EROFS, "Read-only file system")
+                return original(path, *args, **kwargs)
+            with patch.object(Path, "write_text", reject_temporary):
+                with self.assertRaisesRegex(OSError, "Read-only file system"):
+                    store.failure(component="development_coordinator", stage="receipt",
+                                  category="state_boundary_unavailable")
+            self.assertEqual(list(store.receipt_root.glob("*.tmp")), [])
+            self.assertEqual(list(store.receipt_root.glob("*.json")), [])

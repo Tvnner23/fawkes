@@ -11,6 +11,7 @@ const tokenInput = document.querySelector('#token');
 const connect = document.querySelector('#connect');
 const authError = document.querySelector('#auth-error');
 const developerContent = document.querySelector('#developer-content');
+const developerBuild = document.querySelector('#developer-build');
 const detailPanel = document.querySelector('#detail-panel');
 const detailContent = document.querySelector('#detail-content');
 const soundSettings = document.querySelector('#sound-settings');
@@ -42,6 +43,8 @@ let developerData = null;
 let testCenterData = null;
 const testProbePreviews = {};
 let developerSection = 'observations';
+let requestedAttentionId = null;
+let exactAttentionState = null;
 let campaignPoll = null;
 let testCenterPoll = null;
 let recoveryGeneration = 0;
@@ -1029,8 +1032,45 @@ async function triggerAllAcceptance() {
 }
 function renderDeveloperSection() {
   if (developerSection === 'tests') { renderTestCenter(); return; }
-  if (!developerData) { emptyState('Loading Development…'); return; }
   clearNode(developerContent);
+  if (developerSection === 'attention') {
+    const card = element('article', 'dev-card attention-decision-card');
+    card.id = requestedAttentionId ? `attention-${requestedAttentionId}` : 'attention-inbox';
+    if (!requestedAttentionId) {
+      card.append(element('h2', '', 'Tanner Attention Inbox'));
+      card.append(element('p', '', 'Select an exact pending request from a Fawkes notification or Campaigns.'));
+      developerContent.append(card); return;
+    }
+    if (exactAttentionState && exactAttentionState.error) {
+      card.append(element('h2', '', 'Attention request unavailable'));
+      card.append(element('p', '', exactAttentionState.error));
+      developerContent.append(card); return;
+    }
+    const attention = exactAttentionState && exactAttentionState.attention;
+    if (!attention) { card.append(element('h2', '', 'Loading exact Tanner decision…')); developerContent.append(card); return; }
+    if (attention.state !== 'needs_tanner') {
+      card.append(element('h2', '', 'This attention request is already resolved'));
+      card.append(element('p', '', `Current state: ${readable(attention.state)}. No new authority can be granted from this resolved request.`));
+      developerContent.append(card); return;
+    }
+    card.append(element('h2', '', 'Tanner: Fawkes is paused and needs your decision'));
+    card.append(element('p', '', `Worker attempted: ${attention.blocked_action}`));
+    card.append(element('p', '', `Why it stopped: ${attention.why_required}`));
+    card.append(element('p', '', `Exact one-time authority requested: ${attention.requested_authority}`));
+    card.append(element('p', 'meta', `Campaign ${attention.campaign_id} · Invocation ${attention.invocation_id}`));
+    if (attention.resources && attention.resources.length) card.append(element('pre', '', JSON.stringify({affected_resources: attention.resources, reversible: attention.reversible}, null, 2)));
+    const choices = element('div', 'development-actions');
+    [['approve_once','Approve Once','Allow only this exact action one time. No continuing authority.'],
+     ['deny','Deny','Reject only this action. No authority is granted.'],
+     ['cancel_campaign','Cancel','Stop this campaign safely. No authority is granted.']].forEach(([choice,label,consequence]) => {
+      const box=element('div','attention-choice'); const button=element('button','',label); button.type='button';
+      button.addEventListener('click', async()=>{button.disabled=true; try{await request(`/api/development/codex-campaigns/${encodeURIComponent(attention.campaign_id)}/attention/${encodeURIComponent(attention.attention_id)}/decision`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({choice})}); await loadExactAttention();}catch(error){showError(error.message);button.disabled=false;}});
+      box.append(button,element('p','meta',consequence)); choices.append(box);
+    });
+    card.append(choices, element('p','meta','Notification delivery and opening this page grant no authority. Only an authenticated choice above can decide this exact request.'));
+    developerContent.append(card); return;
+  }
+  if (!developerData) { emptyState('Loading Development…'); return; }
   if (developerSection === 'campaigns') {
     const create = element('article', 'growth-card'); create.id = 'campaign-create-card';
     create.append(element('h3', '', 'Start an authorized bounded Worker task'));
@@ -1074,15 +1114,19 @@ function renderDeveloperSection() {
       if (record.needs_tanner) card.append(element('p', '', `Needs Tanner: ${readable(record.needs_tanner.reason)}`));
       const attention = (developerData.attention || []).find(item => item.campaign_id === record.campaign_id && item.state === 'needs_tanner');
       if (attention) {
-        const decision = element('article', 'evidence');
-        decision.append(element('h3', '', 'Tanner decision required'));
-        decision.append(element('p', '', attention.why_required));
+        const decision = element('article', 'evidence attention-decision-card');
+        decision.id = `attention-${attention.attention_id}`;
+        decision.append(element('h2', '', 'Tanner: Fawkes is paused and needs your decision'));
+        decision.append(element('p', '', `Why Fawkes stopped: ${attention.why_required}`));
+        decision.append(element('p', '', `Requested one-time authority: ${attention.requested_authority}`));
         decision.append(element('pre', '', JSON.stringify({invocation_id: attention.invocation_id,
           worker: attention.worker, blocked_action: attention.blocked_action,
           resources: attention.resources, requested_authority: attention.requested_authority,
           reversible: attention.reversible, expires_at: attention.expires_at}, null, 2)));
         const choices = element('div', 'development-actions');
-        [['approve_once','Approve this exact action once'],['deny','Deny'],['cancel_campaign','Cancel campaign']].forEach(([choice,label]) => {
+        [['approve_once','Approve Once — allow only this exact action, one time'],
+         ['deny','Deny — reject this action; grant no authority'],
+         ['cancel_campaign','Cancel Campaign — stop this campaign; grant no authority']].forEach(([choice,label]) => {
           const button = element('button', '', label); button.type = 'button';
           button.addEventListener('click', async () => { button.disabled = true;
             try { await request(`/api/development/codex-campaigns/${encodeURIComponent(record.campaign_id)}/attention/${encodeURIComponent(attention.attention_id)}/decision`,
@@ -1090,6 +1134,7 @@ function renderDeveloperSection() {
             catch (error) { showError(error.message); button.disabled = false; }
           }); choices.append(button);
         });
+        decision.append(element('p', 'meta', 'No choice grants continuing authority. Notification delivery never counts as approval.'));
         decision.append(choices); card.append(decision);
       }
       const controls = element('div', 'development-actions');
@@ -1186,9 +1231,29 @@ async function loadDeveloper() {
     if (developerSection === 'tests') await loadTestCenter();
     status.textContent = 'Development observatory';
   } catch (error) {
-    emptyState(error.message);
+    if (developerSection === 'attention' && requestedAttentionId) {
+      exactAttentionState = {error: error.status === 401 ? 'Authenticate to inspect this exact Tanner attention request.' : error.message};
+      renderDeveloperSection();
+    } else emptyState(error.message);
     status.textContent = 'Needs attention';
   }
+}
+async function verifyBuildIdentity() {
+  if (!developerBuild) return;
+  try {
+    const value = await request('/api/status');
+    const serverId = value && value.build && value.build.release_id;
+    const pageId = developerBuild.textContent.replace(/^Build:\s*/, '').trim();
+    developerBuild.textContent = serverId === pageId ? `Build: ${serverId}` : `BUILD MISMATCH — page ${pageId} / API ${serverId}`;
+    developerBuild.classList.toggle('auth-error', serverId !== pageId);
+  } catch (error) { developerBuild.textContent = `Build identity unavailable: ${error.message}`; }
+}
+async function loadExactAttention() {
+  if (!requestedAttentionId) { exactAttentionState=null; renderDeveloperSection(); return; }
+  try { exactAttentionState = await request(`/api/development/attention/${encodeURIComponent(requestedAttentionId)}`); }
+  catch (error) { exactAttentionState={error:error.status===404?'This attention ID is unknown or no longer retained.':error.message}; }
+  renderDeveloperSection();
+  window.setTimeout(()=>{ const card=document.getElementById(`attention-${requestedAttentionId}`); if(card) card.scrollIntoView({block:'center'}); },0);
 }
 async function openObservation(observationId) {
   detailPanel.classList.remove('hidden');
@@ -1335,6 +1400,7 @@ document.querySelector('#developer-sections').addEventListener('click', event =>
   document.querySelectorAll('#developer-sections [data-section]').forEach(item => item.classList.toggle('active', item === button));
   renderDeveloperSection();
   if (developerSection === 'tests') loadTestCenter();
+  if (developerSection === 'attention') loadExactAttention();
 });
 developerContent.addEventListener('click', event => {
   const run = event.target.closest('[data-run-test]');
@@ -1347,13 +1413,19 @@ developerContent.addEventListener('click', event => {
 document.querySelector('#detail-close').addEventListener('click', () => detailPanel.classList.add('hidden'));
 detailPanel.addEventListener('click', event => { if (event.target === detailPanel) detailPanel.classList.add('hidden'); });
 const startDevelopment = document.querySelector('#start-development-task');
-if (startDevelopment) startDevelopment.addEventListener('click', () => { developerSection = 'campaigns'; renderDeveloperSection(); document.querySelector('#campaign-objective')?.focus(); });
+if (startDevelopment) startDevelopment.addEventListener('click', () => { developerSection = 'campaigns'; renderDeveloperSection(); const field=document.querySelector('#campaign-objective'); if(field) field.focus(); });
 const liveActivity = document.querySelector('#open-live-activity');
 if (liveActivity) liveActivity.addEventListener('click', () => { developerSection = 'campaigns'; loadDeveloper(); if (!campaignPoll) campaignPoll = window.setInterval(loadDeveloper, 2000); });
 const runtimeStatus = document.querySelector('#open-runtime-status');
 if (runtimeStatus) runtimeStatus.addEventListener('click', openRuntimeStatus);
 loadChat().then(() => {
-  if (new URLSearchParams(window.location.search).get('view') === 'developer') {
-    document.querySelector('.app-nav [data-view="developer"]')?.click();
+  const startup = new URLSearchParams(window.location.search);
+  if (startup.get('view') === 'developer') {
+    requestedAttentionId = startup.get('attention');
+    if (startup.get('section') === 'attention' || requestedAttentionId) developerSection = 'attention';
+    const developerButton=document.querySelector('.app-nav [data-view="developer"]'); if(developerButton) developerButton.click();
+    document.querySelectorAll('#developer-sections [data-section]').forEach(item => item.classList.toggle('active', item.dataset.section === developerSection));
+    if (developerSection === 'attention') loadExactAttention();
   }
 });
+verifyBuildIdentity();

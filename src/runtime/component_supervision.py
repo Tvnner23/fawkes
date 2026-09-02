@@ -7,6 +7,8 @@ import json
 import os
 import re
 import uuid
+import fcntl
+from contextlib import contextmanager
 
 
 DEFAULT_STATE_ROOT = Path.home() / ".local" / "state" / "fawkes"
@@ -40,9 +42,15 @@ class ComponentReceiptStore:
         self.receipt_root.mkdir(parents=True, exist_ok=True, mode=0o700)
         path = self.receipt_root / f"{record['timestamp_utc'].replace(':', '')}-{record['failure_id']}.json"
         temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-        temporary.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        os.chmod(temporary, 0o600)
-        temporary.replace(path)
+        try:
+            temporary.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            os.chmod(temporary, 0o600)
+            temporary.replace(path)
+        except BaseException:
+            # An unavailable/read-only state boundary must fail visibly without
+            # leaving a misleading partial receipt behind.
+            temporary.unlink(missing_ok=True)
+            raise
         print("FAWKES_COMPONENT_" + record["receipt_type"].upper())
         for key in ("failure_id", "timestamp_utc", "component", "stage", "category",
                     "process_exit_code", "provider_code", "exception_type", "safe_message",
@@ -86,12 +94,23 @@ class ComponentReceiptStore:
                         "service_state")).encode("utf-8")
         ).hexdigest()
         path = self.pending_root / f"{fingerprint}.json"
-        if path.exists():
-            return path, False
-        value = {"logical_notification_id": "component-" + fingerprint,
-                 "receipt": record, "attempts": []}
-        path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        os.chmod(path, 0o600)
+        lock = self.pending_root / f".{fingerprint}.lock"
+        with lock.open("a+") as descriptor:
+            fcntl.flock(descriptor.fileno(), fcntl.LOCK_EX)
+            if path.exists():
+                return path, False
+            value = {"logical_notification_id": "component-" + fingerprint,
+                     "receipt": record, "attempts": []}
+            temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+            try:
+                temporary.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+                os.chmod(temporary, 0o600)
+                temporary.replace(path)
+            except BaseException:
+                temporary.unlink(missing_ok=True)
+                raise
+            finally:
+                fcntl.flock(descriptor.fileno(), fcntl.LOCK_UN)
         return path, True
 
     def latest(self, limit=20):

@@ -261,7 +261,7 @@ class CodexDevelopmentCampaign:
             authenticated_rider=True, exchange=self.exchange,
             approval_handler=self._handle_typed_approval)
 
-    def _handle_typed_approval(self, approval, *, timeout_seconds):
+    def _handle_typed_approval(self, approval, *, timeout_seconds, process_alive=None):
         """Project one exact typed request into the accepted Rider boundary."""
         paused = self.require_tanner(
             approval["campaign_id"], invocation_id=approval["invocation_id"],
@@ -274,14 +274,27 @@ class CodexDevelopmentCampaign:
             protocol_binding=approval["protocol"])
         attention_id = paused["needs_tanner"]["attention_id"]
         result = self.attention_store.wait_for_decision(
-            attention_id, timeout_seconds=timeout_seconds)
+            attention_id, timeout_seconds=timeout_seconds, process_alive=process_alive)
         decision = result["decision"]
-        if decision["choice"] == "approve_once":
-            self.attention_store.consume_approve_once(
+        def claim(continuation_id=None):
+            return self.attention_store.consume_approve_once(
                 decision["decision_id"], attention_id=attention_id,
-                invocation_id=approval["invocation_id"])
+                invocation_id=approval["invocation_id"],
+                protocol_binding_sha256=result["event"].get("protocol_binding_sha256"),
+                approved_action_sha256=approval["protocol"]["approved_action_sha256"],
+                continuation_id=continuation_id)
+        def reserve(continuation_id):
+            return self.attention_store.reserve_detached_continuation(
+                decision["decision_id"], attention_id=attention_id,
+                invocation_id=approval["invocation_id"],
+                protocol_binding_sha256=result["event"].get("protocol_binding_sha256"),
+                continuation_id=continuation_id)
+        def finish(continuation_id, status):
+            return self.attention_store.finish_detached_continuation(
+                decision["decision_id"], continuation_id, status=status)
         return {"choice": decision["choice"], "attention_id": attention_id,
-                "decision_id": decision["decision_id"]}
+                "decision_id": decision["decision_id"], "claim": claim,
+                "reserve": reserve, "finish": finish}
 
     @staticmethod
     def _event(kind, detail=None):

@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#171b22">
   <title>Fawkes</title>
   <link rel="manifest" href="/manifest.webmanifest">
-  <link rel="stylesheet" href="/app.css">
+  <link rel="stylesheet" href="/app.css?v=__FAWKES_BUILD_ID__">
 </head>
 <body>
   <main class="shell">
@@ -47,6 +47,7 @@
       </div>
       <nav id="developer-sections" class="section-tabs" aria-label="Developer sections">
         <button class="active" data-section="observations">Observations</button>
+        <button data-section="attention">Attention</button>
         <button data-section="campaigns">Campaigns</button>
         <button data-section="corrections">Corrections</button>
         <button data-section="defects">Defects</button>
@@ -60,6 +61,7 @@
         <button data-section="tests">Test Center</button>
       </nav>
       <div id="developer-content" class="developer-content" aria-live="polite"></div>
+      <p id="developer-build" class="meta">Build: __FAWKES_BUILD_ID__</p>
     </section>
     <section id="settings-view" class="view settings-view hidden" aria-label="Settings">
       <div class="developer-intro">
@@ -98,7 +100,7 @@
       <div id="detail-content"></div>
     </div>
   </section>
-  <script src="/app.js" defer></script>
+  <script src="/app.js?v=__FAWKES_BUILD_ID__" defer></script>
   <script src="/presence-three.bundle.js" defer></script>
   <script type="module" src="/presence-bootstrap.js"></script>
 </body>

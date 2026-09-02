@@ -27,6 +27,33 @@ class DevelopmentSummonTests(unittest.TestCase):
         self.assertNotIn("powershell.exe", source.lower())
         self.assertNotIn("wsl.exe", source.lower())
 
+    def test_windows_attention_is_persistent_fawkes_toast_with_exact_deep_link(self):
+        runner = (ROOT / "deploy/windows/FawkesAttention.ps1").read_text()
+        installer = (ROOT / "deploy/windows/Install-FawkesAttentionTask.ps1").read_text()
+        self.assertIn("ToastNotificationManager", runner)
+        self.assertIn("ProjectFawkes.Attention", runner)
+        self.assertIn("activationType='protocol'", runner)
+        self.assertIn("fawkes-attention://open?attention=", runner)
+        self.assertNotIn("NotifyIcon", runner)
+        self.assertNotIn("ShowBalloonTip", runner)
+        self.assertIn("Fawkes Attention.lnk", installer)
+        self.assertIn("ProjectFawkes.Attention", installer)
+        self.assertIn("FawkesAttentionLauncher.exe", installer)
+        self.assertIn("HKCU:\\Software\\Classes\\fawkes-attention", installer)
+        self.assertIn("^attention-[a-f0-9]{64}$", installer)
+
+    def test_attention_deep_link_renders_plain_language_bounded_choices(self):
+        javascript = (ROOT / "src/app/static/app.js").read_text()
+        self.assertIn("Tanner: Fawkes is paused and needs your decision", javascript)
+        self.assertIn("Approve Once — allow only this exact action, one time", javascript)
+        self.assertIn("Deny — reject this action; grant no authority", javascript)
+        self.assertIn("Cancel Campaign — stop this campaign; grant no authority", javascript)
+        self.assertIn("startup.get('attention')", javascript)
+        self.assertIn("scrollIntoView", javascript)
+        self.assertIn("BUILD MISMATCH", javascript)
+        self.assertIn("/api/development/attention/", javascript)
+        self.assertIn('data-section="attention"', (ROOT / "src/app/static/index.html").read_text())
+
     @patch("src.runtime.production_control.subprocess.run")
     def test_runtime_control_is_fixed_allowlist_and_zero_development_authority(self, run):
         run.return_value = Mock(returncode=0, stdout="", stderr="")

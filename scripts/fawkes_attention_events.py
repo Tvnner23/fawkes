@@ -24,7 +24,8 @@ def project(*, root=ROOT, attention_store=None, receipt_store=None):
     events = []
     attention_store = attention_store or DevelopmentAttentionStore()
     receipt_store = receipt_store or ComponentReceiptStore()
-    for item in attention_store.list(pending_only=True):
+    pending_attention = attention_store.list(pending_only=True)
+    for item in pending_attention:
         events.append({"event_id": _id("needs_tanner", item["attention_id"]),
             "kind": "needs_tanner", "created_at": item["created_at"],
             "campaign_id": item["campaign_id"], "title": "Fawkes needs Tanner",
@@ -48,6 +49,13 @@ def project(*, root=ROOT, attention_store=None, receipt_store=None):
                     "focus": True, "detail_url": f"http://localhost:8787/?view=developer&campaign={campaign['campaign_id']}",
                     "source_id": event["event_id"]})
     for receipt in receipt_store.latest(limit=200):
+        # The component receipt remains durable canonical failure evidence, but
+        # a typed request already has one richer exact decision event. Project
+        # only that logical attention to Windows to avoid a duplicate popup.
+        if (pending_attention and receipt.get("component") == "development_coordinator"
+                and receipt.get("stage") == "tanner_attention_required"
+                and receipt.get("service_state") == "needs_tanner"):
+            continue
         terminal = receipt.get("receipt_type") == "failure" and receipt.get("service_state") in {"failed", "needs_tanner"}
         recovery = receipt.get("receipt_type") == "recovery"
         if not terminal and not recovery:

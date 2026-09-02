@@ -1243,6 +1243,14 @@ class FawkesChatService:
         return {"attention": DevelopmentAttentionStore().list(pending_only=pending_only),
                 "creates_authority": False}
 
+    def development_attention_event(self, attention_id):
+        from src.runtime.development_attention import DevelopmentAttentionStore
+        try:
+            event = DevelopmentAttentionStore().get(attention_id)
+        except FileNotFoundError as exc:
+            raise KeyError(attention_id) from exc
+        return {"attention": event, "creates_authority": False}
+
     def decide_development_attention(self, campaign_id, attention_id, choice,
                                      *, authenticated_rider=False):
         campaign = CodexDevelopmentCampaign(self.instance_id)

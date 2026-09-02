@@ -34,6 +34,7 @@ class DevelopmentAttentionTests(unittest.TestCase):
         self.assertEqual(len(self.store.list()), 1)
         self.assertFalse(first["creates_authority"])
         self.assertEqual(first["state"], "needs_tanner")
+        self.assertIn("section=attention&attention=" + first["attention_id"], first["detail_url"])
 
     def test_approve_once_is_bound_and_consumable_once(self):
         event = self.create()
@@ -89,6 +90,28 @@ class DevelopmentAttentionTests(unittest.TestCase):
         self.assertIn("exit=17", failure["safe_message"])
         self.assertIn("provider=E_PROVIDER", failure["safe_message"])
         self.assertNotIn("blocked_action", failure["safe_message"])
+
+    def test_typed_attention_suppresses_duplicate_component_popup_only(self):
+        self.create()
+        receipt_store = ComponentReceiptStore(Path(self.temporary.name) / "receipts")
+        receipt_store.failure(component="development_coordinator",
+            stage="tanner_attention_required", category="native_codex_approval_required",
+            service_state="needs_tanner")
+        projected = project(root=Path(self.temporary.name), attention_store=self.store,
+                            receipt_store=receipt_store)
+        self.assertEqual([item["kind"] for item in projected], ["needs_tanner"])
+
+    def test_process_detachment_and_interface_reopen_preserve_one_pending_event(self):
+        event = self.create()
+        with self.assertRaises(TimeoutError):
+            self.store.wait_for_decision(event["attention_id"], timeout_seconds=0.02,
+                                         process_alive=lambda: False)
+        reopened = DevelopmentAttentionStore(Path(self.temporary.name))
+        retained = reopened.get(event["attention_id"])
+        self.assertEqual(retained["state"], "needs_tanner")
+        self.assertEqual(retained["process_state"], "detached")
+        self.assertEqual([item["attention_id"] for item in reopened.list(pending_only=True)],
+                         [event["attention_id"]])
 
 
 if __name__ == "__main__":

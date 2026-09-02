@@ -1,9 +1,13 @@
 import json
+import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-from src.runtime.production_release import materialize_release, promote_release, rollback_release, verify_release
+from src.runtime.production_release import (DEVELOPMENT_RUNTIME_CLOSURE, materialize_release,
+    promote_release, release_files, rollback_release, verify_release)
 
 
 class ProductionReleaseTests(unittest.TestCase):
@@ -47,3 +51,30 @@ class ProductionReleaseTests(unittest.TestCase):
             target.chmod(0o644); target.write_text("tampered")
             with self.assertRaisesRegex(ValueError, "digest mismatch"):
                 verify_release(target.parents[1])
+
+    def test_real_source_closure_contains_development_app_server_runtime(self):
+        included = {relative for relative, _ in release_files()}
+        self.assertLessEqual(DEVELOPMENT_RUNTIME_CLOSURE, included)
+
+    def test_isolated_release_imports_do_not_resolve_from_development_checkout(self):
+        with tempfile.TemporaryDirectory() as directory:
+            production = Path(directory) / "production"
+            record = materialize_release(production_root=production,
+                validation_reference="isolated-production-import-test")
+            release = production / "releases" / record["release_id"]
+            modules = [
+                "src.runtime.codex_app_server", "src.runtime.development_attention",
+                "src.runtime.codex_development_campaign", "src.runtime.codex_development_handoff",
+                "src.runtime.codex_write_builder_adapter", "src.runtime.wsl_codex_reviewer",
+            ]
+            script = ("import importlib,json,sys; root=sys.argv[1]; sys.path.insert(0,root); "
+                "mods=[importlib.import_module(x) for x in json.loads(sys.argv[2])]; "
+                "print(json.dumps([m.__file__ for m in mods]))")
+            environment = {key: value for key, value in os.environ.items()
+                           if key not in {"PYTHONPATH", "PYTHONHOME"}}
+            completed = subprocess.run([sys.executable, "-I", "-B", "-c", script,
+                str(release), json.dumps(modules)], cwd="/tmp", env=environment,
+                text=True, capture_output=True, check=True)
+            loaded = json.loads(completed.stdout)
+            self.assertTrue(all(Path(path).resolve().is_relative_to(release.resolve())
+                                for path in loaded), loaded)
