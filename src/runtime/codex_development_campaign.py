@@ -279,7 +279,9 @@ class CodexDevelopmentCampaign:
             can_request_again=True, work_lost=False)
         attention_id = paused["needs_tanner"]["attention_id"]
         result = self.attention_store.wait_for_decision(
-            attention_id, timeout_seconds=timeout_seconds, process_alive=process_alive)
+            attention_id, timeout_seconds=timeout_seconds, process_alive=process_alive,
+            reminder_handler=lambda _event: retain_needs_tanner_notification(
+                self.store.load(approval["campaign_id"])))
         decision = result["decision"]
         def claim(continuation_id=None):
             return self.attention_store.consume_approve_once(

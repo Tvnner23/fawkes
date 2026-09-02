@@ -284,7 +284,8 @@ class DevelopmentAttentionStore:
             _write_json_atomic(path, event)
             return event
 
-    def wait_for_decision(self, attention_id, *, timeout_seconds, process_alive=None):
+    def wait_for_decision(self, attention_id, *, timeout_seconds, process_alive=None,
+                          reminder_handler=None):
         deadline = time.monotonic() + timeout_seconds
         with _DECISION_CONDITION:
             while True:
@@ -296,6 +297,8 @@ class DevelopmentAttentionStore:
                     return {"event": event, "decision": decision}
                 if process_alive is not None and not process_alive():
                     event = self.mark_process_detached(attention_id)
+                if reminder_handler is not None:
+                    reminder_handler(event)
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise TimeoutError("Tanner decision window expired")

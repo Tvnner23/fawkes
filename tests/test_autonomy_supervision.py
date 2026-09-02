@@ -121,6 +121,14 @@ class AutonomySupervisionTests(unittest.TestCase):
             "detail_url": "http://localhost:8787/?view=developer&section=attention&attention=" + attention_id,
             "expires_at": expires.isoformat(), "urgency": "urgent_expiring"}
         self.assertEqual(expiration_reminder_stage(needs), "fifteen_minutes")
+        self.assertEqual(expiration_reminder_stage(needs, now=expires - timedelta(minutes=40)),
+                         "initial")
+        self.assertEqual(expiration_reminder_stage(needs, now=expires - timedelta(minutes=20)),
+                         "half_window")
+        self.assertEqual(expiration_reminder_stage(needs, now=expires - timedelta(minutes=4)),
+                         "five_minutes")
+        self.assertEqual(expiration_reminder_stage(needs, now=expires + timedelta(seconds=1)),
+                         "expired")
         record = self.record(status="tanner_escalation", needs=needs)
         record.update({"instance_id": "phoenix", "record_sha256": "a" * 64})
         received = {"discord": [], "future": []}
