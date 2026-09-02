@@ -22,6 +22,7 @@ class FawkesServiceDefinitionTests(unittest.TestCase):
         self.assertNotIn("WorkingDirectory=/home/tvnner/fawkes", app)
         self.assertNotIn("WorkingDirectory=/home/tvnner/fawkes", discord)
         self.assertIn("FAWKES_DEVELOPMENT_ROOT=/home/tvnner/fawkes", app)
+        self.assertIn("FAWKES_RUNTIME_STATE_ROOT=/home/tvnner/.local/state/fawkes", app)
 
     def test_target_contains_only_current_production_components(self):
         target = (ROOT / "deploy/systemd/fawkes.target").read_text()

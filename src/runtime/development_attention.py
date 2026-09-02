@@ -18,12 +18,67 @@ ROOT = Path(os.environ.get(
     "FAWKES_DEVELOPMENT_ROOT", Path(__file__).resolve().parent.parent.parent
 )).resolve()
 ATTENTION_ROOT = ROOT / "database" / "development_attention"
+RUNTIME_STATE_ROOT_ENV = "FAWKES_RUNTIME_STATE_ROOT"
 CHOICES = {"approve_once", "deny", "cancel_campaign"}
 QUALIFICATION_CHOICES = {"approve_once", "deny"}
 ATTENTION_BASE_URL_ENV = "FAWKES_ATTENTION_BASE_URL"
 REMOTE_AUTHENTICATED_ENV = "FAWKES_ATTENTION_REMOTE_AUTHENTICATED"
+CONSUMER_LEASE_SECONDS = 5
 _DECISION_CONDITION = threading.Condition()
 _SECRET = re.compile(r"(?i)(authorization|token|api[_ -]?key|webhook|password|secret)\s*[:=]\s*\S+")
+
+
+class AttentionConsumerUnavailable(RuntimeError):
+    """The exact typed request has no verifiably live or resumable consumer."""
+
+    code = "attention_consumer_unavailable"
+
+
+def _linux_process_identity(process_id):
+    """Return a boot-scoped process-start identity, never PID alone."""
+    try:
+        pid = int(process_id)
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+        # Fields after the final ')' begin at proc field 3; starttime is field 22.
+        start_ticks = stat.rsplit(")", 1)[1].split()[19]
+        boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
+    except (OSError, ValueError, IndexError):
+        return None
+    return _digest({"boot_id": boot_id, "process_id": pid, "start_ticks": start_ticks})
+
+
+def _validated_configured_root(value, *, leaf=None):
+    try:
+        configured = Path(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("configured Development Attention root is malformed") from exc
+    if not configured.is_absolute():
+        raise ValueError("configured Development Attention root must be absolute")
+    selected = configured.resolve(strict=False)
+    if leaf is not None:
+        selected = selected / leaf
+    repository = Path(__file__).resolve().parents[2]
+    if selected == repository or repository in selected.parents:
+        raise ValueError("configured Development Attention root must be outside the repository")
+    existing = selected
+    while not existing.exists() and existing != existing.parent:
+        existing = existing.parent
+    if ((selected.exists() and not selected.is_dir())
+            or not existing.is_dir()
+            or not os.access(existing, os.W_OK | os.X_OK)):
+        raise ValueError("configured Development Attention root is unusable")
+    return selected
+
+
+def resolve_attention_root(root=None, *, environment=None):
+    """Resolve one store root without changing the historical unconfigured default."""
+    if root is not None:
+        return _validated_configured_root(root)
+    values = os.environ if environment is None else environment
+    runtime_root = values.get(RUNTIME_STATE_ROOT_ENV)
+    if runtime_root:
+        return _validated_configured_root(runtime_root, leaf="development_attention")
+    return ATTENTION_ROOT
 
 
 @contextmanager
@@ -132,11 +187,81 @@ def native_approval_from_jsonl(stdout, stderr=""):
 
 
 class DevelopmentAttentionStore:
-    def __init__(self, root=None, *, environment=None):
-        self.root = Path(root) if root is not None else ATTENTION_ROOT
+    def __init__(self, root=None, *, environment=None, consumer_probe=None):
+        self.environment = os.environ if environment is None else environment
+        self.root = resolve_attention_root(root, environment=self.environment)
         self.events = self.root / "events"
         self.decisions = self.root / "decisions"
-        self.environment = os.environ if environment is None else environment
+        self.consumer_probe = consumer_probe or _linux_process_identity
+
+    def _new_consumer_binding(self, event_binding, binding_sha, created, *, owner_identity):
+        # Typed app-server requests supply their exact child PID. Other bounded
+        # producers are owned by the creating process and receive the same
+        # boot/start-time protection instead of an unverifiable "live" flag.
+        process_id = event_binding.get("process_id", os.getpid())
+        process_identity = self.consumer_probe(process_id)
+        if process_identity is None:
+            return None
+        return {
+            "process_id": process_id,
+            "process_start_identity": process_identity,
+            "protocol_binding_sha256": binding_sha,
+            "owner_identity_sha256": _digest(owner_identity),
+            "registered_at": created.isoformat(),
+            "lease_expires_at": (created + timedelta(seconds=CONSUMER_LEASE_SECONDS)).isoformat(),
+        }
+
+    def _effective_consumer(self, event, *, now=None):
+        stored = event.get("consumer_state")
+        if stored == "durably_resumable":
+            return "durably_resumable", True, None
+        if stored != "live":
+            return "unavailable", False, "consumer_not_live"
+        binding = event.get("consumer_binding")
+        if not isinstance(binding, dict):
+            return "unavailable", False, "consumer_binding_missing"
+        if binding.get("protocol_binding_sha256") != event.get("protocol_binding_sha256"):
+            return "unavailable", False, "consumer_binding_mismatch"
+        owner_identity = {"campaign_id": event.get("campaign_id"),
+            "invocation_id": event.get("invocation_id"),
+            "attention_id": event.get("attention_id"),
+            "protocol_binding_sha256": event.get("protocol_binding_sha256")}
+        if binding.get("owner_identity_sha256") != _digest(owner_identity):
+            return "unavailable", False, "consumer_owner_identity_mismatch"
+        current = datetime.now(timezone.utc) if now is None else now
+        try:
+            lease_expires = datetime.fromisoformat(binding["lease_expires_at"])
+        except (KeyError, TypeError, ValueError):
+            return "unavailable", False, "consumer_lease_invalid"
+        if lease_expires <= current:
+            return "unavailable", False, "consumer_lease_expired"
+        observed = self.consumer_probe(binding.get("process_id"))
+        if not observed or observed != binding.get("process_start_identity"):
+            return "unavailable", False, "consumer_process_identity_mismatch"
+        return "live", True, None
+
+    def _project_actionability(self, event):
+        effective, actionable, reason = self._effective_consumer(event)
+        return {**event, "stored_consumer_state": event.get("consumer_state"),
+                "consumer_state": effective, "actionable": actionable,
+                "consumer_unavailable_reason": reason}
+
+    def _renew_consumer_lease(self, attention_id):
+        path = self.events / f"{attention_id}.json"
+        with _decision_lock(path):
+            event = json.loads(path.read_text(encoding="utf-8"))
+            binding = event.get("consumer_binding")
+            if event.get("consumer_state") != "live" or not isinstance(binding, dict):
+                return event
+            observed = self.consumer_probe(binding.get("process_id"))
+            if not observed or observed != binding.get("process_start_identity"):
+                return event
+            event = {**event, "consumer_binding": {**binding,
+                "lease_expires_at": (datetime.now(timezone.utc) + timedelta(
+                    seconds=CONSUMER_LEASE_SECONDS)).isoformat()}}
+            event.pop("record_sha256", None); event["record_sha256"] = _digest(event)
+            _write_json_atomic(path, event)
+            return event
 
     def create(self, *, campaign_id, invocation_id, worker, kind, blocked_action,
                why_required, requested_authority, resources=(), reversible=None,
@@ -176,7 +301,11 @@ class DevelopmentAttentionStore:
                 "label": sanitize_action(qualification_instruction["label"]),
                 "creates_authority": False,
             }
-        event = {"schema_version": 1, "record_type": "development_attention_event",
+        owner_identity = {"campaign_id": campaign_id, "invocation_id": invocation_id,
+            "attention_id": logical_id, "protocol_binding_sha256": binding_sha}
+        consumer_binding = self._new_consumer_binding(
+            binding, binding_sha, created, owner_identity=owner_identity)
+        event = {"schema_version": 2, "record_type": "development_attention_event",
             "attention_id": logical_id, "logical_identity_sha256": _digest(logical),
             "campaign_id": campaign_id, "invocation_id": invocation_id,
             "worker": {"worker_id": worker["worker_id"], "role": worker.get("role"),
@@ -198,7 +327,8 @@ class DevelopmentAttentionStore:
             "can_request_again": can_request_again,
             "work_lost": work_lost,
             "qualification_instruction": qualification,
-            "consumer_state": "live",
+            "consumer_state": "live" if consumer_binding else "unavailable",
+            "consumer_binding": consumer_binding,
             "approval_outcome": "awaiting_decision",
             "detail_url": canonical_detail,
             "decision_id": None, "acknowledged": False, "creates_authority": False}
@@ -239,12 +369,17 @@ class DevelopmentAttentionStore:
     def list(self, *, pending_only=False):
         if not self.events.exists():
             return []
-        records = [self.refresh_expiration(path.stem) for path in self.events.glob("*.json")]
+        records = [self._project_actionability(self.refresh_expiration(path.stem))
+                   for path in self.events.glob("*.json")]
         if pending_only:
-            records = [item for item in records if item["state"] == "needs_tanner"]
+            records = [item for item in records if item["state"] == "needs_tanner"
+                       and item["actionable"]]
         return sorted(records, key=lambda item: item["created_at"], reverse=True)
 
     def get(self, attention_id):
+        return self._project_actionability(self._read_event(attention_id))
+
+    def _read_event(self, attention_id):
         return json.loads((self.events / f"{attention_id}.json").read_text(encoding="utf-8"))
 
     def refresh_expiration(self, attention_id, *, now=None):
@@ -262,7 +397,7 @@ class DevelopmentAttentionStore:
 
     def lifecycle(self, attention_id):
         """Return the event plus its exact decision/consumption outcome for presentation."""
-        event = self.refresh_expiration(attention_id)
+        event = self._project_actionability(self.refresh_expiration(attention_id))
         decision = None
         if event.get("decision_id"):
             path = self.decisions / f"{event['decision_id']}.json"
@@ -277,7 +412,7 @@ class DevelopmentAttentionStore:
             raise ValueError("decision must be approve_once, deny, or cancel_campaign")
         event_path = self.events / f"{attention_id}.json"
         with _decision_lock(event_path):
-            event = self.get(attention_id)
+            event = json.loads(event_path.read_text(encoding="utf-8"))
             if expected_identity is not None:
                 binding = event.get("protocol_binding") or {}
                 canonical = {
@@ -299,8 +434,10 @@ class DevelopmentAttentionStore:
                 event.pop("record_sha256", None); event["record_sha256"] = _digest(event)
                 _write_json_atomic(event_path, event)
                 raise RuntimeError("attention request is stale")
-            if choice == "approve_once" and event.get("consumer_state", "live") == "unavailable":
-                raise RuntimeError("exact action is no longer live or durably resumable")
+            _effective, actionable, _reason = self._effective_consumer(event)
+            if not actionable:
+                raise AttentionConsumerUnavailable(
+                    "exact action is no longer live or durably resumable")
             decision = {"schema_version": 1, "record_type": "development_attention_decision",
             "decision_id": f"attention-decision-{uuid.uuid4()}", "attention_id": attention_id,
             "campaign_id": event["campaign_id"], "invocation_id": event["invocation_id"],
@@ -373,6 +510,8 @@ class DevelopmentAttentionStore:
                     return {"event": event, "decision": decision}
                 if process_alive is not None and not process_alive():
                     event = self.mark_process_detached(attention_id)
+                elif process_alive is not None:
+                    event = self._renew_consumer_lease(attention_id)
                 if reminder_handler is not None:
                     reminder_handler(event)
                 remaining = deadline - time.monotonic()
@@ -386,7 +525,7 @@ class DevelopmentAttentionStore:
         path = self.decisions / f"{decision_id}.json"
         with _decision_lock(path):
             decision = json.loads(path.read_text(encoding="utf-8"))
-            event = self.get(attention_id)
+            event = self._read_event(attention_id)
             binding = event.get("protocol_binding") or {}
             if (decision["choice"] != "approve_once" or decision["attention_id"] != attention_id
                     or decision["invocation_id"] != invocation_id or decision["consumed"]
@@ -414,7 +553,7 @@ class DevelopmentAttentionStore:
         path = self.decisions / f"{decision_id}.json"
         with _decision_lock(path):
             decision = json.loads(path.read_text(encoding="utf-8"))
-            event = self.get(attention_id)
+            event = self._read_event(attention_id)
             if (decision.get("choice") != "approve_once" or decision.get("consumed")
                     or decision.get("attention_id") != attention_id
                     or decision.get("invocation_id") != invocation_id
@@ -443,7 +582,7 @@ class DevelopmentAttentionStore:
             decision["lifecycle_state"] = "completed" if status == "completed" else "failed_safe"
             decision.pop("record_sha256", None); decision["record_sha256"] = _digest(decision)
             _write_json_atomic(path, decision)
-            event = self.get(decision["attention_id"])
+            event = self._read_event(decision["attention_id"])
             event = {**event, "approval_outcome": decision["lifecycle_state"]}
             event.pop("record_sha256", None); event["record_sha256"] = _digest(event)
             _write_json_atomic(self.events / f"{decision['attention_id']}.json", event)
@@ -463,7 +602,7 @@ class DevelopmentAttentionStore:
             decision["finished_at"] = _now()
             decision.pop("record_sha256", None); decision["record_sha256"] = _digest(decision)
             _write_json_atomic(path, decision)
-            event = self.get(decision["attention_id"])
+            event = self._read_event(decision["attention_id"])
             event = {**event, "approval_outcome": decision["lifecycle_state"]}
             event.pop("record_sha256", None); event["record_sha256"] = _digest(event)
             _write_json_atomic(self.events / f"{decision['attention_id']}.json", event)

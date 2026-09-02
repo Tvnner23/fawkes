@@ -1069,10 +1069,11 @@ function renderDeveloperSection() {
         element('p','',attention.work_lost===true?'Some work or opportunity may be lost at expiry.':'No completed work or opportunity is expected to be lost; the blocked action remains unperformed.'));
       card.append(deadline);updateRemaining();
     }
-    if (attention.consumer_state === 'unavailable' || (attention.expires_at && Date.parse(attention.expires_at) <= Date.now())) {
+    if (attention.actionable === false || attention.consumer_state === 'unavailable' || (attention.expires_at && Date.parse(attention.expires_at) <= Date.now())) {
       card.append(element('h2', '', 'This approval is no longer available'));
-      card.append(element('p', '', attention.consumer_state === 'unavailable' ? 'The exact action is no longer live or safely resumable. Fawkes did not record an approval.' : 'The displayed decision period expired. Fawkes did not record an approval.'));
-      card.append(element('p', '', 'Deny or cancel remains available through the campaign boundary; a new action requires a new typed request.'));
+      card.append(element('p', '', attention.consumer_state === 'unavailable' || attention.actionable === false ? 'The exact consumer is no longer verifiably live or safely resumable. Fawkes did not record a decision or grant.' : 'The displayed decision period expired. Fawkes did not record an approval.'));
+      card.append(element('p', '', 'Historical evidence remains available below. No decision controls are offered; a still-required action needs a new exact request.'));
+      const inactiveDetails=document.createElement('details');inactiveDetails.append(element('summary','','Historical technical evidence'),element('pre','',JSON.stringify({campaign_id:attention.campaign_id,invocation_id:attention.invocation_id,attention_id:attention.attention_id,consumer_state:attention.consumer_state,stored_consumer_state:attention.stored_consumer_state,consumer_unavailable_reason:attention.consumer_unavailable_reason,protocol_binding:attention.protocol_binding},null,2)));card.append(inactiveDetails);
       developerContent.append(card); return;
     }
     const rawAction=String(attention.blocked_action||'');

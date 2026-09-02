@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import hashlib
 import json
+import os
 import re
 import uuid
 
@@ -17,6 +18,42 @@ from src.runtime.development_attention import validate_attention_detail_url
 
 PROGRESS_INTERVAL_SECONDS = 10_800
 NOTIFICATION_ROOT = Path(__file__).resolve().parents[2] / "database" / "rider_notifications"
+RUNTIME_STATE_ROOT_ENV = "FAWKES_RUNTIME_STATE_ROOT"
+MAX_NOTIFICATION_CHARACTERS = 480
+
+
+def _validated_notification_root(value, *, leaf=None):
+    try:
+        configured = Path(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("configured Rider notification root is malformed") from exc
+    if not configured.is_absolute():
+        raise ValueError("configured Rider notification root must be absolute")
+    selected = configured.resolve(strict=False)
+    if leaf is not None:
+        selected = selected / leaf
+    repository = Path(__file__).resolve().parents[2]
+    if selected == repository or repository in selected.parents:
+        raise ValueError("configured Rider notification root must be outside the repository")
+    existing = selected
+    while not existing.exists() and existing != existing.parent:
+        existing = existing.parent
+    if ((selected.exists() and not selected.is_dir())
+            or not existing.is_dir()
+            or not os.access(existing, os.W_OK | os.X_OK)):
+        raise ValueError("configured Rider notification root is unusable")
+    return selected
+
+
+def resolve_notification_root(root=None, *, environment=None):
+    """Resolve the existing store once while retaining its historical fallback."""
+    if root is not None:
+        return _validated_notification_root(root)
+    values = os.environ if environment is None else environment
+    runtime_root = values.get(RUNTIME_STATE_ROOT_ENV)
+    if runtime_root:
+        return _validated_notification_root(runtime_root, leaf="rider_notifications")
+    return NOTIFICATION_ROOT
 
 
 class RiderActivityStore:
@@ -88,9 +125,10 @@ def campaign_activity_projection(record):
 class RiderNotificationStore:
     """Durable logical notifications and distinct delivery attempts."""
 
-    def __init__(self, instance_id, *, root):
+    def __init__(self, instance_id, *, root=None, environment=None):
         self.instance_id = instance_id
-        self.root = Path(root) / instance_id
+        self.state_root = resolve_notification_root(root, environment=environment)
+        self.root = self.state_root / instance_id
 
     def _path(self, logical_id):
         return self.root / f"{logical_id}.json"
@@ -212,7 +250,7 @@ def expiration_reminder_stage(needs, *, now=None):
     return "initial"
 
 
-def retain_needs_tanner_notification(record, *, root=NOTIFICATION_ROOT, registry=None):
+def retain_needs_tanner_notification(record, *, root=None, registry=None, environment=None):
     """Retain one sanitized logical alert for each material blocker state."""
     needs = record.get("needs_tanner")
     if not needs:
@@ -221,29 +259,44 @@ def retain_needs_tanner_notification(record, *, root=NOTIFICATION_ROOT, registry
                  or "campaign requires rider review")[:240]
     attention_id = str(needs.get("attention_id") or "")
     detail_url = str(needs.get("detail_url") or "")
+    actionable = False
     if re.fullmatch(r"attention-[a-f0-9]{64}", attention_id):
-        validate_attention_detail_url(detail_url, attention_id)
-    else:
+        try:
+            validate_attention_detail_url(detail_url, attention_id)
+            actionable = True
+        except ValueError:
+            detail_url = ""
+    if not actionable:
         detail_url = ""
     reminder_stage = expiration_reminder_stage(needs)
     state_key = hashlib.sha256(json.dumps(
         {"needs": needs, "reminder_stage": reminder_stage}, sort_keys=True).encode()).hexdigest()
-    store = RiderNotificationStore(record["instance_id"], root=root)
-    label = reason.split(":", 1)[0].split(" — Allow", 1)[0]
+    store = RiderNotificationStore(record["instance_id"], root=root, environment=environment)
+    inferred_label = reason.split(":", 1)[0].split(" — Allow", 1)[0]
     deadline = str(needs.get("expires_at") or "")
-    consequence = "If unanswered, this request expires and the action will not run."
-    fixed = ((f"URGENT — DECIDE BEFORE {deadline}\n" if deadline else "")
-             + f"{label}\nFawkes paused because: {{reason}}\n"
-             + (consequence + "\n" if deadline else "")
-             + f"Review and decide: {detail_url}\n"
-             + "Opening or receiving this notification grants no authority.")
-    # Keep the exact label, deadline, consequence, and link; bound only the
-    # explanatory reason because the authenticated decision page owns detail.
-    available = max(0, 479 - len(fixed.format(reason="")))
+    campaign = str(record["campaign_id"])
+    label = inferred_label if inferred_label != reason else campaign
+    prefix = ((f"URGENT — DECIDE BEFORE {deadline}\n" if deadline else "")
+              + (f"{label}\n" if label != campaign else "")
+              + f"Campaign: {campaign}\n"
+              + "Fawkes paused: {reason}\n")
+    if actionable:
+        suffix = (("If unanswered, this request expires and the action will not run.\n"
+                   if deadline else "")
+                  + f"Review and decide: {detail_url}\n"
+                  + "Opening this link grants no authority.")
+    else:
+        suffix = (("Expired requests remain unperformed.\n" if deadline else "")
+                  + "This is a status notice; no decision link is available.\n"
+                  + "Receiving it grants no authority.")
+    fixed = prefix + suffix
+    available = max(0, MAX_NOTIFICATION_CHARACTERS - len(fixed.format(reason="")))
     short_reason = reason[:available].rstrip()
     if len(reason) > len(short_reason) and available > 1:
         short_reason = short_reason[:-1].rstrip() + "…"
     message = fixed.format(reason=short_reason)
+    if len(message) > MAX_NOTIFICATION_CHARACTERS:
+        raise ValueError("Rider notification projection exceeds its transport-safe bound")
     notification, _ = store.create_once(kind="needs_tanner",
         campaign_id=record["campaign_id"], state_key=state_key,
         message=message,

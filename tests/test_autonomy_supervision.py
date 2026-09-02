@@ -5,10 +5,10 @@ import tempfile
 import unittest
 
 from src.runtime.autonomy_supervision import (
-    PROGRESS_INTERVAL_SECONDS, RiderActivityStore, RiderNotificationStore,
+    NOTIFICATION_ROOT, PROGRESS_INTERVAL_SECONDS, RiderActivityStore, RiderNotificationStore,
     TannerAttentionTransportRegistry,
     campaign_activity_projection, expiration_reminder_stage, notification_eligibility,
-    retain_needs_tanner_notification,
+    resolve_notification_root, retain_needs_tanner_notification,
 )
 
 
@@ -45,6 +45,44 @@ class AutonomySupervisionTests(unittest.TestCase):
         self.assertEqual(view["activity"][1]["worker"]["worker_id"], "reviewer")
         self.assertFalse(view["hidden_chain_of_thought_exposed"])
         self.assertFalse(view["creates_authority"])
+
+    def test_notification_store_root_precedence_environment_and_fallback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            explicit = base / "explicit"
+            runtime = base / "runtime"
+            runtime.mkdir()
+            store = RiderNotificationStore("phoenix", root=explicit, environment={
+                "FAWKES_RUNTIME_STATE_ROOT": str(runtime)})
+            self.assertEqual(store.state_root, explicit.resolve())
+            external = RiderNotificationStore("phoenix", environment={
+                "FAWKES_RUNTIME_STATE_ROOT": str(runtime)})
+            self.assertEqual(external.state_root, runtime.resolve() / "rider_notifications")
+            self.assertEqual(RiderNotificationStore("phoenix", environment={}).state_root,
+                             NOTIFICATION_ROOT)
+
+    def test_configured_notification_root_fails_closed_when_invalid_or_unusable(self):
+        with self.assertRaisesRegex(ValueError, "must be absolute"):
+            resolve_notification_root("relative/notifications")
+        with self.assertRaisesRegex(ValueError, "outside the repository"):
+            resolve_notification_root(Path(__file__).resolve().parents[1] /
+                                      "database" / "rider_notifications")
+        with tempfile.TemporaryDirectory() as directory:
+            unusable = Path(directory) / "not-a-directory"
+            unusable.write_text("occupied", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "unusable"):
+                resolve_notification_root(unusable)
+
+    def test_environment_notification_root_creates_no_repository_local_record(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = RiderNotificationStore("external-only", environment={
+                "FAWKES_RUNTIME_STATE_ROOT": directory})
+            record, _ = store.create_once(kind="needs_tanner", campaign_id="external-only",
+                state_key="one", message="safe status", evidence_refs=[])
+            self.assertTrue((Path(directory) / "rider_notifications" / "external-only" /
+                             f"{record['notification_id']}.json").is_file())
+            self.assertFalse((NOTIFICATION_ROOT / "external-only" /
+                              f"{record['notification_id']}.json").exists())
 
     def test_needs_tanner_is_immediate_and_quiet_hour_bypass(self):
         now = datetime(2026, 9, 1, tzinfo=timezone.utc)
@@ -115,6 +153,38 @@ class AutonomySupervisionTests(unittest.TestCase):
             self.assertNotIn("token=", first["message"].lower())
             self.assertIn("grants no authority", first["message"])
             self.assertFalse(first["creates_authority"])
+
+    def test_non_actionable_failure_omits_blank_decision_call_to_action(self):
+        record = self.record(status="tanner_escalation", needs={
+            "reason": "builder_transport_or_return_failed",
+            "attention_id": "attention-" + "f" * 64,
+            "detail_url": ""})
+        record.update({"instance_id": "phoenix", "record_sha256": "a" * 64})
+        with tempfile.TemporaryDirectory() as directory:
+            retained = retain_needs_tanner_notification(record, root=directory)
+        self.assertNotIn("Review and decide:", retained["message"])
+        self.assertIn("status notice", retained["message"])
+        self.assertLessEqual(len(retained["message"]), 480)
+
+    def test_v2_actionable_projection_retains_exact_link_below_discord_limit(self):
+        attention_id = "attention-" + "4" * 64
+        detail_url = ("http://localhost:8787/?view=developer&section=attention&attention="
+                      + attention_id)
+        record = self.record(status="tanner_escalation", needs={
+            "attention_id": attention_id, "detail_url": detail_url,
+            "plain_reason": ("Allow the exact rider-supplied test command to write notification "
+                             "state only under its dedicated disposable test root outside the "
+                             "candidate sandbox?"),
+            "expires_at": "2026-09-02T11:22:16.032646+00:00"})
+        record.update({"campaign_id": "cleanup-notification-state-boundary-v2",
+                       "instance_id": "phoenix", "record_sha256": "a" * 64})
+        with tempfile.TemporaryDirectory() as directory:
+            retained = retain_needs_tanner_notification(record, root=directory)
+        self.assertLessEqual(len(retained["message"]), 480)
+        self.assertIn("Campaign: cleanup-notification-state-boundary-v2", retained["message"])
+        self.assertIn(detail_url, retained["message"])
+        self.assertIn("URGENT — DECIDE BEFORE", retained["message"])
+        self.assertIn("grants no authority", retained["message"])
 
     def test_expiring_attention_is_urgent_on_every_transport_and_stage_deduplicates(self):
         attention_id = "attention-" + "e" * 64

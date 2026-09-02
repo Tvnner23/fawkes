@@ -3,13 +3,13 @@ import subprocess
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from src.runtime.development_attention import (
-    ATTENTION_BASE_URL_ENV, REMOTE_AUTHENTICATED_ENV,
+    ATTENTION_BASE_URL_ENV, ATTENTION_ROOT, REMOTE_AUTHENTICATED_ENV,
     DevelopmentAttentionStore, canonical_attention_detail_url,
-    native_approval_from_jsonl, sanitize_action,
+    native_approval_from_jsonl, resolve_attention_root, sanitize_action,
 )
 from src.runtime.component_supervision import ComponentReceiptStore
 from scripts.fawkes_attention_events import project
@@ -18,7 +18,9 @@ from scripts.fawkes_attention_events import project
 class DevelopmentAttentionTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
-        self.store = DevelopmentAttentionStore(Path(self.temporary.name))
+        self.consumer_identities = {4242: "boot-and-start-4242"}
+        self.store = DevelopmentAttentionStore(Path(self.temporary.name),
+            consumer_probe=lambda pid: self.consumer_identities.get(pid))
         self.worker = {"worker_id": "codex-repository-wsl-fawkes", "role": "software_repository"}
 
     def tearDown(self):
@@ -30,7 +32,48 @@ class DevelopmentAttentionTests(unittest.TestCase):
             kind="native_codex_approval_required", blocked_action="touch harmless.txt",
             why_required="workspace write requires exact approval",
             requested_authority="write harmless.txt once", resources=["harmless.txt"],
-            reversible=True, provider_code="tool.approval_required")
+            reversible=True, provider_code="tool.approval_required",
+            protocol_binding={"method": "item/commandExecution/requestApproval",
+                "process_id": 4242, "item_id": "item-synthetic",
+                "approved_action_sha256": "f" * 64})
+
+    def test_store_root_precedence_environment_and_historical_fallback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            explicit = base / "explicit"
+            runtime = base / "runtime"
+            runtime.mkdir()
+            store = DevelopmentAttentionStore(explicit, environment={
+                "FAWKES_RUNTIME_STATE_ROOT": str(runtime)})
+            self.assertEqual(store.root, explicit.resolve())
+            external = DevelopmentAttentionStore(environment={
+                "FAWKES_RUNTIME_STATE_ROOT": str(runtime)})
+            self.assertEqual(external.root, runtime.resolve() / "development_attention")
+            self.assertEqual(DevelopmentAttentionStore(environment={}).root, ATTENTION_ROOT)
+
+    def test_configured_attention_root_fails_closed_when_invalid_or_unusable(self):
+        with self.assertRaisesRegex(ValueError, "must be absolute"):
+            resolve_attention_root("relative/attention")
+        with self.assertRaisesRegex(ValueError, "outside the repository"):
+            resolve_attention_root(Path(__file__).resolve().parents[1] / "database" / "attention")
+        with tempfile.TemporaryDirectory() as directory:
+            unusable = Path(directory) / "not-a-directory"
+            unusable.write_text("occupied", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "unusable"):
+                resolve_attention_root(unusable)
+
+    def test_external_attention_store_creates_no_repository_local_record(self):
+        with tempfile.TemporaryDirectory() as directory:
+            external = DevelopmentAttentionStore(environment={
+                "FAWKES_RUNTIME_STATE_ROOT": directory})
+            event = external.create(campaign_id="external-only",
+                invocation_id="external-only-worker", worker=self.worker,
+                kind="native_codex_approval_required", blocked_action="noop",
+                why_required="bounded test", requested_authority="one no-op")
+            self.assertTrue((Path(directory) / "development_attention" / "events" /
+                             f"{event['attention_id']}.json").is_file())
+            self.assertFalse((ATTENTION_ROOT / "events" /
+                              f"{event['attention_id']}.json").exists())
 
     def test_event_is_durable_deduplicated_and_zero_authority(self):
         first = self.create(); second = self.create()
@@ -85,7 +128,7 @@ class DevelopmentAttentionTests(unittest.TestCase):
             blocked_action="run exact noop", why_required="typed approval",
             requested_authority="one exact action", protocol_binding={
                 "method": "item/commandExecution/requestApproval", "item_id": "item-a",
-                "approved_action_sha256": "a" * 64})
+                "approved_action_sha256": "a" * 64, "process_id": 4242})
         binding = event["protocol_binding"]
         identity = {"attention_id": event["attention_id"], "campaign_id": "campaign-a",
             "invocation_id": "invocation-a", "method": binding["method"],
@@ -108,7 +151,7 @@ class DevelopmentAttentionTests(unittest.TestCase):
             why_required="Test B — DENY: exact harmless qualification action",
             requested_authority="one exact no-op", protocol_binding={
                 "method": "item/commandExecution/requestApproval", "item_id": "item-v10-b",
-                "approved_action_sha256": "b" * 64})
+                "approved_action_sha256": "b" * 64, "process_id": 4242})
         annotated = self.store.set_qualification_instruction(event["attention_id"],
             campaign_id=event["campaign_id"], invocation_id=event["invocation_id"],
             choice="deny", label="Test B",
@@ -138,7 +181,8 @@ class DevelopmentAttentionTests(unittest.TestCase):
                 kind="native_codex_approval_required", blocked_action="noop-" + suffix,
                 why_required="paired qualification", requested_authority="one exact action",
                 protocol_binding={"method": "item/commandExecution/requestApproval",
-                    "item_id": "item-" + suffix, "approved_action_sha256": suffix * 64})
+                    "item_id": "item-" + suffix, "approved_action_sha256": suffix * 64,
+                    "process_id": 4242})
             binding = event["protocol_binding"]
             events[suffix] = event
             identities[suffix] = {"attention_id": event["attention_id"],
@@ -169,7 +213,7 @@ class DevelopmentAttentionTests(unittest.TestCase):
             invocation_id="synthetic-reviewer-1", worker=self.worker,
             kind="native_codex_approval_required", blocked_action="change candidate",
             why_required="write requested", requested_authority="one file change",
-            protocol_binding={"method": "item/fileChange/requestApproval"})
+            protocol_binding={"method": "item/fileChange/requestApproval", "process_id": 4242})
         detached = self.store.mark_process_detached(event["attention_id"])
         self.assertEqual(detached["consumer_state"], "unavailable")
         with self.assertRaisesRegex(RuntimeError, "no longer live or durably resumable"):
@@ -181,7 +225,7 @@ class DevelopmentAttentionTests(unittest.TestCase):
             invocation_id="synthetic-worker-3", worker=self.worker,
             kind="native_codex_approval_required", blocked_action="echo harmless",
             why_required="protected boundary", requested_authority="one command",
-            protocol_binding={"method": "item/commandExecution/requestApproval"},
+            protocol_binding={"method": "item/commandExecution/requestApproval", "process_id": 4242},
             expires_in_seconds=3600, expiration_reason="candidate staleness",
             expiration_effect="request fails closed", can_request_again=True, work_lost=False)
         detached = self.store.mark_process_detached(event["attention_id"])
@@ -307,6 +351,57 @@ class DevelopmentAttentionTests(unittest.TestCase):
         self.assertEqual(retained["process_state"], "detached")
         self.assertEqual([item["attention_id"] for item in reopened.list(pending_only=True)],
                          [event["attention_id"]])
+
+    def test_dead_or_pid_reused_consumer_is_non_actionable_and_records_nothing(self):
+        event = self.create()
+        self.consumer_identities.pop(4242)
+        projected = self.store.lifecycle(event["attention_id"])["event"]
+        self.assertFalse(projected["actionable"])
+        self.assertEqual(projected["consumer_state"], "unavailable")
+        self.assertEqual(projected["consumer_unavailable_reason"],
+                         "consumer_process_identity_mismatch")
+        for identity in (None, "different-process-start"):
+            if identity is not None:
+                self.consumer_identities[4242] = identity
+            with self.assertRaisesRegex(RuntimeError, "no longer live"):
+                self.store.decide(event["attention_id"], "approve_once",
+                                  authenticated_rider=True)
+        self.assertIsNone(self.store.get(event["attention_id"])["decision_id"])
+        self.assertFalse(self.store.decisions.exists())
+
+    def test_expired_consumer_lease_is_non_actionable(self):
+        event = self.create()
+        path = self.store.events / f"{event['attention_id']}.json"
+        stored = json.loads(path.read_text(encoding="utf-8"))
+        stored["consumer_binding"]["lease_expires_at"] = (
+            datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+        stored.pop("record_sha256", None)
+        path.write_text(json.dumps(stored), encoding="utf-8")
+        projected = self.store.get(event["attention_id"])
+        self.assertFalse(projected["actionable"])
+        self.assertEqual(projected["consumer_unavailable_reason"], "consumer_lease_expired")
+
+    def test_liveness_loss_between_retrieval_and_decision_fails_atomically(self):
+        event = self.create()
+        self.assertTrue(self.store.lifecycle(event["attention_id"])["event"]["actionable"])
+        self.consumer_identities.clear()
+        with self.assertRaisesRegex(RuntimeError, "no longer live"):
+            self.store.decide(event["attention_id"], "deny", authenticated_rider=True)
+        stored = json.loads((self.store.events / f"{event['attention_id']}.json").read_text())
+        self.assertEqual(stored["state"], "needs_tanner")
+        self.assertIsNone(stored["decision_id"])
+        self.assertFalse(self.store.decisions.exists())
+
+    def test_unverifiable_historical_live_record_projects_non_actionable(self):
+        event = self.create()
+        path = self.store.events / f"{event['attention_id']}.json"
+        stored = json.loads(path.read_text(encoding="utf-8"))
+        stored.pop("consumer_binding")
+        path.write_text(json.dumps(stored), encoding="utf-8")
+        projected = self.store.lifecycle(event["attention_id"])["event"]
+        self.assertEqual(projected["stored_consumer_state"], "live")
+        self.assertEqual(projected["consumer_state"], "unavailable")
+        self.assertEqual(projected["consumer_unavailable_reason"], "consumer_binding_missing")
 
 
 if __name__ == "__main__":

@@ -22,7 +22,8 @@ class FawkesAppClientTests(unittest.TestCase):
         import os
         for scenario, attention_id in (("valid", "attention-test-a"),
                 ("valid", "attention-test-b"), ("auth-login", "attention-test-a"),
-                ("resolved", "attention-test"), ("unknown", "attention-test"),
+                ("resolved", "attention-test"), ("inactive", "attention-test"),
+                ("unknown", "attention-test"),
                 ("auth", "attention-test")):
             with self.subTest(scenario=scenario, attention_id=attention_id):
                 result = subprocess.run(["node", "tests/js/app_attention_deep_link_harness.js"],
@@ -50,6 +51,11 @@ class FawkesAppClientTests(unittest.TestCase):
         self.assertIn("exact approved action completed", source)
         self.assertIn("approval is no longer available", source)
         self.assertIn("Fawkes did not record an approval", source)
+        self.assertIn("exact consumer is no longer verifiably live", source)
+        self.assertIn("No decision controls are offered", source)
+        server = (ROOT / "src/app/server.py").read_text()
+        self.assertIn("AttentionConsumerUnavailable", server)
+        self.assertIn('"code": exc.code', server)
 
     def test_authentication_uses_protected_cookie_session_and_preserves_deep_link(self):
         source = (ROOT / "src/app/static/app.js").read_text()

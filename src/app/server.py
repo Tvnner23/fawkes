@@ -420,8 +420,15 @@ class FawkesAppHandler(BaseHTTPRequestHandler):
                     authenticated_rider=True, expected_identity=payload.get("identity")))
             except PermissionError as exc:
                 self._json(403, {"error": {"code": "attention_decision_denied", "message": str(exc)}})
-            except (KeyError, ValueError, RuntimeError) as exc:
-                self._json(400, {"error": {"code": "invalid_attention_decision", "message": str(exc)}})
+            except Exception as exc:
+                from src.runtime.development_attention import AttentionConsumerUnavailable
+                if isinstance(exc, AttentionConsumerUnavailable):
+                    self._json(409, {"error": {"code": exc.code, "message": str(exc)}})
+                    return
+                if isinstance(exc, (KeyError, ValueError, RuntimeError)):
+                    self._json(400, {"error": {"code": "invalid_attention_decision", "message": str(exc)}})
+                    return
+                raise
             return
         if path.startswith(feedback_prefix) and path.endswith(feedback_suffix):
             if not self._require_auth():
