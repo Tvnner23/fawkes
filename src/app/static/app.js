@@ -1072,6 +1072,26 @@ function renderDeveloperSection() {
         card.append(row);
       });
       if (record.needs_tanner) card.append(element('p', '', `Needs Tanner: ${readable(record.needs_tanner.reason)}`));
+      const attention = (developerData.attention || []).find(item => item.campaign_id === record.campaign_id && item.state === 'needs_tanner');
+      if (attention) {
+        const decision = element('article', 'evidence');
+        decision.append(element('h3', '', 'Tanner decision required'));
+        decision.append(element('p', '', attention.why_required));
+        decision.append(element('pre', '', JSON.stringify({invocation_id: attention.invocation_id,
+          worker: attention.worker, blocked_action: attention.blocked_action,
+          resources: attention.resources, requested_authority: attention.requested_authority,
+          reversible: attention.reversible, expires_at: attention.expires_at}, null, 2)));
+        const choices = element('div', 'development-actions');
+        [['approve_once','Approve this exact action once'],['deny','Deny'],['cancel_campaign','Cancel campaign']].forEach(([choice,label]) => {
+          const button = element('button', '', label); button.type = 'button';
+          button.addEventListener('click', async () => { button.disabled = true;
+            try { await request(`/api/development/codex-campaigns/${encodeURIComponent(record.campaign_id)}/attention/${encodeURIComponent(attention.attention_id)}/decision`,
+              {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({choice})}); await loadDeveloper(); }
+            catch (error) { showError(error.message); button.disabled = false; }
+          }); choices.append(button);
+        });
+        decision.append(choices); card.append(decision);
+      }
       const controls = element('div', 'development-actions');
       const inspect = element('button', '', 'Exact diff / tests / evidence'); inspect.type = 'button'; inspect.addEventListener('click', () => openCampaignEvidence(record.campaign_id)); controls.append(inspect);
       const review = element('button', '', 'Review Current Candidate'); review.type = 'button'; review.disabled = record.status !== 'awaiting_independent_review'; review.addEventListener('click', async () => { review.disabled = true; await request(`/api/development/codex-campaigns/${encodeURIComponent(record.campaign_id)}/review`, {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'}); await loadDeveloper(); }); controls.append(review);
@@ -1158,7 +1178,9 @@ async function loadDeveloper() {
   try {
     developerData = await request('/api/development/dashboard');
     const campaignData = await request('/api/development/codex-campaigns');
+    const attentionData = await request('/api/development/attention');
     developerData.autonomous_campaigns = (campaignData.campaigns || []).map(item => item.live_activity);
+    developerData.attention = attentionData.attention || [];
     auth.classList.add('hidden');
     renderDeveloperSection();
     if (developerSection === 'tests') await loadTestCenter();

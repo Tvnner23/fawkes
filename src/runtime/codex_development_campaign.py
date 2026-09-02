@@ -20,6 +20,7 @@ from src.runtime.codex_development_handoff import (
 from src.runtime.disposable_verifier import DisposableVerifierWorkspace
 from src.runtime.worker_exchange import WorkerExchange, _digest, body_free_references
 from src.runtime.autonomy_supervision import campaign_activity_projection, retain_needs_tanner_notification
+from src.runtime.development_attention import DevelopmentAttentionStore
 
 
 ROOT = Path(os.environ.get(
@@ -243,7 +244,7 @@ class CodexDevelopmentCampaign:
     """Deterministic coordinator for one fixed builder and reviewer slot."""
 
     def __init__(self, instance_id, *, root=None, exchange=None, builder_runner=None,
-                 builder_modes=None):
+                 builder_modes=None, attention_store=None):
         self.instance_id = require_id(instance_id, "instance_id")
         self.store = DevelopmentCampaignStore(instance_id, root=root)
         self.supervision_root = (Path(root).parent / "component_supervision"
@@ -251,6 +252,7 @@ class CodexDevelopmentCampaign:
         self.exchange = exchange or WorkerExchange(instance_id)
         self.builder_runner = builder_runner or self._run_promoted_builder
         self.builder_modes = set(builder_modes or {"read_only", "repository_write"})
+        self.attention_store = attention_store or DevelopmentAttentionStore()
         if not self.builder_modes <= BUILDER_MODES:
             raise ValueError("invalid builder execution mode")
 
@@ -345,6 +347,7 @@ class CodexDevelopmentCampaign:
             "cache_lifecycle_events": [],
             "acceptance_satisfied": [],
             "needs_tanner": None,
+            "attention_event_ids": [],
             "cancelled": False,
             "automatic_promotion": False,
             "creates_authority": False,
@@ -355,6 +358,44 @@ class CodexDevelopmentCampaign:
         }
         record = self.store.write(record)
         return self._start_builder(record, correction=None)
+
+    def require_tanner(self, campaign_id, *, invocation_id, worker, kind,
+                       blocked_action, why_required, requested_authority,
+                       resources=(), reversible=None, provider_code=None):
+        """Pause one exact campaign action at the durable Rider boundary."""
+        record = self.store.load(campaign_id)
+        if record["cancelled"] or record["status"] in {"succeeded", "cancelled"}:
+            raise RuntimeError("terminal campaign cannot request new authority")
+        event = self.attention_store.create(
+            campaign_id=campaign_id, invocation_id=invocation_id, worker=worker,
+            kind=kind, blocked_action=blocked_action, why_required=why_required,
+            requested_authority=requested_authority, resources=resources,
+            reversible=reversible, provider_code=provider_code)
+        needs = {"urgency": "urgent_blocking_flow", "reason": kind,
+                 "decision_needed": "Approve this exact action once, deny it, or cancel the campaign",
+                 "attention_id": event["attention_id"], "invocation_id": invocation_id,
+                 "worker_id": worker["worker_id"], "requested_authority": event["requested_authority"]}
+        return self._update(record, event_kind="tanner_attention_required",
+            event_detail={"attention_id": event["attention_id"], "invocation_id": invocation_id,
+                          "worker_id": worker["worker_id"], "kind": kind},
+            status="tanner_escalation", needs_tanner=needs,
+            attention_event_ids=[*record.get("attention_event_ids", []), event["attention_id"]])
+
+    def decide_attention(self, campaign_id, attention_id, choice, *, authenticated_rider):
+        record = self.store.load(campaign_id)
+        if (record.get("needs_tanner") or {}).get("attention_id") != attention_id:
+            raise PermissionError("attention decision is not bound to this campaign state")
+        result = self.attention_store.decide(
+            attention_id, choice, authenticated_rider=authenticated_rider)
+        if choice == "cancel_campaign":
+            return {"campaign": self.cancel(campaign_id, authenticated_rider=True), **result}
+        # Approval is retained as one consumable grant. It does not automatically
+        # resume an ephemeral process or broaden the campaign scope.
+        updated = self._update(record, event_kind=f"tanner_attention_{choice}",
+            event_detail={"attention_id": attention_id, "decision_id": result["decision"]["decision_id"]},
+            status="ready_for_bounded_continuation" if choice == "approve_once" else "failed_safe",
+            needs_tanner=None)
+        return {"campaign": updated, **result}
 
     def _builder_task(self, record, iteration, correction):
         lines = [
@@ -472,6 +513,20 @@ class CodexDevelopmentCampaign:
                 evidence_valid = False
         if not evidence_valid:
             failure_code = (run.get("failure") or {}).get("code")
+            attention = (presentation or {}).get("attention_request")
+            if failure_code == "native_approval_required" and isinstance(attention, dict):
+                current = self._update(current, event_kind="builder_return_requires_tanner",
+                    builder_runs=runs, active_builder_task_scope_id=None,
+                    cache_lifecycle_events=cache_events)
+                return self.require_tanner(current["campaign_id"],
+                    invocation_id=attention["invocation_id"], worker=current["builder"],
+                    kind="native_codex_approval_required",
+                    blocked_action=attention["blocked_action"],
+                    why_required=attention["why_required"],
+                    requested_authority=attention["requested_authority"],
+                    resources=attention.get("resources", ()),
+                    reversible=attention.get("reversible"),
+                    provider_code=attention.get("provider_code"))
             return self._update(current, event_kind="builder_failed_safe", status="failed_safe",
                 builder_runs=runs, active_builder_task_scope_id=None,
                 cache_lifecycle_events=cache_events,

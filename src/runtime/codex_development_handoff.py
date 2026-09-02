@@ -100,6 +100,7 @@ def _presentation(*, target, package, result, exchange):
         "next_recommendation": next_sections[0] if next_sections else None,
         "failure": ({"code": result.get("failure_reason"), "detail": result.get("failure_detail")}
                     if not delivered else None),
+        "attention_request": result.get("attention_request") if not delivered else None,
         "retry_safe": False,
         "automatic_retry_performed": False,
         "manual_fallback_available": True,

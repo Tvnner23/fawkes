@@ -33,7 +33,8 @@ SCRIPT_NAMES = {
     "run_fawkes_discord_bot.py", "initialize_fawkes_discord_cursors.py",
     "fawkes_component_failure.py", "fawkes_failure_notifier.py",
     "show_fawkes_component_receipts.py", "wait_fawkes_app_ready.py",
-    "fawkes_stack_status.sh", "verify_fawkes_production_prerequisites.py",
+    "fawkes_stack_status.sh", "fawkes_attention_events.py",
+    "verify_fawkes_production_prerequisites.py",
 }
 
 

@@ -1238,6 +1238,19 @@ class FawkesChatService:
                                         for item in run.get("validation_evidence", [])],
                 "creates_authority": False}
 
+    def development_attention(self, *, pending_only=False):
+        from src.runtime.development_attention import DevelopmentAttentionStore
+        return {"attention": DevelopmentAttentionStore().list(pending_only=pending_only),
+                "creates_authority": False}
+
+    def decide_development_attention(self, campaign_id, attention_id, choice,
+                                     *, authenticated_rider=False):
+        campaign = CodexDevelopmentCampaign(self.instance_id)
+        result = campaign.decide_attention(campaign_id, attention_id, choice,
+                                           authenticated_rider=authenticated_rider)
+        return {"campaign": campaign.presentation(campaign_id),
+                "attention": result["event"], "decision": result["decision"]}
+
     def production_component_status(self):
         import json
         state_root = Path.home() / ".local/state/fawkes"

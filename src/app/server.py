@@ -207,6 +207,16 @@ class FawkesAppHandler(BaseHTTPRequestHandler):
             except Exception:
                 self._json(503, {"error": {"code": "runtime_status_unavailable", "message": "Fawkes component status is unavailable right now."}})
             return
+        if path == "/api/development/attention":
+            if not self._require_auth():
+                return
+            try:
+                query = parse_qs(parsed.query)
+                self._json(200, self.server.chat_service.development_attention(
+                    pending_only=query.get("pending", ["false"])[0].lower() == "true"))
+            except Exception:
+                self._json(503, {"error": {"code": "attention_unavailable", "message": "Development attention state is unavailable right now."}})
+            return
         if path == "/api/development/test-center":
             if not self._require_auth():
                 return
@@ -307,6 +317,23 @@ class FawkesAppHandler(BaseHTTPRequestHandler):
             except Exception:
                 self._json(503, {"error": {"code": "campaign_review_unavailable",
                     "message": "The formal campaign review is unavailable right now."}})
+            return
+        if path.startswith(campaign_prefix) and "/attention/" in path and path.endswith("/decision"):
+            if not self._require_auth():
+                return
+            remainder = path[len(campaign_prefix):-len("/decision")].strip("/")
+            campaign_id, marker, attention_id = remainder.partition("/attention/")
+            if not marker:
+                self._json(400, {"error": {"code": "invalid_attention_decision", "message": "Attention identity is required."}}); return
+            try:
+                payload = self._read_json()
+                self._json(200, self.server.chat_service.decide_development_attention(
+                    unquote(campaign_id), unquote(attention_id), payload.get("choice"),
+                    authenticated_rider=True))
+            except PermissionError as exc:
+                self._json(403, {"error": {"code": "attention_decision_denied", "message": str(exc)}})
+            except (KeyError, ValueError, RuntimeError) as exc:
+                self._json(400, {"error": {"code": "invalid_attention_decision", "message": str(exc)}})
             return
         if path.startswith(feedback_prefix) and path.endswith(feedback_suffix):
             if not self._require_auth():
