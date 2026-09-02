@@ -13,6 +13,7 @@ from src.runtime.codex_write_builder_adapter import (
     WRITE_ADAPTER_ID, WRITE_PROMOTION_RECORD, CodexWriteBuilderAdapter,
 )
 from src.runtime.worker_exchange import WorkerExchange, _digest
+from src.runtime.codex_app_server import exec_compatible_app_server_runner
 
 
 ROOT = Path(os.environ.get(
@@ -112,7 +113,7 @@ def _presentation(*, target, package, result, exchange):
 
 def run_codex_development_handoff(*, instance_id, payload, authenticated_rider,
                                   workspace=ROOT, exchange=None, adapter=None,
-                                  now=None):
+                                  now=None, approval_handler=None):
     """Prepare, send, retain, and present one explicitly selected Codex task."""
     if authenticated_rider is not True:
         raise PermissionError("authenticated rider authority is required")
@@ -141,9 +142,14 @@ def run_codex_development_handoff(*, instance_id, payload, authenticated_rider,
     execution_mode = payload.get("execution_mode", "read_only")
     if execution_mode not in {"read_only", "repository_write"}:
         raise ValueError("unsupported CODEX (REPO) execution mode")
-    adapter = adapter or (CodexWriteBuilderAdapter(exchange, workspace=workspace)
-                          if execution_mode == "repository_write"
-                          else CodexExecWorkerAdapter(exchange, workspace=workspace))
+    invocation_id = f"{task_scope_id}-appserver"
+    if adapter is None:
+        runner = exec_compatible_app_server_runner(campaign_id=payload.get("campaign_id") or task_scope_id,
+            invocation_id=invocation_id, worker=target["worker"],
+            approval_handler=approval_handler)
+        adapter = (CodexWriteBuilderAdapter(exchange, workspace=workspace, run_process=runner)
+                   if execution_mode == "repository_write"
+                   else CodexExecWorkerAdapter(exchange, workspace=workspace, run_process=runner))
     timestamp = now or datetime.now(timezone.utc)
     expires_at = (timestamp + timedelta(minutes=30)).isoformat()
     authorization_reference = f"rider-codex-development-{request_id}"
@@ -197,6 +203,7 @@ def run_codex_development_handoff(*, instance_id, payload, authenticated_rider,
                 "acceptance_condition_ids": conditions, "recovery_references": recovery})
         else:
             arguments["read_only_task"] = task_text
+        arguments["invocation_id"] = invocation_id
         result = adapter.deliver_production_once(**arguments)
     except (PermissionError, RuntimeError, ValueError, OSError) as exc:
         result = {"status": "failed", "failure_reason": type(exc).__name__,

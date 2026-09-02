@@ -258,7 +258,30 @@ class CodexDevelopmentCampaign:
 
     def _run_promoted_builder(self, payload):
         return run_codex_development_handoff(instance_id=self.instance_id, payload=payload,
-                                             authenticated_rider=True, exchange=self.exchange)
+            authenticated_rider=True, exchange=self.exchange,
+            approval_handler=self._handle_typed_approval)
+
+    def _handle_typed_approval(self, approval, *, timeout_seconds):
+        """Project one exact typed request into the accepted Rider boundary."""
+        paused = self.require_tanner(
+            approval["campaign_id"], invocation_id=approval["invocation_id"],
+            worker=approval["worker"], kind=approval["kind"],
+            blocked_action=approval["blocked_action"],
+            why_required=approval["why_required"],
+            requested_authority=approval["requested_authority"],
+            resources=approval["resources"], reversible=approval["reversible"],
+            provider_code=approval["provider_code"],
+            protocol_binding=approval["protocol"])
+        attention_id = paused["needs_tanner"]["attention_id"]
+        result = self.attention_store.wait_for_decision(
+            attention_id, timeout_seconds=timeout_seconds)
+        decision = result["decision"]
+        if decision["choice"] == "approve_once":
+            self.attention_store.consume_approve_once(
+                decision["decision_id"], attention_id=attention_id,
+                invocation_id=approval["invocation_id"])
+        return {"choice": decision["choice"], "attention_id": attention_id,
+                "decision_id": decision["decision_id"]}
 
     @staticmethod
     def _event(kind, detail=None):
@@ -361,7 +384,8 @@ class CodexDevelopmentCampaign:
 
     def require_tanner(self, campaign_id, *, invocation_id, worker, kind,
                        blocked_action, why_required, requested_authority,
-                       resources=(), reversible=None, provider_code=None):
+                       resources=(), reversible=None, provider_code=None,
+                       protocol_binding=None):
         """Pause one exact campaign action at the durable Rider boundary."""
         record = self.store.load(campaign_id)
         if record["cancelled"] or record["status"] in {"succeeded", "cancelled"}:
@@ -370,7 +394,8 @@ class CodexDevelopmentCampaign:
             campaign_id=campaign_id, invocation_id=invocation_id, worker=worker,
             kind=kind, blocked_action=blocked_action, why_required=why_required,
             requested_authority=requested_authority, resources=resources,
-            reversible=reversible, provider_code=provider_code)
+            reversible=reversible, provider_code=provider_code,
+            protocol_binding=protocol_binding)
         needs = {"urgency": "urgent_blocking_flow", "reason": kind,
                  "decision_needed": "Approve this exact action once, deny it, or cancel the campaign",
                  "attention_id": event["attention_id"], "invocation_id": invocation_id,
@@ -685,7 +710,8 @@ class CodexDevelopmentCampaign:
                     return_authority=prepared["return_authority"], campaign_id=campaign_id,
                     builder_return_report_id=builder_return_id,
                     candidate_snapshot_id=snapshot.provenance["candidate_snapshot_id"],
-                    candidate_snapshot_root=snapshot.root)
+                    candidate_snapshot_root=snapshot.root,
+                    approval_handler=self._handle_typed_approval)
             except Exception as exc:
                 current = self.store.load(campaign_id)
                 attempt = {"iteration": record["iteration"], "package_id": prepared["package_id"],

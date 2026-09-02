@@ -7,6 +7,8 @@ import json
 import os
 import re
 import uuid
+import threading
+import time
 
 
 ROOT = Path(os.environ.get(
@@ -14,6 +16,7 @@ ROOT = Path(os.environ.get(
 )).resolve()
 ATTENTION_ROOT = ROOT / "database" / "development_attention"
 CHOICES = {"approve_once", "deny", "cancel_campaign"}
+_DECISION_CONDITION = threading.Condition()
 _SECRET = re.compile(r"(?i)(authorization|token|api[_ -]?key|webhook|password|secret)\s*[:=]\s*\S+")
 
 
@@ -72,11 +75,15 @@ class DevelopmentAttentionStore:
 
     def create(self, *, campaign_id, invocation_id, worker, kind, blocked_action,
                why_required, requested_authority, resources=(), reversible=None,
-               provider_code=None, expires_in_seconds=3600, detail_url=None):
+               provider_code=None, expires_in_seconds=3600, detail_url=None,
+               protocol_binding=None):
+        binding = dict(protocol_binding or {})
+        binding_sha = _digest(binding) if binding else None
         logical = {"campaign_id": campaign_id, "invocation_id": invocation_id,
                    "worker_id": worker["worker_id"], "kind": kind,
                    "blocked_action": sanitize_action(blocked_action),
-                   "requested_authority": sanitize_action(requested_authority)}
+                   "requested_authority": sanitize_action(requested_authority),
+                   "protocol_binding_sha256": binding_sha}
         logical_id = "attention-" + _digest(logical)
         path = self.events / f"{logical_id}.json"
         if path.exists():
@@ -93,6 +100,8 @@ class DevelopmentAttentionStore:
             "requested_authority": sanitize_action(requested_authority),
             "reversible": reversible, "choices": sorted(CHOICES),
             "provider_code": sanitize_action(provider_code) if provider_code else None,
+            "protocol_binding": binding or None,
+            "protocol_binding_sha256": binding_sha,
             "created_at": created.isoformat(),
             "expires_at": (created + timedelta(seconds=expires_in_seconds)).isoformat(),
             "detail_url": detail_url or f"http://localhost:8787/?view=developer&attention={logical_id}",
@@ -130,6 +139,7 @@ class DevelopmentAttentionStore:
             "campaign_id": event["campaign_id"], "invocation_id": event["invocation_id"],
             "choice": choice, "bounded_action_sha256": hashlib.sha256(
                 event["blocked_action"].encode()).hexdigest(),
+            "protocol_binding_sha256": event.get("protocol_binding_sha256"),
             "one_time": choice == "approve_once", "consumed": False,
             "creates_continuing_authority": False, "decided_by": "authenticated_tanner",
             "decided_at": _now()}
@@ -143,7 +153,24 @@ class DevelopmentAttentionStore:
         event.pop("record_sha256", None); event["record_sha256"] = _digest(event)
         (self.events / f"{attention_id}.json").write_text(
             json.dumps(event, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        with _DECISION_CONDITION:
+            _DECISION_CONDITION.notify_all()
         return {"event": event, "decision": decision}
+
+    def wait_for_decision(self, attention_id, *, timeout_seconds):
+        deadline = time.monotonic() + timeout_seconds
+        with _DECISION_CONDITION:
+            while True:
+                event = self.get(attention_id)
+                if event["state"] != "needs_tanner":
+                    decision = json.loads((self.decisions / f"{event['decision_id']}.json").read_text(encoding="utf-8"))
+                    return {"event": event, "decision": decision}
+                if datetime.fromisoformat(event["expires_at"]) <= datetime.now(timezone.utc):
+                    raise TimeoutError("Tanner decision request expired")
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("Tanner decision window expired")
+                _DECISION_CONDITION.wait(timeout=remaining)
 
     def consume_approve_once(self, decision_id, *, attention_id, invocation_id):
         path = self.decisions / f"{decision_id}.json"

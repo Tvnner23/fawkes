@@ -18,6 +18,7 @@ from src.library.artifacts import require_id
 from src.runtime.codex_worker_adapter import _minimal_environment, _process_metadata
 from src.runtime.disposable_verifier import candidate_manifest
 from src.runtime.worker_exchange import WorkerExchange, _authority, _digest
+from src.runtime.codex_app_server import CodexAppServerTransport
 from src.runtime.windows_codex_reviewer import (
     MAX_REVIEW_PACKAGE_BYTES, WINDOWS_REVIEW_SCHEMA, _exact_builder_evidence,
     validate_windows_structured_response,
@@ -168,11 +169,15 @@ def prepare_wsl_review_package(*, exchange, campaign_record, candidate_snapshot,
 
 class WslCodexReviewAdapter:
     """Fresh local Codex review invocation confined to one frozen snapshot."""
-    def __init__(self, exchange, *, codex_binary="codex", run_process=None, timeout_seconds=420):
+    def __init__(self, exchange, *, codex_binary="codex", run_process=None, timeout_seconds=420,
+                 app_server_transport=None):
         if not isinstance(exchange, WorkerExchange): raise TypeError("Worker Exchange is required")
         self.exchange, self.codex_binary = exchange, str(codex_binary)
         self.run_process = run_process or self._run
         self.timeout_seconds = int(timeout_seconds)
+        self.app_server_transport = (None if run_process is not None else
+            (app_server_transport or CodexAppServerTransport(
+                codex_binary=self.codex_binary, timeout_seconds=self.timeout_seconds)))
         self.root = exchange.root / "wsl_codex_review_adapter"
 
     @staticmethod
@@ -203,7 +208,8 @@ class WslCodexReviewAdapter:
 
     def deliver_candidate_once(self, *, package_id, transport_authority, return_authority,
                                campaign_id, builder_return_report_id, candidate_snapshot_id,
-                               candidate_snapshot_root, invocation_id=None, _production_use=False):
+                               candidate_snapshot_root, invocation_id=None, approval_handler=None,
+                               _production_use=False):
         package = self.exchange._load("packages", package_id); recipient = package["recipient"]
         if recipient.get("worker_id") != WSL_REVIEWER_WORKER_ID or recipient.get("role") != WSL_REVIEWER_ROLE:
             raise PermissionError("formal review package recipient is not the WSL REVIEWER")
@@ -266,9 +272,17 @@ class WslCodexReviewAdapter:
                 "--ignore-user-config", "--strict-config", "--sandbox", "read-only", "--cd", str(snapshot_root),
                 "--output-schema", str(schema), "--output-last-message", str(output), "-"]
             try:
-                completed = self.run_process(command, prompt=self._prompt(exported, package_sha, package,
-                    campaign_id, builder_return_report_id, candidate_snapshot_id),
-                    environment=_minimal_environment(), timeout=self.timeout_seconds)
+                prompt = self._prompt(exported, package_sha, package, campaign_id,
+                                      builder_return_report_id, candidate_snapshot_id)
+                if self.app_server_transport is not None:
+                    completed = self.app_server_transport.run(
+                        cwd=snapshot_root, prompt=prompt, output_schema=WINDOWS_REVIEW_SCHEMA,
+                        output_path=output, sandbox="read-only", campaign_id=campaign_id,
+                        invocation_id=invocation_id, worker=request["recipient"],
+                        environment=_minimal_environment(), approval_handler=approval_handler)
+                else:
+                    completed = self.run_process(command, prompt=prompt,
+                        environment=_minimal_environment(), timeout=self.timeout_seconds)
             except (KeyboardInterrupt, subprocess.TimeoutExpired, OSError) as exc:
                 return self._failure(result_path, request, package, transport_authority,
                                      "interrupted_timeout_or_transport_failure", type(exc).__name__)
