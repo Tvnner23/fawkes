@@ -1083,7 +1083,7 @@ function renderDeveloperSection() {
     const qualification=attention.qualification_instruction||null;
     const qualificationChoice=qualification&&qualification.choice==='approve_once'?'Approve Once':qualification&&qualification.choice==='deny'?'Deny':null;
     const qualificationLabel=qualification&&qualification.label?qualification.label:null;
-    [['Qualification instruction',qualificationChoice?`Select ${qualificationChoice} — ${qualificationLabel}. This synthetic instruction is separate from Fawkes’s low-risk recommendation and overrides neither real policy nor future decisions.`:'No qualification-specific choice is prescribed.'],
+    [['Qualification instruction',qualificationChoice?`Qualification instruction: Select ${qualificationChoice} — ${qualificationLabel}. This synthetic instruction is separate from Fawkes’s low-risk recommendation and overrides neither real policy nor future decisions.`:'No qualification-specific choice is prescribed.'],
      ['What Fawkes wants to do',actionSummary],['Why Fawkes stopped',attention.why_required],
      ['Why Tanner’s permission is required','Crossing this protected operating-system boundary requires an exact authenticated Rider decision.'],
      ['What will change if approved',harmlessNoop?'The one command will run once and should make no persistent change.':'Only the exact requested action may run once.'],
