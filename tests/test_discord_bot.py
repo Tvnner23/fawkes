@@ -361,12 +361,89 @@ class DiscordBotTests(unittest.TestCase):
         client.send_dm(EMILY, "Hello.")
         self.assertEqual(json.loads(api.requests[1].data)["content"], "Fawkes: Hello.")
 
-    def test_emily_opt_in_does_not_turn_social_identity_into_rider(self):
+    def test_emily_opt_in_requires_separate_social_service(self):
         config = self.configuration(emily_opted_in=True)
-        bridge = DiscordConversationBridge(config, chat_service=Mock(), http_client=Mock())
-        with self.assertRaisesRegex(DiscordIdentityError, "not a Rider"):
+        rider_chat = Mock()
+        bridge = DiscordConversationBridge(config, chat_service=rider_chat, http_client=Mock())
+        with self.assertRaisesRegex(DiscordIdentityError, "no configured social chat service"):
             bridge.handle_dispatch({"t": "MESSAGE_CREATE", "d": {
                 "id": "1", "content": "hello", "author": {"id": EMILY, "bot": False}}})
+        rider_chat.send.assert_not_called()
+
+    def test_emily_uses_only_exact_message_and_social_principal(self):
+        config = self.configuration(emily_opted_in=True)
+        rider_chat = Mock()
+        social_chat = Mock()
+        social_chat.send.return_value = {"message": {"content": "Fawkes: hello Emily"}}
+        http = Mock()
+        http.send_dm.return_value = {"recipient_identity": "emily", "creates_authority": False}
+        result = DiscordConversationBridge(
+            config, chat_service=rider_chat, social_chat_service=social_chat,
+            http_client=http,
+        ).handle_dispatch({"t": "MESSAGE_CREATE", "d": {
+            "id": "1", "content": "  exact social words  ",
+            "author": {"id": EMILY, "bot": False}}})
+        social_chat.send.assert_called_once_with(
+            "  exact social words  ", principal_identity="emily",
+        )
+        rider_chat.send.assert_not_called()
+        http.send_dm.assert_called_once_with(EMILY, "Fawkes: hello Emily")
+        self.assertEqual(result["principal"], "discord-social:emily")
+        self.assertNotIn("archive_source", result)
+        self.assertFalse(result["rider_commands_authorized"])
+        self.assertFalse(result["development_authority"])
+
+    def test_tanner_never_routes_through_social_service(self):
+        rider_chat = Mock()
+        rider_chat.send.return_value = {"message": {"content": "rider reply"}}
+        social_chat = Mock()
+        http = Mock()
+        http.send_dm.return_value = {"recipient_identity": "tanner", "creates_authority": False}
+        DiscordConversationBridge(
+            self.configuration(emily_opted_in=True), chat_service=rider_chat,
+            social_chat_service=social_chat, http_client=http,
+        ).handle_dispatch({"t": "MESSAGE_CREATE", "d": {
+            "id": "1", "content": "rider words",
+            "author": {"id": TANNER, "bot": False}}})
+        rider_chat.send.assert_called_once_with("rider words", source="discord_dm")
+        social_chat.send.assert_not_called()
+
+    def test_social_reply_fails_closed_if_recipient_binding_changes(self):
+        config = self.configuration(emily_opted_in=True)
+        social_chat = Mock()
+        social_chat.send.return_value = {"message": {"content": "reply"}}
+        outbound = Mock()
+        outbound.send_conversation_reply.side_effect = DiscordIdentityError(
+            "Discord conversation recipient binding changed"
+        )
+        bridge = DiscordConversationBridge(
+            config, chat_service=Mock(), social_chat_service=social_chat,
+            http_client=Mock(), outbound_bridge=outbound,
+        )
+        with self.assertRaisesRegex(DiscordReplyDeliveryError, "recipient binding changed"):
+            bridge.handle_dispatch({"t": "MESSAGE_CREATE", "d": {
+                "id": "1", "content": "hello", "author": {"id": EMILY, "bot": False}}})
+
+    def test_social_cursor_deduplicates_without_reusing_rider_cursor(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cursor = DiscordMessageCursorStore(Path(directory) / "cursor.json")
+            cursor.advance("tanner", "50")
+            social_chat = Mock()
+            social_chat.send.return_value = {"message": {"content": "Fawkes: reply"}}
+            http = Mock()
+            http.send_dm.return_value = {"recipient_identity": "emily",
+                                         "creates_authority": False}
+            bridge = DiscordConversationBridge(
+                self.configuration(emily_opted_in=True), chat_service=Mock(),
+                social_chat_service=social_chat, http_client=http, cursor_store=cursor,
+            )
+            event = {"t": "MESSAGE_CREATE", "d": {
+                "id": "7", "content": "hello", "author": {"id": EMILY, "bot": False}}}
+            self.assertEqual(bridge.handle_dispatch(event)["status"], "replied")
+            self.assertEqual(bridge.handle_dispatch(event)["status"], "duplicate")
+            self.assertEqual(cursor.get("emily"), "7")
+            self.assertEqual(cursor.get("tanner"), "50")
+            social_chat.send.assert_called_once()
 
     def test_token_is_redacted_from_configuration_failures_and_http_failures(self):
         config = self.configuration()

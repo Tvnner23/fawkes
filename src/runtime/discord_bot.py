@@ -343,12 +343,13 @@ class DiscordOutboundBridge:
 
 
 class DiscordConversationBridge:
-    """Validate an inbound DM before handing exact text to normal Chat."""
+    """Route a verified DM to its explicitly scoped conversational service."""
 
     def __init__(self, configuration, *, chat_service, http_client, outbound_bridge=None,
-                 cursor_store=None):
+                 cursor_store=None, social_chat_service=None):
         self.configuration = configuration
         self.chat_service = chat_service
+        self.social_chat_service = social_chat_service
         self.http_client = http_client
         self.outbound_bridge = outbound_bridge or DiscordOutboundBridge(configuration, http_client)
         self.cursor_store = cursor_store
@@ -363,10 +364,6 @@ class DiscordConversationBridge:
         if author.get("bot"):
             return {"status": "ignored", "creates_authority": False}
         recipient = self.configuration.recipient(author.get("id"))
-        if not recipient.rider_identity:
-            # Social-contact conversation needs its separately authorized
-            # principal boundary; opt-in alone must never become Rider status.
-            raise DiscordIdentityError("Social contact is not a Rider conversational principal")
         content = message.get("content")
         if not isinstance(content, str) or not content.strip():
             return {"status": "ignored", "creates_authority": False}
@@ -377,11 +374,33 @@ class DiscordConversationBridge:
                     and int(message_id) <= int(current):
                 return {"status": "duplicate", "creates_authority": False}
         try:
-            result = self.chat_service.send(content, source="discord_dm")
+            if recipient.rider_identity:
+                result = self.chat_service.send(content, source="discord_dm")
+                principal = "discord-conversational:tanner"
+                archive_source = "discord_dm"
+            else:
+                if recipient.identity != "emily":
+                    raise DiscordIdentityError(
+                        "Discord social principal is not explicitly allowlisted"
+                    )
+                if self.social_chat_service is None:
+                    raise DiscordIdentityError(
+                        "Discord social principal has no configured social chat service"
+                    )
+                # This deliberately supplies no Rider source, continuity, archive,
+                # memory, command, or authority input to the social boundary.
+                result = self.social_chat_service.send(
+                    content, principal_identity=recipient.identity,
+                )
+                principal = "discord-social:emily"
+                archive_source = None
+        except DiscordIdentityError:
+            raise
         except Exception as exc:
             detail = _safe_exception_detail(exc)
+            service_name = "ChatService" if recipient.rider_identity else "social chat service"
             raise DiscordConversationProcessingError(
-                f"Fawkes ChatService failed while processing Discord DM: "
+                f"Fawkes {service_name} failed while processing Discord DM: "
                 f"{type(exc).__name__}: {detail}"
             ) from None
         reply = result["message"]["content"]
@@ -397,10 +416,13 @@ class DiscordConversationBridge:
             raise DiscordReplyDeliveryError(
                 f"Discord DM reply delivery failed: {type(exc).__name__}: {detail}"
             ) from None
-        return {"status": "replied", "inbound_message_id": message.get("id"),
-                "archive_source": "discord_dm", "delivery_receipt": receipt,
-                "principal": "discord-conversational:tanner", "rider_commands_authorized": False,
+        response = {"status": "replied", "inbound_message_id": message.get("id"),
+                "delivery_receipt": receipt, "principal": principal,
+                "rider_commands_authorized": False,
                 "development_authority": False, "creates_authority": False}
+        if archive_source is not None:
+            response["archive_source"] = archive_source
+        return response
 
     def backfill(self):
         """Recover only post-cursor allowlisted DMs in chronological order."""
@@ -410,9 +432,7 @@ class DiscordConversationBridge:
         for recipient in (self.configuration.tanner, self.configuration.emily):
             if recipient is None or not recipient.opted_in:
                 continue
-            # Emily requires a separately authorized social principal boundary;
-            # the existing Rider ChatService must never expose Tanner context.
-            if not recipient.rider_identity:
+            if not recipient.rider_identity and self.social_chat_service is None:
                 continue
             cursor = self.cursor_store.get(recipient.identity)
             if cursor is None:
