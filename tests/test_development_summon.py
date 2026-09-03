@@ -62,6 +62,31 @@ class DevelopmentSummonTests(unittest.TestCase):
         self.assertIn("/api/development/attention/", javascript)
         self.assertIn('data-section="attention"', (ROOT / "src/app/static/index.html").read_text())
 
+    def test_phoenix_board_is_read_only_bounded_projection(self):
+        javascript = (ROOT / "src/app/static/app.js").read_text()
+        self.assertIn("Worker Pulse / Phoenix Board", javascript)
+        self.assertIn("renderPhoenixBoard(campaigns, attentionItems)", javascript)
+        self.assertIn("PHOENIX_BOARD_CAMPAIGN_LIMIT = 6", javascript)
+        self.assertIn("PHOENIX_BOARD_ACTIVITY_LIMIT = 3", javascript)
+        self.assertIn("campaigns.slice(0, PHOENIX_BOARD_CAMPAIGN_LIMIT)", javascript)
+        self.assertIn("activity.slice(-PHOENIX_BOARD_ACTIVITY_LIMIT)", javascript)
+        self.assertIn("Provider / model usage: Unavailable in canonical projection", javascript)
+        board = javascript[javascript.index("function renderPhoenixBoard"):javascript.index("function renderDeveloperSection")]
+        self.assertNotIn("request(", board)
+        self.assertNotIn("addEventListener", board)
+        self.assertNotIn("JSON.stringify", board)
+
+    def test_phoenix_board_allowlists_safe_projection_fields_and_keeps_decisions_immutable(self):
+        javascript = (ROOT / "src/app/static/app.js").read_text()
+        board = javascript[javascript.index("function renderPhoenixBoard"):javascript.index("function renderDeveloperSection")]
+        for forbidden in ("hidden_reasoning", "credentials", "private_body",
+                          "memory", "archive", "raw_transcript", "reference_arrays"):
+            self.assertNotIn(forbidden, board.lower())
+        self.assertIn("exact_worker_bodies_remain_in_worker_exchange", board)
+        self.assertIn("hidden_chain_of_thought_exposed === false", board)
+        self.assertIn("const immutableIdentity={attention_id:attention.attention_id", javascript)
+        self.assertIn("body:JSON.stringify({choice,identity:immutableIdentity})", javascript)
+
     @patch("src.runtime.production_control.subprocess.run")
     def test_runtime_control_is_fixed_allowlist_and_zero_development_authority(self, run):
         run.return_value = Mock(returncode=0, stdout="", stderr="")

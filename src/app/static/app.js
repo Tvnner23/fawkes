@@ -1028,6 +1028,73 @@ async function triggerAllAcceptance() {
   await loadTestCenter();
   probeResults.forEach(([testId, blocks]) => showProbeResult(testId, blocks));
 }
+const PHOENIX_BOARD_CAMPAIGN_LIMIT = 6;
+const PHOENIX_BOARD_ACTIVITY_LIMIT = 3;
+function phoenixBoardText(value, fallback = 'Unavailable') {
+  return typeof value === 'string' && value.trim() ? value.trim() : fallback;
+}
+function phoenixBoardWorker(value, role) {
+  const identity = value && typeof value === 'object' ? phoenixBoardText(value.worker_id) : 'Unavailable';
+  const state = value && typeof value === 'object' ? phoenixBoardText(value.state, 'State unavailable') : 'State unavailable';
+  return `${role}: ${identity} · ${state}`;
+}
+function phoenixBoardOutcome(record, activity) {
+  const allowed = {
+    succeeded: 'Accepted', cancelled: 'Rolled back / cancelled', failed: 'Rejected / failed safely',
+    failed_safe: 'Rejected / failed safely', failed_rolled_back: 'Rolled back',
+    rolled_back_after_evidence_failure: 'Rolled back'
+  };
+  if (allowed[record.status]) return allowed[record.status];
+  for (let index = activity.length - 1; index >= 0; index -= 1) {
+    const summary = activity[index] && activity[index].summary;
+    const statusValue = summary && summary.status;
+    if (allowed[statusValue]) return allowed[statusValue];
+    if (statusValue === 'pass' || statusValue === 'accepted') return 'Accepted';
+    if (statusValue === 'correction_required' || statusValue === 'rejected') return 'Rejected / correction required';
+  }
+  return 'No recent accepted, rejected, or rolled-back outcome';
+}
+function renderPhoenixBoard(campaigns, attentionItems) {
+  const board = element('section', 'growth-card phoenix-board');
+  board.append(element('h2', '', 'Worker Pulse / Phoenix Board'));
+  board.append(element('p', 'meta', 'Read-only rebuild from the loaded campaign and Attention projections. It grants no authority.'));
+  const boundedCampaigns = campaigns.slice(0, PHOENIX_BOARD_CAMPAIGN_LIMIT);
+  if (!boundedCampaigns.length) {
+    board.append(element('p', 'dev-empty', 'No campaign pulse is available.'));
+    return board;
+  }
+  boundedCampaigns.forEach(record => {
+    const activity = Array.isArray(record.activity) ? record.activity : [];
+    const recent = activity.slice(-PHOENIX_BOARD_ACTIVITY_LIMIT);
+    const pending = attentionItems.find(item => item && item.campaign_id === record.campaign_id && item.state === 'needs_tanner');
+    const firstAt = activity.length ? Date.parse(activity[0].created_at) : NaN;
+    const lastAt = activity.length ? Date.parse(activity[activity.length - 1].created_at) : NaN;
+    const elapsed = Number.isFinite(firstAt) && Number.isFinite(lastAt) ? `${Math.max(0, Math.round((lastAt - firstAt) / 1000))}s recorded` : 'Unavailable';
+    const latestSummary = recent.length && recent[recent.length - 1].summary && typeof recent[recent.length - 1].summary === 'object' ? recent[recent.length - 1].summary : null;
+    const checkpoint = recent.length ? `${readable(phoenixBoardText(recent[recent.length - 1].kind, 'checkpoint unavailable'))} · ${dateLabel(recent[recent.length - 1].created_at)}` : 'Unavailable';
+    const failure = latestSummary ? phoenixBoardText(latestSummary.failure, 'None reported') : 'None reported';
+    const pulse = element('article', 'dev-card phoenix-board-campaign');
+    pulse.append(element('h3', '', phoenixBoardText(record.campaign_id, 'Unknown campaign')));
+    pulse.append(element('p', '', phoenixBoardText(record.objective, 'Objective unavailable')));
+    pulse.append(element('p', 'meta', `${readable(phoenixBoardText(record.current_stage, record.status || 'unknown'))} · iteration ${record.iteration || 0}/${record.maximum_iterations || 0} · elapsed ${elapsed}`));
+    pulse.append(element('p', '', phoenixBoardWorker(record.builder, 'Worker')),
+      element('p', '', phoenixBoardWorker(record.reviewer, 'Reviewer')),
+      element('p', '', `Active scope: ${latestSummary ? phoenixBoardText(latestSummary.task_scope_id) : 'Unavailable'}`),
+      element('p', '', `Authority: ${record.creates_authority === false ? 'None created' : 'Unavailable — no authority inferred'}`),
+      element('p', '', `Provider / model usage: Unavailable in canonical projection`),
+      element('p', '', `Attention: ${pending ? `NEEDS_TANNER · ${phoenixBoardText(pending.why_required, 'Reason unavailable')}` : 'No pending NEEDS_TANNER request'}`),
+      element('p', '', `Bounded deadline: ${pending && pending.expires_at ? dateLabel(pending.expires_at) : 'None present'}`),
+      element('p', '', `Last checkpoint: ${checkpoint}`),
+      element('p', '', `Last failure: ${failure}`),
+      element('p', '', `External-state isolation: ${record.exact_worker_bodies_remain_in_worker_exchange === true && record.hidden_chain_of_thought_exposed === false ? 'Confirmed by projection' : 'Unavailable'}`),
+      element('p', '', `Recent outcome: ${phoenixBoardOutcome(record, recent)}`));
+    const away = recent.map(item => `${readable(phoenixBoardText(item.kind, 'activity'))} (${dateLabel(item.created_at)})`);
+    pulse.append(element('p', 'meta', `While Tanner was away (${recent.length}/${PHOENIX_BOARD_ACTIVITY_LIMIT} most recent): ${away.length ? away.join(' · ') : 'No recent activity'}`));
+    board.append(pulse);
+  });
+  if (campaigns.length > boundedCampaigns.length) board.append(element('p', 'meta', `${campaigns.length - boundedCampaigns.length} older campaign(s) omitted by the fixed board limit.`));
+  return board;
+}
 function renderDeveloperSection() {
   if (developerSection === 'tests') { renderTestCenter(); return; }
   clearNode(developerContent);
@@ -1110,6 +1177,9 @@ function renderDeveloperSection() {
   }
   if (!developerData) { emptyState('Loading Development…'); return; }
   if (developerSection === 'campaigns') {
+    const campaigns = (developerData && developerData.autonomous_campaigns) || [];
+    const attentionItems = (developerData && developerData.attention) || [];
+    developerContent.append(renderPhoenixBoard(campaigns, attentionItems));
     const create = element('article', 'growth-card'); create.id = 'campaign-create-card';
     create.append(element('h3', '', 'Start an authorized bounded Worker task'));
     const objective = document.createElement('textarea'); objective.id = 'campaign-objective'; objective.placeholder = 'Exact Tanner-approved objective';
@@ -1135,7 +1205,6 @@ function renderDeveloperSection() {
       if (!campaignPoll) campaignPoll = window.setInterval(loadDeveloper, 2000);
     });
     create.append(objective, scope, tests, prepare, proposal, authorize); developerContent.append(create);
-    const campaigns = (developerData && developerData.autonomous_campaigns) || [];
     if (!campaigns.length) { developerContent.append(element('p', 'dev-empty', 'No autonomous Development campaigns recorded yet.')); return; }
     campaigns.forEach(record => {
       const card = element('article', 'dev-card');
