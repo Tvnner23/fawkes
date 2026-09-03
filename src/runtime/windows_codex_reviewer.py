@@ -838,6 +838,8 @@ class WindowsCodexReviewAdapter:
             raise ValueError("verification references non-source sections")
         if not isinstance(verification.get("material_reliance"), bool):
             raise ValueError("material reliance typing is invalid")
+        if verification["material_reliance"] and not checked:
+            raise ValueError("material reliance must identify checked claims")
         if verification["material_reliance"] and not relied:
             raise ValueError("material reliance must identify exact source sections")
         if (not isinstance(verification.get("method"), str) or not verification["method"].strip()
@@ -859,6 +861,10 @@ class WindowsCodexReviewAdapter:
                 or any(not isinstance(counterclaim.get(key), str) or not counterclaim.get(key)
                        for key in ("claim", "evidence_reference"))):
             raise ValueError("counterclaim is malformed")
+        if verification["status"] == "accepted_with_caveats" and not verification["caveats"]:
+            raise ValueError("caveated acceptance requires caveats")
+        if verification["status"] == "disputed" and not isinstance(counterclaim, dict):
+            raise ValueError("disputed verification requires a counterclaim")
         if review_status in {"pass", "pass_with_caveats"}:
             allowed_verification = "accepted" if review_status == "pass" else "accepted_with_caveats"
             exact_package_evidence = {json.dumps(item, sort_keys=True) for item in package.get("evidence_references", [])}

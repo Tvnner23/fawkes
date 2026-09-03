@@ -99,6 +99,8 @@ class RepairSequenceReviewer(FakeWslReviewer):
         response=json.loads(output.read_text())
         failure=self.failures[self.provider_turns-1] if self.provider_turns <= len(self.failures) else None
         if failure == "lineage": response["package_id"]="neighbor-package"
+        elif failure == "material_without_claims":
+            response["verification"]["checked_claim_ids"] = []
         elif failure == "semantic":
             response["review_status"]="correction_required"
             response["violated_acceptance_condition_ids"]=["done"]
@@ -371,6 +373,27 @@ class WslFormalReviewerTests(unittest.TestCase):
         self.assertNotIn("review_status",failed)
         reports=[json.loads(p.read_text()) for p in (self.exchange.root/"reports").glob("*.json")]
         self.assertFalse(any(x.get("sender",{}).get("worker_id")==WSL_REVIEWER_WORKER_ID for x in reports))
+
+    def test_material_reliance_requires_claims_and_uses_one_bounded_repair(self):
+        repaired = RepairSequenceReviewer(["material_without_claims", None])
+        result = self.invoke(repaired)
+        self.assertEqual((result["status"], repaired.provider_turns), ("delivered", 2))
+        self.assertEqual(result["review_status"], "pass")
+
+        self.setUp()
+        rejected = RepairSequenceReviewer(
+            ["material_without_claims", "material_without_claims"])
+        failed = self.invoke(rejected)
+        self.assertEqual((failed["status"], failed["failure_reason"], rejected.provider_turns),
+                         ("failed", "semantic_repair_failed", 2))
+        reports = [json.loads(path.read_text())
+                   for path in (self.exchange.root / "reports").glob("*.json")]
+        self.assertFalse(any(item.get("sender", {}).get("worker_id") == WSL_REVIEWER_WORKER_ID
+                             for item in reports))
+        verifications = [json.loads(path.read_text()) for path in
+                         (self.exchange.root / "verification_receipts").glob("*.json")]
+        self.assertFalse(any(item.get("recipient", {}).get("worker_id") == WSL_REVIEWER_WORKER_ID
+                             for item in verifications))
 
     def test_defect_evidence_reference_uses_canonical_id_and_bounded_repair(self):
         canonical=FakeWslReviewer(status="correction_required")
