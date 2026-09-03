@@ -2,12 +2,14 @@ from pathlib import Path
 from datetime import datetime, timezone
 import hashlib
 import json
+import os
 import sys
 import uuid
 
 ROOT = Path(__file__).resolve().parent.parent
-RAW_DIR = ROOT / "archive" / "raw"
-META_DIR = ROOT / "archive" / "meta"
+STATE_ROOT = Path(os.environ.get("FAWKES_RUNTIME_STATE_ROOT") or ROOT)
+RAW_DIR = STATE_ROOT / "archive" / "raw"
+META_DIR = STATE_ROOT / "archive" / "meta"
 
 RAW_DIR.mkdir(parents=True, exist_ok=True)
 META_DIR.mkdir(parents=True, exist_ok=True)

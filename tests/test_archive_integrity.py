@@ -1,6 +1,7 @@
 from pathlib import Path
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -12,10 +13,15 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SOURCE_DIR = PROJECT_ROOT / "src"
 
 
+def archive_test_directory():
+    external_root = os.environ.get("FAWKES_RUNTIME_STATE_ROOT")
+    return tempfile.TemporaryDirectory(dir=external_root)
+
+
 class FawkesArchiveTests(unittest.TestCase):
     def setUp(self):
-        self.temp_dir = tempfile.TemporaryDirectory()
-        self.root = Path(self.temp_dir.name)
+        self.temp_dir = archive_test_directory()
+        self.root = Path(self.temp_dir.name).resolve()
 
         shutil.copytree(SOURCE_DIR, self.root / "src")
 
@@ -28,12 +34,15 @@ class FawkesArchiveTests(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def run_fawkes(self, *args, input_text=None):
+        environment = os.environ.copy()
+        environment["FAWKES_RUNTIME_STATE_ROOT"] = str(self.root)
         return subprocess.run(
             [sys.executable, "src/fawkes.py", *args],
             cwd=self.root,
             input=input_text,
             text=True,
             capture_output=True,
+            env=environment,
         )
 
     def test_text_archive_preserves_exact_bytes(self):
@@ -129,8 +138,8 @@ class FawkesArchiveTests(unittest.TestCase):
 
 class FawkesWorkflowTests(unittest.TestCase):
     def setUp(self):
-        self.temp_dir = tempfile.TemporaryDirectory()
-        self.root = Path(self.temp_dir.name)
+        self.temp_dir = archive_test_directory()
+        self.root = Path(self.temp_dir.name).resolve()
 
         shutil.copytree(SOURCE_DIR, self.root / "src")
 
@@ -143,12 +152,15 @@ class FawkesWorkflowTests(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def run_fawkes(self, *args, input_text=None):
+        environment = os.environ.copy()
+        environment["FAWKES_RUNTIME_STATE_ROOT"] = str(self.root)
         return subprocess.run(
             [sys.executable, "src/fawkes.py", *args],
             cwd=self.root,
             input=input_text,
             text=True,
             capture_output=True,
+            env=environment,
         )
 
     def test_duplicate_file_is_not_archived_twice(self):

@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 import hashlib
 import json
+import os
 import re
 import struct
 import uuid
@@ -19,7 +20,8 @@ from src.capabilities.multimodal import AuthorityContract, MultimodalCapabilityC
 
 
 ROOT = Path(__file__).resolve().parent.parent.parent
-PRESENCE_ROOT = ROOT / "database" / "presentation"
+STATE_ROOT = Path(os.environ.get("FAWKES_RUNTIME_STATE_ROOT") or ROOT)
+PRESENCE_ROOT = STATE_ROOT / "database" / "presentation"
 PROFILE_SCHEMA_VERSION = 2
 RIG_CONTRACT_VERSION = "presence-rig-1"
 WORKSHOP_STATIC_CONTRACT_VERSION = "presence-workshop-static-1"

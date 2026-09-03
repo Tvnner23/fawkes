@@ -1,10 +1,12 @@
 from pathlib import Path
 from datetime import datetime, timezone
 import json
+import os
 import uuid
 
 ROOT = Path(__file__).resolve().parent.parent
-INSTANCE_DIR = ROOT / "instances"
+STATE_ROOT = Path(os.environ.get("FAWKES_RUNTIME_STATE_ROOT") or ROOT)
+INSTANCE_DIR = STATE_ROOT / "instances"
 REGISTRY_PATH = INSTANCE_DIR / "registry.json"
 
 INSTANCE_DIR.mkdir(parents=True, exist_ok=True)

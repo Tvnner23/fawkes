@@ -1,10 +1,99 @@
 from pathlib import Path
+import json
+import shutil
+import subprocess
+import sys
+import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 class FawkesServiceDefinitionTests(unittest.TestCase):
+    def _isolated_src(self, checkout):
+        shutil.copytree(ROOT / "src", checkout / "src")
+
+    def test_legacy_state_owners_honor_external_runtime_root_without_leakage(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary = Path(temporary)
+            checkout = temporary / "checkout"
+            checkout.mkdir()
+            self._isolated_src(checkout)
+            state_root = temporary / "runtime-state"
+            program = """
+import json
+from src import archive, archive_file, conversations, ingest, instances
+from src.capabilities import phoenix_presence
+
+store = phoenix_presence.PresenceProfileStore("test-phoenix")
+print(json.dumps({
+    "archive_raw": str(archive.RAW_DIR),
+    "archive_file_meta": str(archive_file.META_DIR),
+    "ingest_raw": str(ingest.RAW_DIR),
+    "conversations": str(conversations.CONVERSATION_DIR),
+    "instances": str(instances.INSTANCE_DIR),
+    "presence": str(store.root),
+    "presence_path": str(store.path),
+}))
+"""
+            environment = {
+                "FAWKES_RUNTIME_STATE_ROOT": str(state_root),
+                "PYTHONPATH": str(checkout),
+            }
+            completed = subprocess.run(
+                [sys.executable, "-c", program], cwd=checkout, env=environment,
+                check=True, capture_output=True, text=True,
+            )
+            paths = json.loads(completed.stdout)
+            self.assertEqual(Path(paths["archive_raw"]), state_root / "archive" / "raw")
+            self.assertEqual(Path(paths["archive_file_meta"]), state_root / "archive" / "meta")
+            self.assertEqual(Path(paths["ingest_raw"]), state_root / "archive" / "raw")
+            self.assertEqual(Path(paths["conversations"]), state_root / "conversations")
+            self.assertEqual(Path(paths["instances"]), state_root / "instances")
+            self.assertEqual(Path(paths["presence"]), state_root / "database" / "presentation")
+            self.assertEqual(
+                Path(paths["presence_path"]),
+                state_root / "database" / "presentation" / "test-phoenix" / "profile.json",
+            )
+            for relative in ("archive", "conversations", "instances", "database"):
+                self.assertFalse((checkout / relative).exists())
+            self.assertEqual(set(environment), {"FAWKES_RUNTIME_STATE_ROOT", "PYTHONPATH"})
+
+    def test_legacy_state_owners_retain_repository_fallback_and_presence_injection(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            checkout = Path(temporary) / "checkout"
+            checkout.mkdir()
+            self._isolated_src(checkout)
+            program = """
+import json
+from src import archive, archive_file, conversations, ingest, instances
+from src.capabilities import phoenix_presence
+
+injected = phoenix_presence.PresenceProfileStore("test-phoenix", root="explicit-root")
+print(json.dumps({
+    "archive": str(archive.RAW_DIR),
+    "archive_file": str(archive_file.META_DIR),
+    "ingest": str(ingest.RAW_DIR),
+    "conversations": str(conversations.CONVERSATION_DIR),
+    "instances": str(instances.INSTANCE_DIR),
+    "presence": str(phoenix_presence.PRESENCE_ROOT),
+    "injected": str(injected.path),
+}))
+"""
+            completed = subprocess.run(
+                [sys.executable, "-c", program], cwd=checkout,
+                env={"PYTHONPATH": str(checkout)}, check=True,
+                capture_output=True, text=True,
+            )
+            paths = json.loads(completed.stdout)
+            self.assertEqual(Path(paths["archive"]), checkout / "archive" / "raw")
+            self.assertEqual(Path(paths["archive_file"]), checkout / "archive" / "meta")
+            self.assertEqual(Path(paths["ingest"]), checkout / "archive" / "raw")
+            self.assertEqual(Path(paths["conversations"]), checkout / "conversations")
+            self.assertEqual(Path(paths["instances"]), checkout / "instances")
+            self.assertEqual(Path(paths["presence"]), checkout / "database" / "presentation")
+            self.assertEqual(Path(paths["injected"]), Path("explicit-root/test-phoenix/profile.json"))
+
     def test_services_are_credential_free_and_separate(self):
         app = (ROOT / "deploy/systemd/fawkes-app.service").read_text()
         discord = (ROOT / "deploy/systemd/fawkes-discord.service").read_text()
