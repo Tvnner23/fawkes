@@ -284,7 +284,10 @@ class AutonomyProductionTransportTests(unittest.TestCase):
                 "content": json.dumps(returned, sort_keys=True)},
                 {"section_id": "candidate-retention-receipt",
                  "title": "Exact pre-review candidate-retention receipt",
-                 "content": json.dumps(retention, sort_keys=True, separators=(",", ":"))}],
+                 "content": json.dumps(retention, sort_keys=True, separators=(",", ":"))},
+                {"section_id": "exact-change-evidence", "title": "Exact change evidence",
+                 "content": json.dumps(result["exact_change_evidence"], sort_keys=True,
+                                       separators=(",", ":"))}],
             claims=[{"claim_id": "done", "area": "development",
                 "statement": "The bounded change is exact.", "maturity": "in_development",
                 "change_class": "software_system"}],
@@ -294,7 +297,8 @@ class AutonomyProductionTransportTests(unittest.TestCase):
                                      reviewer["worker_id"])
         package = self.exchange.compose_package(report_id=source["report_id"], recipient=reviewer,
             authority=review_authority,
-            included_section_ids=["exact-builder-return", "candidate-retention-receipt"])
+            included_section_ids=["exact-builder-return", "candidate-retention-receipt",
+                                  "exact-change-evidence"])
         delivery = self.exchange.record_delivery(package_id=package["package_id"],
             authority=review_authority, adapter_id="fixture-independent-reviewer",
             adapter_version="1", status="delivered", delivery_reference="fixture-delivery")
@@ -500,6 +504,11 @@ class AutonomyProductionTransportTests(unittest.TestCase):
         rejected(lambda receipt: receipt.update(package_id="worker-package-neighbor"))
         rejected(lambda receipt: receipt.update(allowed_scope_sha256="1" * 64))
         rejected(lambda receipt: receipt.update(candidate_retention_receipt_sha256="2" * 64))
+        rejected(lambda receipt: receipt.update(review_package_sha256="3" * 64))
+        rejected(lambda receipt: receipt.update(source_report_id="worker-report-neighbor"))
+        rejected(lambda receipt: receipt.update(exact_change_evidence_sha256="4" * 64))
+        rejected(lambda receipt: receipt.update(authoritative_preimages_sha256="5" * 64))
+        rejected(lambda receipt: receipt.update(replay_identity="6" * 64))
 
         incomplete = {"status": "accepted", "creates_authority": False}
         with self.assertRaises(PermissionError):
@@ -1141,24 +1150,32 @@ class AutonomyProductionTransportTests(unittest.TestCase):
         review_sender = self.sender
         review_recipient = {key: WINDOWS_CODEX_WORKER_REFERENCE[key]
                             for key in ("worker_id", "role", "identity_status", "charter_version")}
+        empty_changes=[]
+        retention={"record_sha256":_digest({"fixture":"retained-candidate"}),
+                   "exact_change_evidence_sha256":_digest(empty_changes)}
         source = self.exchange.create_report(task_scope_id=review_task, sender=review_sender,
             authority=authority("fawkes", review_task, review_sender["worker_id"]),
             sections=[{"section_id": "exact-builder-return", "title": "Exact builder return",
-                "content": json.dumps(builder, sort_keys=True, ensure_ascii=False)}],
+                "content": json.dumps(builder, sort_keys=True, ensure_ascii=False)},
+                {"section_id":"candidate-retention-receipt","title":"Candidate retention receipt",
+                 "content":json.dumps(retention,sort_keys=True,separators=(",",":"))},
+                {"section_id":"exact-change-evidence","title":"Exact change evidence",
+                 "content":json.dumps(empty_changes,sort_keys=True,separators=(",",":"))}],
             claims=[{"claim_id": "done", "area": "development", "statement": "Candidate satisfies scope.",
                 "maturity": "in_development", "change_class": "software_system"}],
             evidence_references=[{"reference_type": "worker_exchange_report",
                 "reference_id": builder["report_id"], "sha256": builder["record_sha256"]}])
         base = authority("fawkes", review_task, review_sender["worker_id"], review_recipient["worker_id"])
         package = self.exchange.compose_package(report_id=source["report_id"], recipient=review_recipient,
-            authority=base, included_section_ids=["exact-builder-return"])
+            authority=base, included_section_ids=["exact-builder-return",
+                "candidate-retention-receipt","exact-change-evidence"])
         snapshot_id = candidate_manifest(self.workspace)["candidate_snapshot_id"]
         transport = {**base, "adapter_id": WINDOWS_ADAPTER_ID, "package_id": package["package_id"],
             "recipient_environment_id": WINDOWS_ENVIRONMENT_ID, "campaign_id": self.campaign,
             "builder_return_report_id": builder["report_id"], "builder_return_sha256": builder["record_sha256"],
             "candidate_snapshot_id": snapshot_id, "builder_package_id": self.package["package_id"],
             "mutation_manifest_sha256": _digest([]), "allowed_scope_sha256": _digest(self.scopes),
-            "candidate_retention_receipt_sha256": _digest({"fixture": "retained-candidate"})}
+            "candidate_retention_receipt_sha256": retention["record_sha256"]}
         return builder, package, transport, snapshot_id
 
     def test_windows_exact_package_stdin_return_lineage_and_zero_authority(self):

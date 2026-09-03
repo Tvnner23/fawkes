@@ -1014,12 +1014,18 @@ class CodexWriteBuilderAdapter(CodexExecWorkerAdapter):
             receipt.get("verification_receipt_id"), "review_verification_receipt_id"))
         retention_sections = [item for item in review_package.get("included_sections", [])
                               if item.get("section_id") == "candidate-retention-receipt"]
-        if len(retention_sections) != 1:
-            raise PermissionError("bound candidate-retention receipt is unavailable")
+        change_sections = [item for item in review_package.get("included_sections", [])
+                           if item.get("section_id") == "exact-change-evidence"]
+        if len(retention_sections) != 1 or len(change_sections) != 1:
+            raise PermissionError("bound review transaction evidence is unavailable")
         try:
             retention_receipt = json.loads(retention_sections[0]["content"])
+            package_changes = json.loads(change_sections[0]["content"])
         except (KeyError, TypeError, json.JSONDecodeError) as exc:
-            raise PermissionError("bound candidate-retention receipt is malformed") from exc
+            raise PermissionError("bound review transaction evidence is malformed") from exc
+        package_preimages = [{"path": item.get("path"),
+                              "before_node_binding": item.get("before_node_binding")}
+                             for item in package_changes]
         reviewer_id = receipt.get("reviewer_worker_id")
         if (review_report.get("report_id") != review_report_id
                 or review_report.get("record_sha256") != receipt.get("review_report_sha256")
@@ -1035,6 +1041,17 @@ class CodexWriteBuilderAdapter(CodexExecWorkerAdapter):
                 or (verification.get("recipient") or {}).get("worker_id") != reviewer_id
                 or verification.get("status") not in {"accepted", "accepted_with_caveats"}):
             raise PermissionError("bound independent review report is unavailable")
+        expected_replay = _digest({"package": review_package["record_sha256"],
+            "candidate": receipt.get("candidate_snapshot_id"),
+            "invocation": receipt.get("review_invocation_id"),
+            "created_at": receipt.get("created_at")})
+        if (receipt.get("review_package_sha256") != review_package.get("record_sha256")
+                or receipt.get("source_report_id") != review_package.get("source_report_id")
+                or receipt.get("exact_change_evidence_sha256") != _digest(package_changes)
+                or receipt.get("authoritative_preimages_sha256") != _digest(package_preimages)
+                or receipt.get("replay_identity") != expected_replay
+                or receipt.get("verdict") not in {"pass", "pass_with_caveats"}):
+            raise PermissionError("review acceptance does not bind the immutable review package")
         if (retention_receipt.get("record_sha256") != receipt.get(
                     "candidate_retention_receipt_sha256")
                 or retention_receipt.get("record_sha256") != _digest(

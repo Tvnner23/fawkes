@@ -306,11 +306,27 @@ def independent_review_acceptance_receipt(*, response, campaign_id, package,
     """Derive acceptance only from a fully validated independent return."""
     if response.get("review_status") not in {"pass", "pass_with_caveats"}:
         return None
-    receipt = {"schema_version": 1,
+    sections = {item["section_id"]: item for item in package.get("included_sections", [])
+                if isinstance(item, dict) and isinstance(item.get("section_id"), str)}
+    try:
+        changes = json.loads(sections["exact-change-evidence"]["content"])
+        retention = json.loads(sections["candidate-retention-receipt"]["content"])
+    except (KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise PermissionError("canonical review package evidence is incomplete") from exc
+    preimages = [{"path": item.get("path"), "before_node_binding": item.get("before_node_binding")}
+                 for item in changes]
+    if (retention.get("record_sha256") != transport_authority.get(
+            "candidate_retention_receipt_sha256")
+            or retention.get("exact_change_evidence_sha256") != _digest(changes)):
+        raise PermissionError("canonical review package evidence lineage mismatch")
+    created_at = _now()
+    receipt = {"schema_version": 2,
         "record_type": "codex_independent_review_acceptance_receipt",
         "status": "accepted", "campaign_id": campaign_id,
         "package_id": transport_authority["builder_package_id"],
         "review_package_id": package["package_id"],
+        "review_package_sha256": package["record_sha256"],
+        "source_report_id": package["source_report_id"],
         "review_report_id": return_report["report_id"],
         "review_report_sha256": return_report["record_sha256"],
         "review_invocation_id": invocation_id,
@@ -322,11 +338,18 @@ def independent_review_acceptance_receipt(*, response, campaign_id, package,
         "allowed_scope_sha256": transport_authority["allowed_scope_sha256"],
         "candidate_retention_receipt_sha256": transport_authority[
             "candidate_retention_receipt_sha256"],
+        "exact_change_evidence_sha256": retention["exact_change_evidence_sha256"],
+        "authoritative_preimages_sha256": _digest(preimages),
         "acceptance_condition_ids_sha256": _digest(
             sorted(response["acceptance_condition_ids_satisfied"])),
         "delivery_receipt_id": delivery_receipt_id,
         "verification_receipt_id": verification_receipt_id,
-        "creates_authority": False, "created_at": _now()}
+        "verdict": response["review_status"],
+        "creates_authority": False, "created_at": created_at,
+        "expires_at": package["authority_expires_at"]}
+    receipt["replay_identity"] = _digest({"package": package["record_sha256"],
+        "candidate": candidate_snapshot_id, "invocation": invocation_id,
+        "created_at": created_at})
     receipt["record_sha256"] = _digest(receipt)
     return receipt
 
