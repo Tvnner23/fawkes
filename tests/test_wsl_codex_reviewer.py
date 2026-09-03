@@ -99,6 +99,13 @@ class RepairSequenceReviewer(FakeWslReviewer):
             response["defects"]=[]
             response["verification"]["status"]="disputed"
             response["acceptance_condition_ids_satisfied"]=[]
+        elif failure is not None:
+            response["review_status"]="correction_required"
+            response["violated_acceptance_condition_ids"]=["done"]
+            response["acceptance_condition_ids_satisfied"]=[]
+            response["defects"]=[{"defect_id":"defect", "acceptance_condition_id":"done",
+                                  "evidence_reference":failure}]
+            response["verification"]["status"]="disputed"
         output.write_text(json.dumps(response))
         if self.provider_turns == 1 and self.after_first: self.after_first()
         return completed
@@ -293,6 +300,36 @@ class WslFormalReviewerTests(unittest.TestCase):
         self.assertNotIn("review_status",failed)
         reports=[json.loads(p.read_text()) for p in (self.exchange.root/"reports").glob("*.json")]
         self.assertFalse(any(x.get("sender",{}).get("worker_id")==WSL_REVIEWER_WORKER_ID for x in reports))
+
+    def test_defect_evidence_reference_uses_canonical_id_and_bounded_repair(self):
+        canonical=FakeWslReviewer(status="correction_required")
+        delivered=self.invoke(canonical)
+        self.assertEqual((delivered["status"],canonical.provider_turns),("delivered",1))
+        self.assertEqual(delivered["defects"][0]["evidence_reference"],"exact-builder-return")
+
+        self.setUp(); repaired=RepairSequenceReviewer(["builder output line 12",None])
+        repaired_result=self.invoke(repaired)
+        self.assertEqual((repaired_result["status"],repaired.provider_turns),("delivered",2))
+
+        self.setUp(); invalid=RepairSequenceReviewer(["builder output line 12","   "])
+        failed=self.invoke(invalid)
+        self.assertEqual((failed["status"],failed["failure_reason"],invalid.provider_turns),
+                         ("failed","semantic_repair_failed",2))
+        self.assertNotIn("review_status",failed)
+        self.assertNotIn("verification_receipt_id",failed)
+        self.assertNotIn("return_report_id",failed)
+        self.assertFalse(failed["creates_authority"])
+        deliveries=[json.loads(p.read_text()) for p in
+                    (self.exchange.root/"delivery_receipts").glob("*.json")]
+        reviewer=[item for item in deliveries if item.get("adapter_id")==WSL_ADAPTER_ID]
+        self.assertEqual([item["status"] for item in reviewer],["failed"])
+        verifications=[json.loads(path.read_text()) for path in
+                       (self.exchange.root/"verification_receipts").glob("*.json")]
+        self.assertFalse(any(item.get("recipient",{}).get("worker_id")==WSL_REVIEWER_WORKER_ID
+                             for item in verifications))
+        reports=[json.loads(p.read_text()) for p in (self.exchange.root/"reports").glob("*.json")]
+        self.assertFalse(any(item.get("sender",{}).get("worker_id")==WSL_REVIEWER_WORKER_ID
+                             for item in reports))
 
     def test_repair_stops_on_candidate_or_package_scope_drift(self):
         mutate=RepairSequenceReviewer(["lineage"],after_first=lambda:

@@ -723,6 +723,7 @@ class WindowsCodexReviewAdapter:
                     or any(not isinstance(defect.get(key), str) or not defect.get(key)
                            for key in ("defect_id", "acceptance_condition_id", "evidence_reference"))):
                 raise ValueError("review defect is malformed or out of acceptance scope")
+            require_id(defect["evidence_reference"], "review defect evidence_reference")
         if len({item["defect_id"] for item in defects}) != len(defects):
             raise ValueError("review defect IDs must be unique")
         sections = response.get("sections")
