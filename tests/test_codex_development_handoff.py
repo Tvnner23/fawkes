@@ -127,10 +127,13 @@ class CodexDevelopmentHandoffTests(unittest.TestCase):
         external = Path(self.tmp.name) / "runtime-state"
         external.mkdir()
         constructed = []
+        adapters = []
 
         def adapter_factory(exchange, **arguments):
             constructed.append(arguments)
-            return SuccessfulAdapter(exchange)
+            adapter = SuccessfulAdapter(exchange)
+            adapters.append(adapter)
+            return adapter
 
         with patch("src.runtime.codex_development_handoff.CodexWriteBuilderAdapter",
                    side_effect=adapter_factory), patch(
@@ -141,6 +144,7 @@ class CodexDevelopmentHandoffTests(unittest.TestCase):
                 worker_timeout_seconds=1800, runtime_state_root=external)
         self.assertEqual(constructed[0]["timeout_seconds"], 1800)
         self.assertEqual(constructed[0]["runtime_state_root"], external)
+        self.assertNotIn("defer_authoritative_apply", adapters[0].calls[0])
 
     def test_handoff_preserves_historical_timeout_and_optional_root_defaults(self):
         payload = {**self.payload, "execution_mode": "repository_write",

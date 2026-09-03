@@ -1,7 +1,10 @@
 import hashlib
 import json
+import copy
 import re
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -23,7 +26,7 @@ from src.runtime.windows_codex_reviewer import (
     WINDOWS_ADAPTER_ID, WINDOWS_ADAPTER_QUALIFIED, WINDOWS_ADAPTER_PROMOTED,
     WINDOWS_CODEX_WORKER_REFERENCE, WINDOWS_ENVIRONMENT_ID,
     WINDOWS_PROMOTION_RECORD, WINDOWS_REVIEW_SNAPSHOT_PARENT, WINDOWS_TRANSPORT_CONFORMANCE, WindowsCodexReviewAdapter,
-    materialize_standing_windows_snapshot, prepare_windows_review_package,
+    independent_review_acceptance_receipt, materialize_standing_windows_snapshot, prepare_windows_review_package,
     validate_windows_review_return, verify_standing_windows_snapshot,
 )
 from src.runtime.worker_exchange import WorkerExchange, _digest
@@ -225,17 +228,285 @@ class AutonomyProductionTransportTests(unittest.TestCase):
             "acceptance_condition_ids_sha256": _digest(["done"]),
             "recovery_references_sha256": _digest(self.recovery)}
 
+    def disposable_attestation(self):
+        manifest = candidate_manifest(self.workspace)
+        record = {"record_type": "codex_disposable_test_workspace_attestation",
+            "workspace": str(self.workspace.resolve()),
+            "candidate_snapshot_id": manifest["candidate_snapshot_id"],
+            "candidate_manifest_sha256": _digest(manifest), "creates_authority": False}
+        record["record_sha256"] = _digest(record)
+        return record
+
+    def retained_review_campaign(self, result, returned, *, objective, validation_evidence):
+        policy = "required" if validation_evidence else "intentionally_not_applicable"
+        declaration = {"policy_version": "development-campaign-validation-v1",
+            "status": policy, "creates_authority": False}
+        declaration["record_sha256"] = _digest(declaration)
+        receipt = {"schema_version": 1, "record_type": "codex_candidate_retention_receipt",
+            "status": "awaiting_independent_review", "applied_paths": [],
+            "campaign_id": self.campaign, "package_id": self.package["package_id"],
+            "iteration": 1, "worker_invocation_id": result["invocation_id"],
+            "allowed_scope_sha256": _digest(self.scopes),
+            "mutation_manifest_sha256": result["workspace_changes_sha256"],
+            "exact_change_evidence_sha256": result["exact_change_evidence_sha256"],
+            "candidate_snapshot": result["candidate_snapshot"], "validation_policy": policy,
+            "validation_declaration_sha256": declaration["record_sha256"],
+            "validation_evidence_sha256": _digest(validation_evidence),
+            "recovery_references_sha256": _digest(self.recovery),
+            "retention_intent_sha256": result["application_evidence"]["application_record_sha256"],
+            "creates_authority": False, "created_at": datetime.now(timezone.utc).isoformat()}
+        receipt["record_sha256"] = _digest(receipt)
+        return {"instance_id": "fawkes", "campaign_id": self.campaign,
+            "status": "awaiting_independent_review", "iteration": 1, "objective": objective,
+            "acceptance_condition_ids": ["done"],
+            "acceptance_conditions": {"done": "The bounded change is exact."},
+            "allowed_scope": self.scopes, "recovery_references": self.recovery,
+            "contract_version": "fixture-campaign-v1", "validation_policy": policy,
+            "validation_declaration": declaration,
+            "builder_runs": [{"iteration": 1, "package_id": self.package["package_id"],
+                "return_report_id": returned["report_id"],
+                "transport_result_reference": {"workspace_changes_sha256":
+                    result["workspace_changes_sha256"]}, "validation_evidence": validation_evidence,
+                "candidate_retention_receipt": receipt,
+                "completed_at": datetime.now(timezone.utc).isoformat()}]}
+
+    def review_acceptance(self, result):
+        reviewer = {"worker_id": "independent-reviewer", "role": "formal_reviewer",
+            "identity_status": "rider_attested", "charter_version": "1"}
+        returned = self.exchange._load("reports", result["return_report_id"])
+        campaign = self.retained_review_campaign(
+            result, returned, objective="Apply one exact reviewed fixture mutation.",
+            validation_evidence=[{"command": "fixture-validation", "status": "passed"}])
+        retention = campaign["builder_runs"][-1]["candidate_retention_receipt"]
+        source = self.exchange.create_report(task_scope_id=self.task, sender=self.sender,
+            authority=authority("fawkes", self.task, self.sender["worker_id"]),
+            sections=[{"section_id": "exact-builder-return", "title": "Exact builder return",
+                "content": json.dumps(returned, sort_keys=True)},
+                {"section_id": "candidate-retention-receipt",
+                 "title": "Exact pre-review candidate-retention receipt",
+                 "content": json.dumps(retention, sort_keys=True, separators=(",", ":"))}],
+            claims=[{"claim_id": "done", "area": "development",
+                "statement": "The bounded change is exact.", "maturity": "in_development",
+                "change_class": "software_system"}],
+            evidence_references=[{"reference_type": "worker_exchange_report",
+                "reference_id": returned["report_id"], "sha256": returned["record_sha256"]}])
+        review_authority = authority("fawkes", self.task, self.sender["worker_id"],
+                                     reviewer["worker_id"])
+        package = self.exchange.compose_package(report_id=source["report_id"], recipient=reviewer,
+            authority=review_authority,
+            included_section_ids=["exact-builder-return", "candidate-retention-receipt"])
+        delivery = self.exchange.record_delivery(package_id=package["package_id"],
+            authority=review_authority, adapter_id="fixture-independent-reviewer",
+            adapter_version="1", status="delivered", delivery_reference="fixture-delivery")
+        verification = self.exchange.record_verification(package_id=package["package_id"],
+            recipient=reviewer, authority=review_authority, status="accepted",
+            checked_claim_ids=["done"], evidence_references=[{"reference_id": returned["report_id"]}],
+            method="deterministic fixture review", material_reliance=True,
+            relied_source_section_ids=["exact-builder-return"])
+        report = self.exchange.create_return_report(source_package_id=package["package_id"],
+            task_scope_id=self.task, sender=reviewer,
+            authority=authority("fawkes", self.task, reviewer["worker_id"]),
+            sections=[{"section_id": "verdict", "title": "Verdict", "content": "Accepted."}])
+        response = {"review_status": "pass", "recipient": reviewer,
+                    "acceptance_condition_ids_satisfied": ["done"]}
+        transport = {"builder_package_id": self.package["package_id"],
+            "mutation_manifest_sha256": result["workspace_changes_sha256"],
+            "allowed_scope_sha256": _digest(self.scopes),
+            "candidate_retention_receipt_sha256": retention["record_sha256"]}
+        receipt = independent_review_acceptance_receipt(response=response,
+            campaign_id=self.campaign, package=package,
+            candidate_snapshot_id=result["candidate_snapshot"]["candidate_snapshot_id"],
+            invocation_id="fixture-review-invocation", reviewer=reviewer,
+            return_report=report, delivery_receipt_id=delivery["delivery_receipt_id"],
+            verification_receipt_id=verification["verification_receipt_id"],
+            transport_authority=transport)
+        return report["report_id"], receipt
+
     def invoke(self, fake=None, **adapter_options):
         timeout_seconds = adapter_options.pop("timeout_seconds", 5)
+        deferred = adapter_options.pop("defer_authoritative_apply", False)
         adapter = CodexWriteBuilderAdapter(self.exchange, workspace=self.workspace,
             run_process=fake or FakeWriteCodex(self.workspace), timeout_seconds=timeout_seconds,
             **adapter_options)
-        return adapter.deliver_candidate_once(package_id=self.package["package_id"],
+        arguments = dict(package_id=self.package["package_id"],
             transport_authority=self.transport(),
             return_authority=authority("fawkes", self.task, self.recipient["worker_id"]),
             recipient_environment_id=self.environment, write_task=self.write_task,
             campaign_id=self.campaign, iteration=self.iteration, allowed_scope=self.scopes,
             acceptance_condition_ids=["done"], recovery_references=self.recovery)
+        return (adapter.deliver_candidate_once(**arguments) if deferred else
+                adapter._deliver_candidate_immediate_for_test(
+                    disposable_owner=self.tmp, **arguments))
+
+    def test_unrecognized_external_workspace_cannot_use_immediate_mode(self):
+        adapter = CodexWriteBuilderAdapter(self.exchange, workspace=self.workspace,
+            run_process=FakeWriteCodex(self.workspace), timeout_seconds=5)
+        with self.assertRaisesRegex(PermissionError, "non-serializable tempdir owner"):
+            adapter._deliver_candidate_immediate_for_test(disposable_owner={},
+                package_id=self.package["package_id"], transport_authority=self.transport(),
+                return_authority=authority("fawkes", self.task, self.recipient["worker_id"]),
+                recipient_environment_id=self.environment, write_task=self.write_task,
+                campaign_id=self.campaign, iteration=self.iteration, allowed_scope=self.scopes,
+                acceptance_condition_ids=["done"], recovery_references=self.recovery)
+
+    def test_public_delivery_rejects_legacy_immediate_apply_inputs(self):
+        adapter = CodexWriteBuilderAdapter(self.exchange, workspace=self.workspace,
+            run_process=FakeWriteCodex(self.workspace), timeout_seconds=5)
+        with self.assertRaises(TypeError):
+            adapter.deliver_candidate_once(package_id=self.package["package_id"],
+                transport_authority=self.transport(),
+                return_authority=authority("fawkes", self.task, self.recipient["worker_id"]),
+                recipient_environment_id=self.environment, write_task=self.write_task,
+                campaign_id=self.campaign, iteration=self.iteration, allowed_scope=self.scopes,
+                acceptance_condition_ids=["done"], recovery_references=self.recovery,
+                defer_authoritative_apply=False)
+        self.assertEqual((self.workspace / "src/allowed.py").read_text(), "before\n")
+
+    def test_internal_immediate_primitive_rejects_neighboring_tempdir_owner(self):
+        adapter = CodexWriteBuilderAdapter(self.exchange, workspace=self.workspace,
+            run_process=FakeWriteCodex(self.workspace), timeout_seconds=5)
+        neighbor = tempfile.TemporaryDirectory(); self.addCleanup(neighbor.cleanup)
+        with self.assertRaisesRegex(PermissionError, "not owned"):
+            adapter._deliver_candidate_immediate_for_test(disposable_owner=neighbor,
+                package_id=self.package["package_id"], transport_authority=self.transport(),
+                return_authority=authority("fawkes", self.task, self.recipient["worker_id"]),
+                recipient_environment_id=self.environment, write_task=self.write_task,
+                campaign_id=self.campaign, iteration=self.iteration, allowed_scope=self.scopes,
+                acceptance_condition_ids=["done"], recovery_references=self.recovery)
+
+    def test_memory_runtime_defaults_bind_external_root_before_import(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            environment = {**os.environ, "FAWKES_RUNTIME_STATE_ROOT": str(root),
+                           "PYTHONDONTWRITEBYTECODE": "1"}
+            code = ("import json; from src.memory import archive_retrieval,ledger,review_feedback; "
+                    "print(json.dumps([str(archive_retrieval.INDEX_PATH),str(ledger.LEDGER_PATH),"
+                    "str(review_feedback.FEEDBACK_DIR)]))")
+            completed = subprocess.run([sys.executable, "-B", "-c", code], cwd=Path.cwd(),
+                env=environment, text=True, capture_output=True, check=True)
+            values = json.loads(completed.stdout)
+            self.assertEqual(values, [str(root / "database/canonical_archive.sqlite3"),
+                str(root / "database/memory_processing.sqlite3"),
+                str(root / "memory/development/feedback")])
+
+    def test_omitted_apply_mode_is_deferred_and_never_mutates_authoritative_workspace(self):
+        adapter = CodexWriteBuilderAdapter(self.exchange, workspace=self.workspace,
+            run_process=FakeWriteCodex(self.workspace), timeout_seconds=5)
+        arguments = {"package_id": self.package["package_id"],
+            "transport_authority": self.transport(),
+            "return_authority": authority("fawkes", self.task, self.recipient["worker_id"]),
+            "recipient_environment_id": self.environment, "write_task": self.write_task,
+            "campaign_id": self.campaign, "iteration": self.iteration,
+            "allowed_scope": self.scopes, "acceptance_condition_ids": ["done"],
+            "recovery_references": self.recovery}
+        result = adapter.deliver_candidate_once(**arguments)
+        self.assertEqual(result["application_evidence"]["status"], "awaiting_independent_review")
+        self.assertEqual((self.workspace / "src/allowed.py").read_text(), "before\n")
+
+    def test_explicit_immediate_mode_refuses_authoritative_repository(self):
+        authoritative = Path(__file__).resolve().parents[1]
+        adapter = CodexWriteBuilderAdapter(self.exchange, workspace=authoritative,
+            run_process=FakeWriteCodex(authoritative), timeout_seconds=5)
+        with self.assertRaisesRegex(PermissionError, "not owned"):
+            adapter._deliver_candidate_immediate_for_test(disposable_owner=self.tmp,
+                package_id=self.package["package_id"],
+                transport_authority=self.transport(),
+                return_authority=authority("fawkes", self.task, self.recipient["worker_id"]),
+                recipient_environment_id=self.environment, write_task=self.write_task,
+                campaign_id=self.campaign, iteration=self.iteration, allowed_scope=self.scopes,
+                acceptance_condition_ids=["done"], recovery_references=self.recovery)
+
+    def test_deferred_candidate_never_mutates_authoritative_tree_before_review(self):
+        result = self.invoke(defer_authoritative_apply=True)
+        self.assertEqual(result["status"], "delivered")
+        self.assertEqual(result["application_evidence"]["status"],
+                         "awaiting_independent_review")
+        self.assertEqual(result["application_evidence"]["applied_paths"], [])
+        self.assertEqual((self.workspace / "src/allowed.py").read_text(), "before\n")
+        candidate = Path(result["candidate_workspace"])
+        self.assertEqual((candidate / "src/allowed.py").read_text(), "changed\n")
+
+    def test_deferred_candidate_applies_once_only_after_review_gate(self):
+        result = self.invoke(defer_authoritative_apply=True)
+        adapter = CodexWriteBuilderAdapter(self.exchange, workspace=self.workspace,
+            run_process=FakeWriteCodex(self.workspace), timeout_seconds=5)
+        with self.assertRaises(PermissionError):
+            adapter.apply_reviewed_candidate_once(package_id=self.package["package_id"],
+                campaign_id=self.campaign, review_report_id="review-one",
+                review_accepted=False)
+        review_report_id, acceptance = self.review_acceptance(result)
+        applied = adapter.apply_reviewed_candidate_once(package_id=self.package["package_id"],
+            campaign_id=self.campaign, review_report_id=review_report_id,
+            review_acceptance_receipt=acceptance)
+        self.assertEqual(applied["status"], "applied_verified_after_review")
+        self.assertEqual((self.workspace / "src/allowed.py").read_text(), "changed\n")
+        with self.assertRaises(PermissionError):
+            adapter.apply_reviewed_candidate_once(package_id=self.package["package_id"],
+                campaign_id=self.campaign, review_report_id=review_report_id,
+                review_acceptance_receipt=acceptance)
+
+    def test_candidate_drift_after_review_prevents_authoritative_apply(self):
+        result = self.invoke(defer_authoritative_apply=True)
+        review_report_id, acceptance = self.review_acceptance(result)
+        candidate = Path(result["candidate_workspace"])
+        (candidate / "src/allowed.py").write_text("post-review drift\n", encoding="utf-8")
+        adapter = CodexWriteBuilderAdapter(self.exchange, workspace=self.workspace,
+            run_process=FakeWriteCodex(self.workspace), timeout_seconds=5)
+        with self.assertRaisesRegex(PermissionError, "candidate changed"):
+            adapter.apply_reviewed_candidate_once(package_id=self.package["package_id"],
+                campaign_id=self.campaign, review_report_id=review_report_id,
+                review_acceptance_receipt=acceptance)
+        self.assertEqual((self.workspace / "src/allowed.py").read_text(), "before\n")
+
+    def test_authoritative_preimage_drift_before_reviewed_apply_is_preserved(self):
+        result = self.invoke(defer_authoritative_apply=True)
+        review_report_id, acceptance = self.review_acceptance(result)
+        (self.workspace / "src/allowed.py").write_text("concurrent authoritative drift\n",
+                                                        encoding="utf-8")
+        adapter = CodexWriteBuilderAdapter(self.exchange, workspace=self.workspace,
+            run_process=FakeWriteCodex(self.workspace), timeout_seconds=5)
+        with self.assertRaises((PermissionError, RuntimeError)):
+            adapter.apply_reviewed_candidate_once(package_id=self.package["package_id"],
+                campaign_id=self.campaign, review_report_id=review_report_id,
+                review_acceptance_receipt=acceptance)
+        self.assertEqual((self.workspace / "src/allowed.py").read_text(),
+                         "concurrent authoritative drift\n")
+
+    def test_reviewed_apply_rejects_incomplete_forged_and_neighboring_lineage(self):
+        result = self.invoke(defer_authoritative_apply=True)
+        review_report_id, authentic = self.review_acceptance(result)
+        adapter = CodexWriteBuilderAdapter(self.exchange, workspace=self.workspace,
+            run_process=FakeWriteCodex(self.workspace), timeout_seconds=5)
+
+        def rejected(change):
+            altered = copy.deepcopy(authentic)
+            change(altered)
+            altered["record_sha256"] = _digest(
+                {key: value for key, value in altered.items() if key != "record_sha256"})
+            with self.assertRaises((KeyError, ValueError, PermissionError)):
+                adapter.apply_reviewed_candidate_once(package_id=self.package["package_id"],
+                    campaign_id=self.campaign, review_report_id=review_report_id,
+                    review_acceptance_receipt=altered)
+            self.assertEqual((self.workspace / "src/allowed.py").read_text(), "before\n")
+
+        rejected(lambda receipt: receipt.update(reviewer_worker_id="codex-repository-wsl-fawkes"))
+        rejected(lambda receipt: receipt.update(review_package_id="worker-package-neighbor"))
+        rejected(lambda receipt: receipt.update(recipient={**receipt["recipient"],
+            "worker_id": "neighbor-reviewer"}))
+        rejected(lambda receipt: receipt.update(delivery_receipt_id="delivery-receipt-neighbor"))
+        rejected(lambda receipt: receipt.update(verification_receipt_id="verification-receipt-neighbor"))
+        rejected(lambda receipt: receipt.update(candidate_snapshot_id="candidate-snapshot-neighbor"))
+        rejected(lambda receipt: receipt.update(campaign_id="campaign-neighbor"))
+        rejected(lambda receipt: receipt.update(package_id="worker-package-neighbor"))
+        rejected(lambda receipt: receipt.update(allowed_scope_sha256="1" * 64))
+        rejected(lambda receipt: receipt.update(candidate_retention_receipt_sha256="2" * 64))
+
+        incomplete = {"status": "accepted", "creates_authority": False}
+        with self.assertRaises(PermissionError):
+            adapter.apply_reviewed_candidate_once(package_id=self.package["package_id"],
+                campaign_id=self.campaign, review_report_id=review_report_id,
+                review_acceptance_receipt=incomplete)
+        self.assertEqual((self.workspace / "src/allowed.py").read_text(), "before\n")
 
     def test_read_only_and_write_modes_have_independent_exact_promotions(self):
         self.assertEqual(ADAPTER_ID, "codex-cli-exec-local")
@@ -486,73 +757,56 @@ class AutonomyProductionTransportTests(unittest.TestCase):
         self.assertNotIn(".sqlite", json.dumps(result))
 
     def test_exact_review_evidence_is_idempotent_and_stale_artifact_fails_closed(self):
-        result = self.invoke()
+        result = self.invoke(defer_authoritative_apply=True)
         returned = self.exchange._load("reports", result["return_report_id"])
-        campaign = {"instance_id": "fawkes", "campaign_id": self.campaign,
-            "status": "awaiting_independent_review", "iteration": 1,
-            "objective": "Review the exact bounded candidate.",
-            "acceptance_condition_ids": ["done"],
-            "acceptance_conditions": {"done": "The bounded change is exact."},
-            "allowed_scope": ["src/allowed.py"], "recovery_references": self.recovery,
-            "contract_version": "fixture-campaign-v1",
-            "builder_runs": [{"iteration": 1, "package_id": self.package["package_id"],
-                "return_report_id": returned["report_id"],
-                "transport_result_reference": {"workspace_changes_sha256":
-                    result["workspace_changes_sha256"]}, "validation_evidence": [{"argv": ["python3", "-m", "unittest"],
+        validation = [{"argv": ["python3", "-m", "unittest"],
                     "exit_status": 0, "stdout": "OK\n", "stdout_sha256": hashlib.sha256(b"OK\n").hexdigest(),
                     "stderr": "", "stderr_sha256": hashlib.sha256(b"").hexdigest(),
-                    "bytecode_prevention": True}], "cache_cleanup": {"removed": [],
-                    "absence_verified": True}, "completed_at": datetime.now(timezone.utc).isoformat()}]}
-        snapshot = candidate_manifest(self.workspace)
+                    "bytecode_prevention": True}]
+        campaign = self.retained_review_campaign(result, returned,
+            objective="Review the exact bounded candidate.", validation_evidence=validation)
+        review_workspace = Path(result["candidate_workspace"])
+        snapshot = candidate_manifest(review_workspace)
         first = prepare_windows_review_package(exchange=self.exchange, campaign_record=campaign,
             candidate_snapshot={**snapshot, "record_sha256": _digest(snapshot),
                 "file_count": len(snapshot["files"]),
                 "total_byte_length": sum(item["byte_length"] for item in snapshot["files"])},
-            workspace=self.workspace)
+            workspace=review_workspace)
         second = prepare_windows_review_package(exchange=self.exchange, campaign_record=campaign,
             candidate_snapshot={**snapshot, "record_sha256": _digest(snapshot),
                 "file_count": len(snapshot["files"]),
                 "total_byte_length": sum(item["byte_length"] for item in snapshot["files"])},
-            workspace=self.workspace)
+            workspace=review_workspace)
         self.assertEqual(first["source_report_id"], second["source_report_id"])
         self.assertEqual(first["package_id"], second["package_id"])
         package = self.exchange._load("packages", first["package_id"])
         section_ids = {item["section_id"] for item in package["included_sections"]}
         self.assertTrue({"mutation-manifest", "validation-evidence", "candidate-snapshot",
                          "changed-artifact-1"} <= section_ids)
-        (self.workspace / "src/allowed.py").write_text("stale\n", encoding="utf-8")
+        (review_workspace / "src/allowed.py").write_text("stale\n", encoding="utf-8")
         with self.assertRaises(ValueError):
             prepare_windows_review_package(exchange=self.exchange, campaign_record=campaign,
                 candidate_snapshot={**snapshot, "record_sha256": _digest(snapshot),
                     "file_count": len(snapshot["files"]), "total_byte_length": 0},
-                workspace=self.workspace)
+                workspace=review_workspace)
 
     def test_review_package_accepts_only_necessary_directory_metadata_for_new_file(self):
         self.scopes = ["qualification/nested/result.txt"]
         fake = FakeWriteCodex(self.workspace, self.scopes[0])
-        result = self.invoke(fake)
+        result = self.invoke(fake, defer_authoritative_apply=True)
         self.assertEqual(result["status"], "delivered")
         self.assertEqual([item["path"] for item in result["workspace_changes"]],
                          ["qualification", "qualification/nested", self.scopes[0]])
         returned = self.exchange._load("reports", result["return_report_id"])
-        campaign = {"instance_id": "fawkes", "campaign_id": self.campaign,
-            "status": "awaiting_independent_review", "iteration": 1,
-            "objective": "Review exact nested addition.",
-            "acceptance_condition_ids": ["done"],
-            "acceptance_conditions": {"done": "The nested file is exact."},
-            "allowed_scope": self.scopes, "recovery_references": self.recovery,
-            "contract_version": "fixture-campaign-v1",
-            "builder_runs": [{"iteration": 1, "package_id": self.package["package_id"],
-                "return_report_id": returned["report_id"],
-                "transport_result_reference": {"workspace_changes_sha256":
-                    result["workspace_changes_sha256"]}, "validation_evidence": [],
-                "completed_at": datetime.now(timezone.utc).isoformat()}]}
-        snapshot = candidate_manifest(self.workspace)
+        campaign = self.retained_review_campaign(result, returned,
+            objective="Review exact nested addition.", validation_evidence=[])
+        review_workspace = Path(result["candidate_workspace"])
+        snapshot = candidate_manifest(review_workspace)
         prepared = prepare_windows_review_package(exchange=self.exchange,
             campaign_record=campaign, candidate_snapshot={**snapshot,
                 "record_sha256": _digest(snapshot), "file_count": len(snapshot["files"]),
                 "total_byte_length": sum(item["byte_length"] for item in snapshot["files"])},
-            workspace=self.workspace)
+            workspace=review_workspace)
         package = self.exchange._load("packages", prepared["package_id"])
         sections = {item["section_id"]: item["content"]
                     for item in package["included_sections"]}
@@ -564,32 +818,72 @@ class AutonomyProductionTransportTests(unittest.TestCase):
 
     def test_review_package_directory_scope_does_not_authorize_siblings(self):
         self.scopes = ["src"]
-        result = self.invoke(FakeWriteCodex(self.workspace, "src/nested/result.txt"))
+        result = self.invoke(FakeWriteCodex(self.workspace, "src/nested/result.txt"),
+                             defer_authoritative_apply=True)
         self.assertEqual(result["status"], "delivered")
         returned = self.exchange._load("reports", result["return_report_id"])
-        campaign = {"instance_id": "fawkes", "campaign_id": self.campaign,
-            "status": "awaiting_independent_review", "iteration": 1,
-            "objective": "Review directory-scoped addition.",
-            "acceptance_condition_ids": ["done"],
-            "acceptance_conditions": {"done": "Only the scoped file changed."},
-            "allowed_scope": self.scopes, "recovery_references": self.recovery,
-            "contract_version": "fixture-campaign-v1",
-            "builder_runs": [{"iteration": 1, "package_id": self.package["package_id"],
-                "return_report_id": returned["report_id"],
-                "transport_result_reference": {"workspace_changes_sha256":
-                    result["workspace_changes_sha256"]}, "validation_evidence": [],
-                "completed_at": datetime.now(timezone.utc).isoformat()}]}
-        snapshot = candidate_manifest(self.workspace)
+        campaign = self.retained_review_campaign(result, returned,
+            objective="Review directory-scoped addition.", validation_evidence=[])
+        review_workspace = Path(result["candidate_workspace"])
+        snapshot = candidate_manifest(review_workspace)
         prepare_windows_review_package(exchange=self.exchange, campaign_record=campaign,
             candidate_snapshot={**snapshot, "record_sha256": _digest(snapshot),
                 "file_count": len(snapshot["files"]),
                 "total_byte_length": sum(item["byte_length"] for item in snapshot["files"])},
-            workspace=self.workspace)
+        workspace=review_workspace)
         # A similarly-prefixed sibling remains outside the adapter's exact scope.
         self.setUp(); self.scopes = ["src"]
         rejected = self.invoke(FakeWriteCodex(self.workspace, "src-neighbor/result.txt"))
         self.assertEqual(rejected["status"], "failed")
         self.assertEqual(rejected["failure_reason"], "unauthorized_file_mutation")
+
+    def test_reviewer_package_requires_exact_unapplied_candidate_retention_receipt(self):
+        result = self.invoke(defer_authoritative_apply=True)
+        returned = self.exchange._load("reports", result["return_report_id"])
+        campaign = self.retained_review_campaign(result, returned,
+            objective="Review exact retained candidate.", validation_evidence=[])
+        workspace = Path(result["candidate_workspace"])
+        manifest = candidate_manifest(workspace)
+        snapshot = {**manifest, "record_sha256": _digest(manifest),
+            "file_count": len(manifest["files"]),
+            "total_byte_length": sum(item["byte_length"] for item in manifest["files"])}
+        accepted = prepare_windows_review_package(exchange=self.exchange,
+            campaign_record=campaign, candidate_snapshot=snapshot, workspace=workspace)
+        self.assertTrue(accepted["package_id"])
+        self.assertEqual(campaign["builder_runs"][-1]["candidate_retention_receipt"]
+                         ["applied_paths"], [])
+        self.assertFalse(campaign["builder_runs"][-1]["candidate_retention_receipt"]
+                         ["creates_authority"])
+
+        def rejected(change, *, remove=False, corrupt_digest=False):
+            altered = copy.deepcopy(campaign)
+            run = altered["builder_runs"][-1]
+            if remove:
+                run.pop("candidate_retention_receipt")
+            else:
+                receipt = run["candidate_retention_receipt"]
+                change(receipt)
+                if not corrupt_digest:
+                    receipt["record_sha256"] = _digest(
+                        {key: value for key, value in receipt.items() if key != "record_sha256"})
+            with self.assertRaises((ValueError, PermissionError)):
+                prepare_windows_review_package(exchange=self.exchange,
+                    campaign_record=altered, candidate_snapshot=snapshot, workspace=workspace)
+
+        rejected(lambda receipt: None, remove=True)
+        rejected(lambda receipt: receipt.update(status="applied"))
+        rejected(lambda receipt: receipt.update(applied_paths=["src/allowed.py"]))
+        rejected(lambda receipt: receipt.update(candidate_snapshot={**receipt["candidate_snapshot"],
+            "candidate_snapshot_id": "candidate-snapshot-neighbor"}))
+        rejected(lambda receipt: receipt.update(package_id="worker-package-neighbor"))
+        rejected(lambda receipt: receipt.update(campaign_id="campaign-neighbor"))
+        rejected(lambda receipt: receipt.update(iteration=2))
+        rejected(lambda receipt: receipt.update(mutation_manifest_sha256="0" * 64))
+        rejected(lambda receipt: receipt.update(allowed_scope_sha256="1" * 64))
+        rejected(lambda receipt: receipt.update(validation_evidence_sha256="2" * 64))
+        rejected(lambda receipt: receipt.update(exact_change_evidence_sha256="3" * 64))
+        rejected(lambda receipt: receipt.update(worker_invocation_id="neighbor-invocation"))
+        rejected(lambda receipt: receipt.update(record_sha256="4" * 64), corrupt_digest=True)
 
     def test_out_of_scope_disposable_write_fails_without_authoritative_recovery(self):
         result = self.invoke(FakeWriteCodex(self.workspace, "outside.py"))
@@ -862,7 +1156,9 @@ class AutonomyProductionTransportTests(unittest.TestCase):
         transport = {**base, "adapter_id": WINDOWS_ADAPTER_ID, "package_id": package["package_id"],
             "recipient_environment_id": WINDOWS_ENVIRONMENT_ID, "campaign_id": self.campaign,
             "builder_return_report_id": builder["report_id"], "builder_return_sha256": builder["record_sha256"],
-            "candidate_snapshot_id": snapshot_id}
+            "candidate_snapshot_id": snapshot_id, "builder_package_id": self.package["package_id"],
+            "mutation_manifest_sha256": _digest([]), "allowed_scope_sha256": _digest(self.scopes),
+            "candidate_retention_receipt_sha256": _digest({"fixture": "retained-candidate"})}
         return builder, package, transport, snapshot_id
 
     def test_windows_exact_package_stdin_return_lineage_and_zero_authority(self):
@@ -971,6 +1267,7 @@ class AutonomyProductionTransportTests(unittest.TestCase):
         self.assertFalse(result["adapter_promoted"])
 
     def test_real_codex_write_route_in_exact_disposable_candidate(self):
+        """Lower-level physical adapter qualification; not a campaign transaction proof."""
         if os.getenv("FAWKES_CODEX_WRITE_QUALIFICATION") != "1":
             self.skipTest("set FAWKES_CODEX_WRITE_QUALIFICATION=1 for the real disposable write route")
         repository = Path(__file__).resolve().parents[1]
@@ -1002,7 +1299,8 @@ class AutonomyProductionTransportTests(unittest.TestCase):
                 "acceptance_condition_ids_sha256": _digest(["exact-file"]),
                 "recovery_references_sha256": _digest(recovery)}
             result = CodexWriteBuilderAdapter(exchange, workspace=fixture.root,
-                timeout_seconds=420).deliver_candidate_once(package_id=package["package_id"],
+                timeout_seconds=420)._deliver_candidate_immediate_for_test(
+                    disposable_owner=fixture._temporary, package_id=package["package_id"],
                     transport_authority=transport,
                     return_authority=authority("fawkes", task, recipient["worker_id"]),
                     recipient_environment_id=environment, write_task=task_text,
@@ -1010,6 +1308,7 @@ class AutonomyProductionTransportTests(unittest.TestCase):
                     acceptance_condition_ids=["exact-file"], recovery_references=recovery)
             self.assertEqual(result["status"], "delivered", result)
             self.assertEqual((fixture.root / scopes[0]).read_bytes(), b"bounded-write-pass\n")
-            self.assertEqual([item["path"] for item in result["workspace_changes"]], scopes)
+            self.assertEqual([item["path"] for item in result["workspace_changes"]],
+                             ["assurance-output", "assurance-output/write-target.txt"])
             self.assertFalse(result["candidate_qualified"])
             fixture.verify_source_unchanged()

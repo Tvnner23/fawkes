@@ -291,6 +291,46 @@ def _safe_environment():
     return {key: os.environ[key] for key in allowed if key in os.environ}
 
 
+def canonical_review_evidence_reference_ids(package):
+    """Return the exact non-secret identifiers a structured finding may cite."""
+    identifiers = {item.get("section_id") for item in package.get("included_sections", [])
+                   if isinstance(item, dict)}
+    identifiers.update(item.get("reference_id") for item in package.get("evidence_references", [])
+                       if isinstance(item, dict))
+    return sorted(item for item in identifiers if isinstance(item, str) and item.strip())
+
+
+def independent_review_acceptance_receipt(*, response, campaign_id, package,
+        candidate_snapshot_id, invocation_id, reviewer, return_report,
+        delivery_receipt_id, verification_receipt_id, transport_authority):
+    """Derive acceptance only from a fully validated independent return."""
+    if response.get("review_status") not in {"pass", "pass_with_caveats"}:
+        return None
+    receipt = {"schema_version": 1,
+        "record_type": "codex_independent_review_acceptance_receipt",
+        "status": "accepted", "campaign_id": campaign_id,
+        "package_id": transport_authority["builder_package_id"],
+        "review_package_id": package["package_id"],
+        "review_report_id": return_report["report_id"],
+        "review_report_sha256": return_report["record_sha256"],
+        "review_invocation_id": invocation_id,
+        "reviewer_worker_id": reviewer["worker_id"],
+        "reviewer_role": reviewer["role"],
+        "recipient": response["recipient"],
+        "candidate_snapshot_id": candidate_snapshot_id,
+        "mutation_manifest_sha256": transport_authority["mutation_manifest_sha256"],
+        "allowed_scope_sha256": transport_authority["allowed_scope_sha256"],
+        "candidate_retention_receipt_sha256": transport_authority[
+            "candidate_retention_receipt_sha256"],
+        "acceptance_condition_ids_sha256": _digest(
+            sorted(response["acceptance_condition_ids_satisfied"])),
+        "delivery_receipt_id": delivery_receipt_id,
+        "verification_receipt_id": verification_receipt_id,
+        "creates_authority": False, "created_at": _now()}
+    receipt["record_sha256"] = _digest(receipt)
+    return receipt
+
+
 def _run_windows(command, *, prompt, environment, timeout):
     process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
         stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="strict",
@@ -323,9 +363,37 @@ def _exact_builder_evidence(exchange, campaign_record, workspace):
             or result.get("exact_change_evidence_sha256") != _digest(exact_changes)):
         raise ValueError("builder exact change evidence integrity mismatch")
     application = result.get("application_evidence")
-    if (not isinstance(application, dict) or application.get("status") != "applied"
+    retention = run.get("candidate_retention_receipt")
+    if (not isinstance(application, dict)
+            or application.get("record_type") != "codex_candidate_retention_intent"
+            or application.get("status") != "awaiting_independent_review"
+            or application.get("applied_paths") != []
             or application.get("mutation_manifest_sha256") != result.get("workspace_changes_sha256")):
-        raise ValueError("builder application receipt is missing or incoherent")
+        raise ValueError("builder candidate-retention intent is missing or incoherent")
+    if (not isinstance(retention, dict)
+            or retention.get("record_sha256") != _digest(
+                {key: value for key, value in retention.items() if key != "record_sha256"})
+            or retention.get("record_type") != "codex_candidate_retention_receipt"
+            or retention.get("status") != "awaiting_independent_review"
+            or retention.get("applied_paths") != []
+            or retention.get("creates_authority") is not False
+            or retention.get("campaign_id") != campaign_record.get("campaign_id")
+            or retention.get("package_id") != run.get("package_id")
+            or retention.get("iteration") != run.get("iteration")
+            or retention.get("worker_invocation_id") != result.get("invocation_id")
+            or retention.get("allowed_scope_sha256") != _digest(campaign_record.get("allowed_scope"))
+            or retention.get("mutation_manifest_sha256") != result.get("workspace_changes_sha256")
+            or retention.get("exact_change_evidence_sha256") != result.get("exact_change_evidence_sha256")
+            or retention.get("candidate_snapshot") != result.get("candidate_snapshot")
+            or retention.get("validation_policy") != campaign_record.get("validation_policy")
+            or retention.get("validation_declaration_sha256") !=
+                (campaign_record.get("validation_declaration") or {}).get("record_sha256")
+            or retention.get("validation_evidence_sha256") != _digest(run.get("validation_evidence"))
+            or retention.get("recovery_references_sha256") !=
+                _digest(campaign_record.get("recovery_references"))
+            or retention.get("retention_intent_sha256") !=
+                application.get("application_record_sha256")):
+        raise ValueError("candidate-retention receipt is missing, stale, or identity-mismatched")
     workspace = Path(workspace).resolve()
     scopes = campaign_record["allowed_scope"]
     directory_scopes = {scope for scope in scopes
@@ -425,6 +493,7 @@ def prepare_windows_review_package(*, exchange, campaign_record, candidate_snaps
         "authorization_reference": authorization_reference, "expires_at": expires}
     exact_builder = json.dumps(builder, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     mutation, artifacts = _exact_builder_evidence(exchange, campaign_record, workspace)
+    retention = run["candidate_retention_receipt"]
     sections = [
         {"section_id": "campaign-objective", "title": "Exact campaign objective",
          "content": campaign_record["objective"]},
@@ -444,6 +513,10 @@ def prepare_windows_review_package(*, exchange, campaign_record, candidate_snaps
         {"section_id": "application-receipt", "title": "Exact authoritative apply receipt",
          "content": json.dumps(mutation["application_evidence"], sort_keys=True,
                                ensure_ascii=False, separators=(",", ":"))},
+        {"section_id": "candidate-retention-receipt",
+         "title": "Exact pre-review candidate-retention receipt",
+         "content": json.dumps(retention, sort_keys=True, ensure_ascii=False,
+                               separators=(",", ":"))},
         {"section_id": "validation-evidence", "title": "Exact coordinator validation evidence",
          "content": json.dumps(run.get("validation_evidence", []), sort_keys=True, ensure_ascii=False,
                                separators=(",", ":"))},
@@ -476,7 +549,10 @@ def prepare_windows_review_package(*, exchange, campaign_record, candidate_snaps
         "package_id": package["package_id"], "recipient_environment_id": WINDOWS_ENVIRONMENT_ID,
         "campaign_id": campaign_record["campaign_id"], "builder_return_report_id": builder["report_id"],
         "builder_return_sha256": builder["record_sha256"],
-        "candidate_snapshot_id": snapshot_id,
+        "candidate_snapshot_id": snapshot_id, "builder_package_id": run["package_id"],
+        "mutation_manifest_sha256": retention["mutation_manifest_sha256"],
+        "allowed_scope_sha256": retention["allowed_scope_sha256"],
+        "candidate_retention_receipt_sha256": retention["record_sha256"],
         "adapter_promotion_reference": WINDOWS_PROMOTION_RECORD["promotion_id"]}
     return_authority = {"decision": "authorized", "instance_id": exchange.instance_id,
         "task_scope_id": task_scope_id, "sender_worker_id": recipient["worker_id"],
@@ -664,6 +740,13 @@ class WindowsCodexReviewAdapter:
             except (KeyError, TypeError, ValueError, PermissionError, json.JSONDecodeError) as exc:
                 return self._failure(result_path, request, package, transport_authority,
                                      "malformed_or_unbound_response", str(exc), metadata)
+            acceptance_receipt = independent_review_acceptance_receipt(response=response,
+                campaign_id=campaign_id, package=package,
+                candidate_snapshot_id=candidate_snapshot_id, invocation_id=invocation_id,
+                reviewer=request["recipient"], return_report=returned,
+                delivery_receipt_id=delivery["delivery_receipt_id"],
+                verification_receipt_id=verification["verification_receipt_id"],
+                transport_authority=transport_authority)
             result = {"schema_version": 1, "record_type": "windows_codex_review_result",
                 "adapter_id": WINDOWS_ADAPTER_ID, "adapter_version": WINDOWS_ADAPTER_VERSION,
                 "instance_id": package["instance_id"], "campaign_id": campaign_id,
@@ -679,6 +762,7 @@ class WindowsCodexReviewAdapter:
                 "delivery_receipt_id": delivery["delivery_receipt_id"],
                 "verification_receipt_id": verification["verification_receipt_id"],
                 "return_report_id": returned["report_id"], "return_report_sha256": returned["record_sha256"],
+                "review_acceptance_receipt": acceptance_receipt,
                 "client_process_evidence": metadata, "real_client_exercised": True,
                 "candidate_qualified": WINDOWS_ADAPTER_QUALIFIED if _production_use else False,
                 "adapter_promoted": WINDOWS_ADAPTER_PROMOTED if _production_use else False,
@@ -706,6 +790,7 @@ class WindowsCodexReviewAdapter:
             raise ValueError("invalid review status")
         claim_ids = {item["claim_id"] for item in package.get("claims", [])}
         source_ids = {item["section_id"] for item in package.get("included_sections", [])}
+        allowed_evidence_reference_ids = set(canonical_review_evidence_reference_ids(package))
         for name in ("acceptance_condition_ids_satisfied", "violated_acceptance_condition_ids"):
             values = response.get(name)
             if (not isinstance(values, list) or len(values) != len(set(values))
@@ -724,6 +809,8 @@ class WindowsCodexReviewAdapter:
                            for key in ("defect_id", "acceptance_condition_id", "evidence_reference"))):
                 raise ValueError("review defect is malformed or out of acceptance scope")
             require_id(defect["evidence_reference"], "review defect evidence_reference")
+            if defect["evidence_reference"] not in allowed_evidence_reference_ids:
+                raise ValueError("review defect evidence_reference is not in the canonical package allowlist")
         if len({item["defect_id"] for item in defects}) != len(defects):
             raise ValueError("review defect IDs must be unique")
         sections = response.get("sections")

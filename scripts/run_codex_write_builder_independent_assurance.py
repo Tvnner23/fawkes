@@ -18,6 +18,8 @@ from src.runtime.disposable_verifier import DisposableVerifierWorkspace, SNAPSHO
 
 
 CAMPAIGN_VERSION = "codex-write-independent-assurance-v16-disposable-memory-database"
+BOUND_PHYSICAL_RECEIPT = Path("/home/tvnner/.local/state/fawkes/experiments/transaction-boundary-real-route-diagnostic-v1/transaction-write-route-3cb21beb2dca4e2f8c0adb878f8d89ad.json")
+BOUND_PHYSICAL_RECEIPT_SHA256 = "ceb8ffea13ca797ce539be17d275b5b1f2c8546c82b766e1d584aedc8a4c3de1"
 RESULT_SCHEMA = {"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "object",
     "additionalProperties": False,
     "required": ["schema_version", "campaign_version", "candidate_snapshot_id", "verdict",
@@ -71,15 +73,29 @@ def main():
             "real_windows_recomputation": True, "one_byte_tamper_required": True}
         (evidence_dir / "portable-snapshot-v2.json").write_text(
             json.dumps(portable_evidence, indent=2) + "\n", encoding="utf-8")
-        real_command = [str(ROOT / ".venv/bin/python"), "-m", "unittest",
-            "tests.test_autonomy_production_transports.AutonomyProductionTransportTests.test_real_codex_write_route_in_exact_disposable_candidate", "-v"]
-        real = subprocess.run(real_command, cwd=fixture.root, text=True, capture_output=True,
-            env=_environment(FAWKES_CODEX_WRITE_QUALIFICATION="1"), timeout=600, check=False)
-        real_evidence = {"command": real_command, "exit_status": real.returncode,
-            "stdout_sha256": _sha((real.stdout or "").encode()),
-            "stderr_sha256": _sha((real.stderr or "").encode()),
-            "real_authenticated_codex_route": True, "workspace": "nested_disposable_exact_candidate",
-            "credentials_captured": False, "candidate_snapshot_id": fixture.provenance["candidate_snapshot_id"]}
+        physical = json.loads(BOUND_PHYSICAL_RECEIPT.read_text(encoding="utf-8"))
+        physical_claimed = physical.pop("record_sha256")
+        physical_valid = (physical_claimed == BOUND_PHYSICAL_RECEIPT_SHA256
+            == _sha(json.dumps(physical, sort_keys=True, separators=(",", ":")).encode())
+            and physical.get("lifecycle", {}).get("failing_test_line") == 1042
+            and physical.get("candidate_stable") is True
+            and physical.get("authoritative_unchanged") is True
+            and physical.get("creates_authority") is False)
+        transaction_command = [str(ROOT / ".venv/bin/python"), "-B", "-m", "unittest",
+            "tests.test_codex_development_campaign.CodexDevelopmentCampaignTests.test_end_to_end_transaction_orders_retention_review_and_one_shot_apply", "-v"]
+        transaction = subprocess.run(transaction_command, cwd=fixture.root, text=True,
+            capture_output=True, env=_environment(), timeout=180, check=False)
+        real_evidence = {"retained_physical_receipt": str(BOUND_PHYSICAL_RECEIPT),
+            "retained_physical_receipt_sha256": BOUND_PHYSICAL_RECEIPT_SHA256,
+            "physical_adapter_transport_passed": physical_valid,
+            "obsolete_assertion_line": 1042,
+            "real_authenticated_codex_route": True, "provider_rerun": False,
+            "transaction_command_sha256": _sha(json.dumps(transaction_command,
+                separators=(",", ":")).encode()), "transaction_exit_status": transaction.returncode,
+            "transaction_stdout_sha256": _sha((transaction.stdout or "").encode()),
+            "transaction_stderr_sha256": _sha((transaction.stderr or "").encode()),
+            "deterministic_end_to_end_transaction": transaction.returncode == 0,
+            "credentials_captured": False}
         real_path = evidence_dir / "real-write-route.json"
         real_path.write_text(json.dumps(real_evidence, indent=2) + "\n", encoding="utf-8")
         schema = fixture.root / "assurance-result-schema.json"
@@ -113,7 +129,9 @@ Inject apply-path replacement failures independently from rollback and verify re
 recovery primitive; if restoration itself fails, require a durable recovery-required record.
 Require rollback failure to remain explicitly recovery_required and never be typed as rolled back.
 Run deterministic tests locally with {ROOT / '.venv/bin/python'} while cwd remains this disposable candidate.
-Inspect assurance-input/real-write-route.json; a nonzero exit makes the required real route fail.
+Inspect assurance-input/real-write-route.json. The retained physical receipt separately proves the
+lower-level provider-backed adapter route; it is not campaign transaction evidence. Require its
+physical_adapter_transport_passed field and independently require deterministic_end_to_end_transaction.
 Inspect assurance-input/portable-snapshot-v2.json; a nonzero exit fails exact cross-platform
 candidate identity and one-byte tamper-detection requirements.
 Do not merely repeat builder conclusions and do not edit candidate source. One hard failure means fail.
@@ -132,7 +150,8 @@ Return only the requested schema. Assurance may recommend promotion but cannot p
         if not fixed.exists() or result.get("candidate_snapshot_id") != fixture.provenance["candidate_snapshot_id"]:
             raise RuntimeError("independent write campaign provenance/freeze requirement failed")
         fixture.verify_source_unchanged()
-        qualified = (portable.returncode == 0 and real.returncode == 0 and result["verdict"] == "pass"
+        qualified = (portable.returncode == 0 and physical_valid and transaction.returncode == 0
+            and result["verdict"] == "pass"
             and result["hard_invariants"]["failed"] == 0
             and result["hard_invariants"]["applicable_cases"] == result["hard_invariants"]["passed_cases"])
         output = {"schema_version": 1, "record_type": "codex_write_independent_assurance",

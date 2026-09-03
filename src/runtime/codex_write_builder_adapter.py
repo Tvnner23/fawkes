@@ -29,6 +29,8 @@ from src.runtime.worker_exchange import WorkerExchange, _authority, _digest, bod
 from src.runtime.evidence_eligibility import classify_reviewer_source_evidence
 
 
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+
 WRITE_ADAPTER_ID = "codex-cli-exec-local-write"
 WRITE_ADAPTER_VERSION = "0.5"
 WRITE_QUALIFICATION_CONTRACT_VERSION = "codex-cli-disposable-write-validated-apply-v0.5"
@@ -592,8 +594,39 @@ class CodexWriteBuilderAdapter(CodexExecWorkerAdapter):
     def deliver_candidate_once(self, *, package_id, transport_authority, return_authority,
                                recipient_environment_id, write_task, campaign_id, iteration,
                                allowed_scope, acceptance_condition_ids, recovery_references,
-                               invocation_id=None, _production_use=False):
+                               invocation_id=None,
+                               _production_use=False):
+        """Public delivery always retains a candidate for independent review."""
+        return self._deliver_candidate(package_id=package_id,
+            transport_authority=transport_authority, return_authority=return_authority,
+            recipient_environment_id=recipient_environment_id, write_task=write_task,
+            campaign_id=campaign_id, iteration=iteration, allowed_scope=allowed_scope,
+            acceptance_condition_ids=acceptance_condition_ids,
+            recovery_references=recovery_references, invocation_id=invocation_id,
+            defer_authoritative_apply=True, _production_use=_production_use)
+
+    def _deliver_candidate_immediate_for_test(self, *, disposable_owner, **arguments):
+        """Private lower-level fixture primitive bound to a live tempdir owner object."""
+        if not isinstance(disposable_owner, tempfile.TemporaryDirectory):
+            raise PermissionError("isolated test apply requires a live non-serializable tempdir owner")
+        owner = Path(disposable_owner.name).resolve()
+        workspace = self.workspace.resolve()
+        if (not owner.is_dir() or owner == REPOSITORY_ROOT
+                or REPOSITORY_ROOT in owner.parents
+                or workspace == REPOSITORY_ROOT or REPOSITORY_ROOT in workspace.parents
+                or owner not in workspace.parents):
+            raise PermissionError("isolated test apply workspace is not owned by the supplied tempdir")
+        return self._deliver_candidate(**arguments, defer_authoritative_apply=False,
+                                       _production_use=False)
+
+    def _deliver_candidate(self, *, package_id, transport_authority, return_authority,
+                           recipient_environment_id, write_task, campaign_id, iteration,
+                           allowed_scope, acceptance_condition_ids, recovery_references,
+                           invocation_id=None, defer_authoritative_apply=True,
+                           _production_use=False):
         package = self.exchange._load("packages", package_id)
+        if _production_use and not defer_authoritative_apply:
+            raise PermissionError("production delivery cannot apply before independent review")
         recipient = self._validate_recipient(package, recipient_environment_id)
         grant = self.exchange.validate_transport_authorization(
             package_id=package_id, authority=transport_authority)
@@ -697,9 +730,13 @@ class CodexWriteBuilderAdapter(CodexExecWorkerAdapter):
                         authoritative_symlinks.append(relative)
             if authoritative_symlinks:
                 return fail("preexisting_symlink_forbidden", ", ".join(authoritative_symlinks), [])
-            candidate_temporary = tempfile.TemporaryDirectory(prefix="fawkes-write-candidate-")
-            baseline_root = Path(candidate_temporary.name) / "baseline"
-            candidate_root = Path(candidate_temporary.name) / "candidate"
+            if defer_authoritative_apply:
+                baseline_root = directory / "frozen-baseline"
+                candidate_root = directory / "candidate"
+            else:
+                candidate_temporary = tempfile.TemporaryDirectory(prefix="fawkes-write-candidate-")
+                baseline_root = Path(candidate_temporary.name) / "baseline"
+                candidate_root = Path(candidate_temporary.name) / "candidate"
             provenance = materialize_candidate(self.workspace, baseline_root)
             before = _workspace_snapshot(baseline_root)
             scope_contract = _scope_contract(scopes, before)
@@ -727,7 +764,8 @@ class CodexWriteBuilderAdapter(CodexExecWorkerAdapter):
             environment = self._subprocess_environment(PYTHONDONTWRITEBYTECODE="1")
             # Memory's private processing database is runtime state, not source.
             # Keep it inside this already-disposable invocation boundary.
-            disposable_state = Path(candidate_temporary.name) / "runtime-state"
+            disposable_state = ((Path(candidate_temporary.name) if candidate_temporary is not None
+                                 else directory) / "runtime-state")
             environment["FAWKES_MEMORY_LEDGER_PATH"] = str(
                 disposable_state / "memory_processing.sqlite3"
             )
@@ -781,13 +819,18 @@ class CodexWriteBuilderAdapter(CodexExecWorkerAdapter):
             exact_change_evidence, exact_change_evidence_sha256 = _exact_change_evidence(
                 candidate_root, changes, evidence_before)
             _validate_candidate_changes(changes, scope_contract)
+            final_manifest = candidate_manifest(candidate_root)
+            final_candidate = {"candidate_snapshot_id": final_manifest["candidate_snapshot_id"],
+                "file_count": len(final_manifest["files"]),
+                "total_byte_length": sum(item["byte_length"] for item in final_manifest["files"]),
+                "record_sha256": _digest(final_manifest)}
             apply_changes = _applyable_changes(changes)
             normalized_apply_changes = [{**change,
                 "before": _content_state(change.get("before")),
                 "after": _content_state(change.get("after"))}
                 for change in apply_changes]
             application_intent = {"schema_version": 1,
-                "record_type": "codex_validated_apply_record", "status": "validated_staged",
+                "record_type": "codex_candidate_retention_intent", "status": "validated_staged",
                 "instance_id": package["instance_id"], "campaign_id": campaign_id,
                 "task_scope_id": package["task_scope_id"], "iteration": iteration,
                 "package_id": package_id, "invocation_id": invocation_id,
@@ -798,17 +841,31 @@ class CodexWriteBuilderAdapter(CodexExecWorkerAdapter):
                 "creates_authority": False, "created_at": _now()}
             application_intent["record_sha256"] = _digest(application_intent)
             application_path.write_text(json.dumps(application_intent, indent=2) + "\n", encoding="utf-8")
-            application = _apply_validated_changes(authoritative_root=self.workspace,
-                candidate_root=candidate_root, base=base, changes=normalized_apply_changes,
-                replace=self.apply_replace, before_replace=self.before_apply_replace,
-                frozen_preimages=evidence_before)
-            rollback_originals = application.pop("_rollback_originals")
-            rollback_applied_states = application.pop("_rollback_applied_states")
-            application.update({"candidate_snapshot_id": provenance["candidate_snapshot_id"],
-                "candidate_record_sha256": provenance["record_sha256"],
-                "mutation_manifest_sha256": _digest(changes),
-                "unrelated_authoritative_changes_ignored": True})
-            application_record = {**application_intent, **application, "status": "applied_verified",
+            rollback_originals = rollback_applied_states = None
+            if defer_authoritative_apply:
+                application = {"record_type": "codex_candidate_retention_intent",
+                    "status": "awaiting_independent_review",
+                    "applied_paths": [], "rollback_performed": False,
+                    "candidate_snapshot_id": final_candidate["candidate_snapshot_id"],
+                    "candidate_record_sha256": final_candidate["record_sha256"],
+                    "mutation_manifest_sha256": _digest(changes),
+                    "exact_change_evidence_sha256": exact_change_evidence_sha256,
+                    "unrelated_authoritative_changes_ignored": True}
+                application_status = "awaiting_independent_review"
+            else:
+                application = _apply_validated_changes(authoritative_root=self.workspace,
+                    candidate_root=candidate_root, base=base, changes=normalized_apply_changes,
+                    replace=self.apply_replace, before_replace=self.before_apply_replace,
+                    frozen_preimages=evidence_before)
+                rollback_originals = application.pop("_rollback_originals")
+                rollback_applied_states = application.pop("_rollback_applied_states")
+                application.update({"record_type": "codex_validated_apply_record",
+                    "candidate_snapshot_id": final_candidate["candidate_snapshot_id"],
+                    "candidate_record_sha256": final_candidate["record_sha256"],
+                    "mutation_manifest_sha256": _digest(changes),
+                    "unrelated_authoritative_changes_ignored": True})
+                application_status = "applied_verified"
+            application_record = {**application_intent, **application, "status": application_status,
                                   "completed_at": _now()}
             application_record.pop("record_sha256", None)
             application_record["record_sha256"] = _digest(application_record)
@@ -853,17 +910,21 @@ class CodexWriteBuilderAdapter(CodexExecWorkerAdapter):
                     {"reference_type": "workspace_diff", "reference_id": invocation_id,
                      "sha256": _digest(changes)}])
         except (KeyError, TypeError, ValueError, PermissionError, json.JSONDecodeError) as exc:
-            try:
-                restored = _rollback_applied_changes(
-                    self.workspace, rollback_originals, rollback_applied_states)
-                application = {**application, "status": "rolled_back_after_evidence_failure",
-                               "rollback_performed": True, "restored_paths": restored,
-                               "recovery_required": False}
-            except Exception as rollback_exc:
-                application = {**application, "status": "rollback_failed_recovery_required",
-                    "rollback_performed": False, "recovery_required": True,
-                    "rollback_error_type": type(rollback_exc).__name__,
-                    "rollback_error_detail": str(rollback_exc)}
+            if defer_authoritative_apply:
+                application = {**application, "status": "evidence_failure_no_apply",
+                    "rollback_performed": False, "recovery_required": False}
+            else:
+                try:
+                    restored = _rollback_applied_changes(
+                        self.workspace, rollback_originals, rollback_applied_states)
+                    application = {**application, "status": "rolled_back_after_evidence_failure",
+                                   "rollback_performed": True, "restored_paths": restored,
+                                   "recovery_required": False}
+                except Exception as rollback_exc:
+                    application = {**application, "status": "rollback_failed_recovery_required",
+                        "rollback_performed": False, "recovery_required": True,
+                        "rollback_error_type": type(rollback_exc).__name__,
+                        "rollback_error_detail": str(rollback_exc)}
             rollback_record = {**application_intent, **application, "completed_at": _now()}
             rollback_record.pop("record_sha256", None)
             rollback_record["record_sha256"] = _digest(rollback_record)
@@ -881,8 +942,9 @@ class CodexWriteBuilderAdapter(CodexExecWorkerAdapter):
             "exact_change_evidence": exact_change_evidence,
             "exact_change_evidence_sha256": exact_change_evidence_sha256,
             "cache_cleanup": cache_cleanup,
-            "candidate_snapshot": {key: provenance[key] for key in
+            "candidate_snapshot": {key: final_candidate[key] for key in
                 ("candidate_snapshot_id", "file_count", "total_byte_length", "record_sha256")},
+            "candidate_workspace": str(candidate_root) if defer_authoritative_apply else None,
             "application_evidence": application,
             "delivery_receipt_id": delivery["delivery_receipt_id"],
             "verification_receipt_id": verification["verification_receipt_id"],
@@ -895,8 +957,146 @@ class CodexWriteBuilderAdapter(CodexExecWorkerAdapter):
             "created_at": _now()}
         result["record_sha256"] = _digest(result)
         result_path.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
-        candidate_temporary.cleanup()
+        if candidate_temporary is not None:
+            candidate_temporary.cleanup()
         return result
+
+    def apply_reviewed_candidate_once(self, *, package_id, campaign_id,
+                                      review_report_id, review_acceptance_receipt=None,
+                                      review_accepted=None):
+        """Apply one retained candidate only after the coordinator validates review."""
+        package_id = require_id(package_id, "package_id")
+        campaign_id = require_id(campaign_id, "campaign_id")
+        review_report_id = require_id(review_report_id, "review_report_id")
+        receipt = review_acceptance_receipt
+        if (not isinstance(receipt, dict)
+                or receipt.get("record_sha256") != _digest(
+                    {key: value for key, value in receipt.items() if key != "record_sha256"})
+                or receipt.get("record_type") != "codex_independent_review_acceptance_receipt"
+                or receipt.get("status") != "accepted"
+                or receipt.get("campaign_id") != campaign_id
+                or receipt.get("package_id") != package_id
+                or receipt.get("review_report_id") != review_report_id
+                or receipt.get("creates_authority") is not False):
+            raise PermissionError("exact bound independent-review acceptance receipt is required before apply")
+        directory = self.root / "write-candidate" / package_id
+        result_path = directory / "result.json"
+        request_path = directory / "request.json"
+        application_path = directory / "application.json"
+        result = json.loads(result_path.read_text(encoding="utf-8"))
+        request = json.loads(request_path.read_text(encoding="utf-8"))
+        application = json.loads(application_path.read_text(encoding="utf-8"))
+        for value in (result, request, application):
+            claimed = value.get("record_sha256")
+            if claimed != _digest({key: item for key, item in value.items()
+                                   if key != "record_sha256"}):
+                raise ValueError("retained candidate evidence integrity mismatch")
+        if (result.get("status") != "delivered"
+                or result.get("campaign_id") != campaign_id
+                or request.get("campaign_id") != campaign_id
+                or application.get("status") != "awaiting_independent_review"
+                or application.get("applied_paths") != []):
+            raise PermissionError("candidate is not pending one reviewed application")
+        if (receipt.get("candidate_snapshot_id") !=
+                (result.get("candidate_snapshot") or {}).get("candidate_snapshot_id")
+                or receipt.get("mutation_manifest_sha256") != result.get("workspace_changes_sha256")
+                or receipt.get("allowed_scope_sha256") != request.get("allowed_scope_sha256")
+                or receipt.get("acceptance_condition_ids_sha256") !=
+                    request.get("acceptance_condition_ids_sha256")):
+            raise PermissionError("review acceptance does not bind the retained candidate")
+        review_report = self.exchange._load("reports", review_report_id)
+        review_package_id = receipt.get("review_package_id")
+        review_package = self.exchange._load("packages", require_id(
+            review_package_id, "review_package_id"))
+        delivery = self.exchange._load("delivery_receipts", require_id(
+            receipt.get("delivery_receipt_id"), "review_delivery_receipt_id"))
+        verification = self.exchange._load("verification_receipts", require_id(
+            receipt.get("verification_receipt_id"), "review_verification_receipt_id"))
+        retention_sections = [item for item in review_package.get("included_sections", [])
+                              if item.get("section_id") == "candidate-retention-receipt"]
+        if len(retention_sections) != 1:
+            raise PermissionError("bound candidate-retention receipt is unavailable")
+        try:
+            retention_receipt = json.loads(retention_sections[0]["content"])
+        except (KeyError, TypeError, json.JSONDecodeError) as exc:
+            raise PermissionError("bound candidate-retention receipt is malformed") from exc
+        reviewer_id = receipt.get("reviewer_worker_id")
+        if (review_report.get("report_id") != review_report_id
+                or review_report.get("record_sha256") != receipt.get("review_report_sha256")
+                or (review_report.get("sender") or {}).get("worker_id") != reviewer_id
+                or reviewer_id in {"fawkes-development", "codex-repository-wsl-fawkes"}
+                or (receipt.get("recipient") or {}).get("worker_id") != reviewer_id
+                or (receipt.get("recipient") or {}).get("role") != receipt.get("reviewer_role")
+                or (review_report.get("in_reply_to") or {}).get("package_id") != review_package_id
+                or (review_package.get("recipient") or {}).get("worker_id") != reviewer_id
+                or delivery.get("package_id") != review_package_id
+                or delivery.get("status") != "delivered"
+                or verification.get("package_id") != review_package_id
+                or (verification.get("recipient") or {}).get("worker_id") != reviewer_id
+                or verification.get("status") not in {"accepted", "accepted_with_caveats"}):
+            raise PermissionError("bound independent review report is unavailable")
+        if (retention_receipt.get("record_sha256") != receipt.get(
+                    "candidate_retention_receipt_sha256")
+                or retention_receipt.get("record_sha256") != _digest(
+                    {key: value for key, value in retention_receipt.items()
+                     if key != "record_sha256"})
+                or retention_receipt.get("status") != "awaiting_independent_review"
+                or retention_receipt.get("applied_paths") != []
+                or retention_receipt.get("campaign_id") != campaign_id
+                or retention_receipt.get("package_id") != package_id
+                or retention_receipt.get("candidate_snapshot", {}).get(
+                    "candidate_snapshot_id") != receipt.get("candidate_snapshot_id")
+                or retention_receipt.get("mutation_manifest_sha256") != receipt.get(
+                    "mutation_manifest_sha256")
+                or retention_receipt.get("allowed_scope_sha256") != receipt.get(
+                    "allowed_scope_sha256")):
+            raise PermissionError("candidate-retention lineage mismatch")
+        candidate_root = (directory / "candidate").resolve()
+        baseline_root = (directory / "frozen-baseline").resolve()
+        final_manifest = candidate_manifest(candidate_root)
+        final_candidate = {"candidate_snapshot_id": final_manifest["candidate_snapshot_id"],
+            "file_count": len(final_manifest["files"]),
+            "total_byte_length": sum(item["byte_length"] for item in final_manifest["files"]),
+            "record_sha256": _digest(final_manifest)}
+        retained = result.get("candidate_snapshot") or {}
+        if any(final_candidate.get(key) != retained.get(key) for key in
+               ("candidate_snapshot_id", "record_sha256", "file_count", "total_byte_length")):
+            raise PermissionError("retained candidate changed before reviewed apply")
+        before = _workspace_snapshot(baseline_root)
+        after = _workspace_snapshot(candidate_root)
+        changes = _diff(before, after)
+        if _digest(changes) != result.get("workspace_changes_sha256"):
+            raise PermissionError("retained mutation manifest changed before reviewed apply")
+        scopes = _relative_scopes(request.get("allowed_scope"))
+        scope_contract = _scope_contract(scopes, before)
+        _validate_candidate_changes(changes, scope_contract)
+        captured = _capture_frozen_tree(baseline_root, before, scope_contract)
+        base = {path: _content_state(metadata) for path, metadata in before.items()}
+        normalized = [{**change, "before": _content_state(change.get("before")),
+                       "after": _content_state(change.get("after"))}
+                      for change in _applyable_changes(changes)]
+        applied = _apply_validated_changes(authoritative_root=self.workspace,
+            candidate_root=candidate_root, base=base, changes=normalized,
+            replace=self.apply_replace, before_replace=self.before_apply_replace,
+            frozen_preimages=captured)
+        rollback_originals = applied.pop("_rollback_originals")
+        rollback_applied_states = applied.pop("_rollback_applied_states")
+        record = {**application, **applied, "status": "applied_verified_after_review",
+            "record_type": "codex_post_review_authoritative_application_receipt",
+            "review_report_id": review_report_id,
+            "review_acceptance_receipt_sha256": receipt["record_sha256"],
+            "candidate_snapshot_id": final_candidate["candidate_snapshot_id"],
+            "candidate_record_sha256": final_candidate["record_sha256"],
+            "mutation_manifest_sha256": _digest(changes), "completed_at": _now()}
+        record.pop("record_sha256", None)
+        record["record_sha256"] = _digest(record)
+        try:
+            application_path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+        except Exception:
+            _rollback_applied_changes(self.workspace, rollback_originals,
+                                      rollback_applied_states)
+            raise
+        return record
 
     def _write_failure(self, path, request, package, authority, reason, detail, changes,
                        process_metadata=None, cache_cleanup=None, application_evidence=None):

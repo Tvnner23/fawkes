@@ -19,7 +19,10 @@ from src.runtime.codex_development_campaign import (
 )
 from src.runtime.codex_development_handoff import CODEX_REPO_WORKER_REFERENCE
 from src.runtime.worker_exchange import WorkerExchange, _digest
-from src.runtime.windows_codex_reviewer import exact_review_schema, validate_windows_structured_response
+from src.runtime.windows_codex_reviewer import (
+    canonical_review_evidence_reference_ids, exact_review_schema,
+    validate_windows_structured_response,
+)
 from src.runtime.wsl_codex_reviewer import (
     FORMAL_REVIEW_ROLE, WSL_ADAPTER_ID, WSL_ADAPTER_QUALIFIED, WSL_ADAPTER_PROMOTED, WSL_ENVIRONMENT_ID,
     WSL_QUALIFICATION_CONTRACT, WSL_REVIEWER_REFERENCE, WSL_REVIEWER_ROLE,
@@ -33,8 +36,10 @@ class FakeWslReviewer:
         self.provider_turns = 0
         self.last_package = None
         self.last_package_sha = None
+        self.prompts = []
 
     def __call__(self, command, *, prompt, environment, timeout):
+        self.prompts.append(prompt)
         if "--version" in command: return SimpleNamespace(returncode=0, stdout="codex-cli 0.151.0\n", stderr="")
         if command[1:3] == ["login", "status"]: return SimpleNamespace(returncode=0, stdout="Logged in using ChatGPT\n", stderr="")
         self.provider_turns += 1
@@ -144,20 +149,43 @@ class WslFormalReviewerTests(unittest.TestCase):
             recipient_environment_id=f"codex-cli:{self.workspace.resolve()}", write_task=write_task,
             campaign_id="campaign", iteration=1, allowed_scope=scopes,
             acceptance_condition_ids=["done"], recovery_references=recovery)
+        self.workspace = Path(result["candidate_workspace"])
         returned = self.exchange._load("reports", result["return_report_id"])
+        validation_declaration = {"policy_version": "development-campaign-validation-v1",
+            "status": "required", "creates_authority": False}
+        validation_declaration["record_sha256"] = _digest(validation_declaration)
+        validation_evidence = [{"argv": ["test"], "exit_status": 0}]
         self.campaign = {"instance_id": "fawkes", "campaign_id": "campaign",
             "status": "awaiting_independent_review", "iteration": 1, "objective": "Review exact change.",
             "acceptance_condition_ids": ["done"], "acceptance_conditions": {"done": "Change is exact."},
             "allowed_scope": scopes, "recovery_references": recovery, "contract_version": "fixture-v1",
+            "validation_policy": "required", "validation_declaration": validation_declaration,
             "builder_runs": [{"iteration": 1, "return_report_id": returned["report_id"],
                 "package_id": package["package_id"],
                 "transport_result_reference": {"workspace_changes_sha256": result["workspace_changes_sha256"]},
-                "validation_evidence": [{"argv": ["test"], "exit_status": 0}],
+                "validation_evidence": validation_evidence,
                 "completed_at": datetime.now(timezone.utc).isoformat()}]}
         manifest = candidate_manifest(self.workspace)
         self.provenance = {**manifest, "record_sha256": _digest(manifest),
             "file_count": len(manifest["files"]),
             "total_byte_length": sum(x["byte_length"] for x in manifest["files"])}
+        application = result["application_evidence"]
+        retention = {"schema_version": 1,
+            "record_type": "codex_candidate_retention_receipt",
+            "status": "awaiting_independent_review", "applied_paths": [],
+            "campaign_id": "campaign", "package_id": package["package_id"], "iteration": 1,
+            "worker_invocation_id": result["invocation_id"],
+            "allowed_scope_sha256": _digest(scopes),
+            "mutation_manifest_sha256": result["workspace_changes_sha256"],
+            "exact_change_evidence_sha256": result["exact_change_evidence_sha256"],
+            "candidate_snapshot": result["candidate_snapshot"], "validation_policy": "required",
+            "validation_declaration_sha256": validation_declaration["record_sha256"],
+            "validation_evidence_sha256": _digest(validation_evidence),
+            "recovery_references_sha256": _digest(recovery),
+            "retention_intent_sha256": application["application_record_sha256"],
+            "creates_authority": False, "created_at": datetime.now(timezone.utc).isoformat()}
+        retention["record_sha256"] = _digest(retention)
+        self.campaign["builder_runs"][-1]["candidate_retention_receipt"] = retention
         self.prepared = prepare_wsl_review_package(exchange=self.exchange, campaign_record=self.campaign,
             candidate_snapshot=self.provenance, workspace=self.workspace)
 
@@ -288,6 +316,12 @@ class WslFormalReviewerTests(unittest.TestCase):
         self.assertEqual([x["status"] for x in reviewer],["delivered"])
         self.assertEqual(repaired["client_process_evidence"]["attempt_count"],2)
         self.assertNotEqual(repaired["client_process_evidence"]["repair_nonce_sha256"],"0"*64)
+        repair_prompt=lineage.prompts[-1]
+        self.assertIn("a nonempty\n  evidence_reference",repair_prompt)
+        self.assertIn("verification.evidence_references must copy",repair_prompt)
+        self.assertIn("correction_required requires at least one concrete defect",repair_prompt)
+        self.assertIn(json.dumps(canonical_review_evidence_reference_ids(lineage.last_package)),
+                      repair_prompt)
 
     def test_semantic_invalid_response_repairs_and_two_invalid_responses_fail_closed(self):
         semantic=RepairSequenceReviewer(["semantic",None])
@@ -330,6 +364,11 @@ class WslFormalReviewerTests(unittest.TestCase):
         reports=[json.loads(p.read_text()) for p in (self.exchange.root/"reports").glob("*.json")]
         self.assertFalse(any(item.get("sender",{}).get("worker_id")==WSL_REVIEWER_WORKER_ID
                              for item in reports))
+
+        self.setUp(); unknown=RepairSequenceReviewer(["neighbor-evidence", "neighbor-evidence"])
+        rejected=self.invoke(unknown)
+        self.assertEqual((rejected["failure_reason"],unknown.provider_turns),
+                         ("semantic_repair_failed",2))
 
     def test_repair_stops_on_candidate_or_package_scope_drift(self):
         mutate=RepairSequenceReviewer(["lineage"],after_first=lambda:
@@ -390,7 +429,8 @@ class WslFormalReviewerTests(unittest.TestCase):
 
     def _formal_campaign(self):
         coordinator = CodexDevelopmentCampaign("fawkes", root=Path(self.tmp.name) / "campaigns",
-                                               exchange=self.exchange)
+            exchange=self.exchange, candidate_applier=lambda **kwargs:
+                {"status":"applied_verified_after_review", "applied_paths":[], **kwargs})
         now = datetime.now(timezone.utc).isoformat()
         record = {"schema_version": 1, "record_type": "codex_development_campaign",
             "contract_version": CAMPAIGN_CONTRACT_VERSION, "campaign_id": "campaign",
@@ -399,7 +439,9 @@ class WslFormalReviewerTests(unittest.TestCase):
             "objective_mode": "repository_write", "acceptance_condition_ids": ["done"],
             "acceptance_conditions": self.campaign["acceptance_conditions"],
             "allowed_scope": self.campaign["allowed_scope"], "source_sections": [],
-            "validation_commands": [], "rider_authorization_reference": "test-rider-authority",
+            "validation_commands": [], "validation_policy": self.campaign["validation_policy"],
+            "validation_declaration": self.campaign["validation_declaration"],
+            "rider_authorization_reference": "test-rider-authority",
             "recovery_references": self.campaign["recovery_references"],
             "builder": {**CODEX_REPO_WORKER_REFERENCE, "target": "codex_repo",
                         "execution_mode_required": "repository_write", "identified_is_authorized": False},
@@ -409,7 +451,11 @@ class WslFormalReviewerTests(unittest.TestCase):
                 "must_differ_from_builder": True, "identity_is_authority": False},
             "maximum_iterations": MAX_ITERATIONS, "iteration": 1,
             "status": "awaiting_independent_review", "active_builder_task_scope_id": None,
-            "builder_runs": self.campaign["builder_runs"], "reviews": [], "review_requests": [],
+            "builder_runs": [{**item, "candidate_workspace": str(self.workspace),
+                "candidate_snapshot": {key:self.provenance[key] for key in
+                    ("candidate_snapshot_id", "record_sha256", "file_count", "total_byte_length")}}
+                for item in self.campaign["builder_runs"]],
+            "reviews": [], "review_requests": [],
             "review_transport_attempts": [], "cache_lifecycle_events": [], "acceptance_satisfied": [],
             "needs_tanner": None, "cancelled": False, "automatic_promotion": False,
             "creates_authority": False, "state_revision": 1, "created_at": now, "updated_at": now,

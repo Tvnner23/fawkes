@@ -154,6 +154,29 @@ def _validation_commands(values):
     return normalized
 
 
+def _validation_contract(payload, commands, *, campaign_id, allowed_scope):
+    policy = payload.get("validation_policy", "required")
+    if policy not in {"required", "intentionally_not_applicable"}:
+        raise ValueError("validation_policy must be required or intentionally_not_applicable")
+    if policy == "required" and not commands:
+        raise ValueError("required campaign validation commands cannot be empty")
+    if policy == "intentionally_not_applicable" and commands:
+        raise ValueError("not-applicable validation cannot include commands")
+    reason = payload.get("validation_not_applicable_reason_code")
+    if policy == "intentionally_not_applicable" and reason not in {
+            "no_deterministic_validation_applicable"}:
+        raise ValueError("not-applicable validation requires a permitted reason code")
+    declaration = {"policy_version": "development-campaign-validation-v2",
+        "status": policy, "campaign_id": campaign_id,
+        "allowed_scope_sha256": _digest(allowed_scope),
+        "validation_plan_sha256": _digest(commands),
+        "reason_code": reason if policy == "intentionally_not_applicable" else None,
+        "creates_authority": False}
+    declaration["record_sha256"] = hashlib.sha256(json.dumps(
+        declaration, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return policy, declaration
+
+
 def _cleanup_python_cache(scopes, *, root=ROOT):
     """Remove only reproducible bytecode beside explicitly allowed source paths."""
     removed = []
@@ -248,13 +271,14 @@ class CodexDevelopmentCampaign:
 
     def __init__(self, instance_id, *, root=None, exchange=None, builder_runner=None,
                  builder_modes=None, attention_store=None, runtime_state_root=None,
-                 worker_timeout_seconds=DEFAULT_TIMEOUT_SECONDS):
+                 worker_timeout_seconds=DEFAULT_TIMEOUT_SECONDS, candidate_applier=None):
         self.instance_id = require_id(instance_id, "instance_id")
         self.store = DevelopmentCampaignStore(instance_id, root=root)
         self.supervision_root = (Path(root).parent / "component_supervision"
                                  if root is not None else None)
         self.exchange = exchange or WorkerExchange(instance_id)
         self.builder_runner = builder_runner or self._run_promoted_builder
+        self.candidate_applier = candidate_applier or self._apply_reviewed_builder_candidate
         self.builder_modes = set(builder_modes or {"read_only", "repository_write"})
         self.attention_store = attention_store or DevelopmentAttentionStore()
         self.runtime_state_root = _runtime_state_root(runtime_state_root, workspace=ROOT)
@@ -270,6 +294,16 @@ class CodexDevelopmentCampaign:
             approval_handler=self._handle_typed_approval,
             worker_timeout_seconds=self.worker_timeout_seconds,
             runtime_state_root=self.runtime_state_root)
+
+    def _apply_reviewed_builder_candidate(self, *, package_id, campaign_id,
+                                          review_report_id, review_acceptance_receipt):
+        from src.runtime.codex_write_builder_adapter import CodexWriteBuilderAdapter
+        return CodexWriteBuilderAdapter(self.exchange, workspace=ROOT,
+            runtime_state_root=self.runtime_state_root,
+            timeout_seconds=self.worker_timeout_seconds).apply_reviewed_candidate_once(
+                package_id=package_id, campaign_id=campaign_id,
+                review_report_id=review_report_id,
+                review_acceptance_receipt=review_acceptance_receipt)
 
     def _handle_typed_approval(self, approval, *, timeout_seconds, process_alive=None):
         """Project one exact typed request into the accepted Rider boundary."""
@@ -368,6 +402,9 @@ class CodexDevelopmentCampaign:
         recovery = body_free_references(recovery)
         authorization_reference = require_id(payload.get("rider_authorization_reference"),
                                              "rider_authorization_reference")
+        validation_commands = _validation_commands(payload.get("validation_commands", []))
+        validation_policy, validation_declaration = _validation_contract(
+            payload, validation_commands, campaign_id=campaign_id, allowed_scope=allowed_scope)
         created = _now()
         record = {
             "schema_version": CAMPAIGN_SCHEMA_VERSION,
@@ -382,7 +419,9 @@ class CodexDevelopmentCampaign:
             "acceptance_conditions": condition_text,
             "allowed_scope": allowed_scope,
             "source_sections": _source_sections(payload.get("source_sections", [])),
-            "validation_commands": _validation_commands(payload.get("validation_commands", [])),
+            "validation_commands": validation_commands,
+            "validation_policy": validation_policy,
+            "validation_declaration": validation_declaration,
             "rider_authorization_reference": authorization_reference,
             "recovery_references": recovery,
             "builder": {**CODEX_REPO_WORKER_REFERENCE, "target": "codex_repo",
@@ -543,6 +582,61 @@ class CodexDevelopmentCampaign:
         current = self.store.load(record["campaign_id"])
         presentation = result.get("presentation") if isinstance(result, dict) else None
         transport_result = result.get("transport_result") if isinstance(result, dict) else None
+        candidate_workspace = ((transport_result or {}).get("candidate_workspace")
+                               if isinstance(transport_result, dict) else None)
+        validation = (self._run_validation(record["validation_commands"], cwd=candidate_workspace)
+                      if candidate_workspace and record["validation_policy"] == "required" else [])
+        if (candidate_workspace and record["validation_policy"] == "intentionally_not_applicable"
+                and isinstance(transport_result, dict)):
+            snapshot = transport_result.get("candidate_snapshot") or {}
+            na = {"schema_version": 1, "record_type": "candidate_validation_not_applicable_receipt",
+                "status": "intentionally_not_applicable", "campaign_id": record["campaign_id"],
+                "candidate_snapshot_id": snapshot.get("candidate_snapshot_id"),
+                "candidate_record_sha256": snapshot.get("record_sha256"),
+                "allowed_scope_sha256": _digest(record["allowed_scope"]),
+                "validation_plan_sha256": _digest(record["validation_commands"]),
+                "validation_declaration_sha256": record["validation_declaration"]["record_sha256"],
+                "reason_code": record["validation_declaration"].get("reason_code"),
+                "classification_source": "canonical_campaign_validator",
+                "creates_authority": False}
+            na["record_sha256"] = _digest(na); validation = [na]
+        validation_passed = ((record["validation_policy"] == "required" and bool(validation)
+                              and all(item.get("exit_status") == 0 for item in validation))
+                             or (record["validation_policy"] == "intentionally_not_applicable"
+                                 and len(validation) == 1
+                                 and validation[0].get("record_type") ==
+                                     "candidate_validation_not_applicable_receipt"
+                                 and validation[0].get("candidate_snapshot_id") ==
+                                     ((transport_result or {}).get("candidate_snapshot") or {}).get(
+                                         "candidate_snapshot_id")
+                                 and record["validation_declaration"].get("status") ==
+                                     "intentionally_not_applicable"))
+        retention_receipt = None
+        application = ((transport_result or {}).get("application_evidence")
+                       if isinstance(transport_result, dict) else None)
+        if (validation_passed and isinstance(application, dict)
+                and application.get("record_type") == "codex_candidate_retention_intent"
+                and application.get("status") == "awaiting_independent_review"
+                and application.get("applied_paths") == []):
+            retention_receipt = {"schema_version": 1,
+                "record_type": "codex_candidate_retention_receipt",
+                "status": "awaiting_independent_review", "applied_paths": [],
+                "campaign_id": record["campaign_id"],
+                "package_id": (transport_result or {}).get("package_id"),
+                "iteration": next_iteration,
+                "worker_invocation_id": (transport_result or {}).get("invocation_id"),
+                "allowed_scope_sha256": _digest(record["allowed_scope"]),
+                "mutation_manifest_sha256": (transport_result or {}).get("workspace_changes_sha256"),
+                "exact_change_evidence_sha256": (transport_result or {}).get(
+                    "exact_change_evidence_sha256"),
+                "candidate_snapshot": (transport_result or {}).get("candidate_snapshot"),
+                "validation_policy": record["validation_policy"],
+                "validation_declaration_sha256": record["validation_declaration"]["record_sha256"],
+                "validation_evidence_sha256": _digest(validation),
+                "recovery_references_sha256": _digest(record["recovery_references"]),
+                "retention_intent_sha256": application.get("application_record_sha256"),
+                "creates_authority": False, "created_at": _now()}
+            retention_receipt["record_sha256"] = _digest(retention_receipt)
         run = {"iteration": next_iteration, "task_scope_id": task_scope_id,
             "source_report_id": result.get("source_report_id") if isinstance(result, dict) else None,
             "package_id": result.get("package_id") if isinstance(result, dict) else None,
@@ -556,7 +650,12 @@ class CodexDevelopmentCampaign:
                 "record_sha256": transport_result.get("record_sha256"),
                 "workspace_changes_sha256": transport_result.get("workspace_changes_sha256")}
                 if isinstance(transport_result, dict) else None),
-            "validation_evidence": self._run_validation(record["validation_commands"]),
+            "candidate_workspace": candidate_workspace,
+            "candidate_snapshot": ((transport_result or {}).get("candidate_snapshot")
+                                   if isinstance(transport_result, dict) else None),
+            "validation_evidence": validation,
+            "validation_declaration": record["validation_declaration"],
+            "candidate_retention_receipt": retention_receipt,
             "cache_cleanup": {"removed": cache_after, "absence_verified": not cache_after or all(
                 not (ROOT / item["path"]).exists() for item in cache_after)},
             "completed_at": _now()}
@@ -568,7 +667,8 @@ class CodexDevelopmentCampaign:
             return self._update(current, event_kind="builder_return_retained_after_cancel",
                                 builder_runs=runs, active_builder_task_scope_id=None)
         evidence_valid = False
-        if run["status"] == "completed" and run["return_report_id"] and run["package_id"] and run["source_report_id"]:
+        if (run["status"] == "completed" and run["return_report_id"] and run["package_id"]
+                and run["source_report_id"] and candidate_workspace and validation_passed):
             try:
                 returned = self.exchange._load("reports", run["return_report_id"])
                 package = self.exchange._load("packages", run["package_id"])
@@ -606,13 +706,17 @@ class CodexDevelopmentCampaign:
             builder_runs=runs, active_builder_task_scope_id=None, cache_lifecycle_events=cache_events,
             event_detail={"iteration": next_iteration, "return_report_id": run["return_report_id"]})
 
-    def _run_validation(self, commands):
+    def _run_validation(self, commands, *, cwd=ROOT):
         evidence = []
+        cwd = Path(cwd).resolve()
         environment = minimal_subprocess_environment(
-            runtime_state_root=self.runtime_state_root, workspace=ROOT,
+            runtime_state_root=self.runtime_state_root, workspace=cwd,
             PYTHONDONTWRITEBYTECODE="1")
         for argv in commands:
-            completed = subprocess.run(argv, cwd=ROOT, env=environment, capture_output=True,
+            resolved_argv = list(argv)
+            if resolved_argv[0] == ".venv/bin/python":
+                resolved_argv[0] = str(ROOT / ".venv/bin/python")
+            completed = subprocess.run(resolved_argv, cwd=cwd, env=environment, capture_output=True,
                                        text=True, encoding="utf-8", errors="replace",
                                        timeout=180, check=False)
             stdout, stderr = completed.stdout or "", completed.stderr or ""
@@ -717,11 +821,51 @@ class CodexDevelopmentCampaign:
             reviewer_requirement={**record["reviewer_requirement"], "worker_id": reviewer_id,
                                   "transport_binding": "verified_for_recorded_review"})
         all_satisfied = set(satisfied) == set(record["acceptance_condition_ids"])
+        acceptance_receipt = review.get("review_acceptance_receipt")
+        if status in {"pass", "pass_with_caveats"} and all_satisfied and not violated:
+            builder_run = record["builder_runs"][-1]
+            retention = builder_run.get("candidate_retention_receipt") or {}
+            expected = {"record_type": "codex_independent_review_acceptance_receipt",
+                "status": "accepted", "campaign_id": campaign_id,
+                "package_id": builder_run["package_id"], "review_report_id": report["report_id"],
+                "review_package_id": package_id, "reviewer_worker_id": reviewer_id,
+                "candidate_snapshot_id": (retention.get("candidate_snapshot") or {}).get(
+                    "candidate_snapshot_id"),
+                "mutation_manifest_sha256": retention.get("mutation_manifest_sha256"),
+                "allowed_scope_sha256": retention.get("allowed_scope_sha256"),
+                "candidate_retention_receipt_sha256": retention.get("record_sha256"),
+                "delivery_receipt_id": delivery["delivery_receipt_id"],
+                "verification_receipt_id": verification["verification_receipt_id"],
+                "creates_authority": False}
+            if (not isinstance(acceptance_receipt, dict)
+                    or acceptance_receipt.get("record_sha256") != _digest(
+                        {k:v for k,v in acceptance_receipt.items() if k != "record_sha256"})
+                    or any(acceptance_receipt.get(k) != v for k,v in expected.items())):
+                raise PermissionError("validated Reviewer-authored acceptance receipt is required")
         if status == "pass" and all_satisfied:
-            return self._update(record, event_kind="campaign_succeeded", status="succeeded", needs_tanner=None)
+            try:
+                application = self.candidate_applier(package_id=record["builder_runs"][-1]["package_id"],
+                    campaign_id=campaign_id, review_report_id=report["report_id"],
+                    review_acceptance_receipt=acceptance_receipt)
+            except Exception as exc:
+                return self._update(record, event_kind="reviewed_candidate_apply_failed",
+                    status="failed_safe", needs_tanner={"urgency":"urgent_blocking_flow",
+                    "reason":"reviewed_candidate_apply_failed", "failure_code":type(exc).__name__,
+                    "decision_needed":"inspect retained candidate and apply failure evidence"})
+            return self._update(record, event_kind="campaign_succeeded", status="succeeded",
+                needs_tanner=None, application_evidence=application)
         if status == "pass_with_caveats" and all_satisfied and not violated:
+            try:
+                application = self.candidate_applier(package_id=record["builder_runs"][-1]["package_id"],
+                    campaign_id=campaign_id, review_report_id=report["report_id"],
+                    review_acceptance_receipt=acceptance_receipt)
+            except Exception as exc:
+                return self._update(record, event_kind="reviewed_candidate_apply_failed",
+                    status="failed_safe", needs_tanner={"urgency":"urgent_blocking_flow",
+                    "reason":"reviewed_candidate_apply_failed", "failure_code":type(exc).__name__,
+                    "decision_needed":"inspect retained candidate and apply failure evidence"})
             return self._update(record, event_kind="campaign_succeeded_with_nonblocking_caveats",
-                                status="succeeded", needs_tanner=None)
+                status="succeeded", needs_tanner=None, application_evidence=application)
         if status == "blocked":
             return self._update(record, event_kind="reviewer_blocked", status="tanner_escalation",
                 needs_tanner={"urgency": "urgent_blocking_flow", "reason": "independent_reviewer_blocked",
@@ -745,7 +889,12 @@ class CodexDevelopmentCampaign:
         from src.runtime.wsl_codex_reviewer import (
             WSL_REVIEWER_REFERENCE, WslCodexReviewAdapter, prepare_wsl_review_package,
         )
-        with DisposableVerifierWorkspace(ROOT) as snapshot:
+        candidate_root = Path(record["builder_runs"][-1]["candidate_workspace"]).resolve()
+        with DisposableVerifierWorkspace(candidate_root) as snapshot:
+            retained_snapshot = record["builder_runs"][-1].get("candidate_snapshot") or {}
+            if any(snapshot.provenance.get(key) != retained_snapshot.get(key) for key in
+                   ("candidate_snapshot_id", "file_count", "total_byte_length")):
+                raise PermissionError("builder candidate changed before independent review")
             prepared = prepare_wsl_review_package(exchange=self.exchange, campaign_record=record,
                 candidate_snapshot=snapshot.provenance, workspace=ROOT)
             logical = {"iteration": record["iteration"], "package_id": prepared["package_id"],
@@ -801,7 +950,8 @@ class CodexDevelopmentCampaign:
             "verification_receipt_id": result["verification_receipt_id"],
             "acceptance_condition_ids_satisfied": result["acceptance_condition_ids_satisfied"],
             "violated_acceptance_condition_ids": result["violated_acceptance_condition_ids"],
-            "defects": defects, "correctable_within_scope": result["correctable_within_scope"]}
+            "defects": defects, "correctable_within_scope": result["correctable_within_scope"],
+            "review_acceptance_receipt": result.get("review_acceptance_receipt")}
         consumed = self.consume_review(campaign_id, review, reviewer=WSL_REVIEWER_REFERENCE,
                                        transport_verified=True)
         attempts = list(consumed.get("review_transport_attempts", []))
@@ -884,7 +1034,8 @@ class CodexDevelopmentCampaign:
             "verification_receipt_id": result["verification_receipt_id"],
             "acceptance_condition_ids_satisfied": result["acceptance_condition_ids_satisfied"],
             "violated_acceptance_condition_ids": result["violated_acceptance_condition_ids"],
-            "defects": defects, "correctable_within_scope": result["correctable_within_scope"]}
+            "defects": defects, "correctable_within_scope": result["correctable_within_scope"],
+            "review_acceptance_receipt": result.get("review_acceptance_receipt")}
         consumed = self.consume_review(campaign_id, review, reviewer=WINDOWS_CODEX_WORKER_REFERENCE,
                                        transport_verified=True)
         attempts = list(consumed.get("review_transport_attempts", []))

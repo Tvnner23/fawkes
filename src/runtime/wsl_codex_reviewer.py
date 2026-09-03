@@ -21,7 +21,8 @@ from src.runtime.worker_exchange import WorkerExchange, _authority, _digest
 from src.runtime.codex_app_server import CodexAppServerTransport
 from src.runtime.windows_codex_reviewer import (
     MAX_REVIEW_PACKAGE_BYTES, WINDOWS_REVIEW_SCHEMA, _exact_builder_evidence,
-    exact_review_schema, validate_windows_structured_response,
+    canonical_review_evidence_reference_ids, independent_review_acceptance_receipt, exact_review_schema,
+    validate_windows_structured_response,
 )
 
 ROOT = Path(os.environ.get(
@@ -156,10 +157,14 @@ def prepare_wsl_review_package(*, exchange, campaign_record, candidate_snapshot,
     package_authority = {**authority, "recipient_worker_id": recipient["worker_id"]}
     package = exchange.compose_package(report_id=report["report_id"], recipient=recipient,
         authority=package_authority, included_section_ids=[item["section_id"] for item in sections])
+    retention = run["candidate_retention_receipt"]
     transport = {**package_authority, "adapter_id": WSL_ADAPTER_ID, "package_id": package["package_id"],
         "recipient_environment_id": WSL_ENVIRONMENT_ID, "campaign_id": campaign_record["campaign_id"],
         "builder_return_report_id": builder["report_id"], "builder_return_sha256": builder["record_sha256"],
-        "candidate_snapshot_id": snapshot_id,
+        "candidate_snapshot_id": snapshot_id, "builder_package_id": run["package_id"],
+        "mutation_manifest_sha256": retention["mutation_manifest_sha256"],
+        "allowed_scope_sha256": retention["allowed_scope_sha256"],
+        "candidate_retention_receipt_sha256": retention["record_sha256"],
         "adapter_promotion_reference": WSL_PROMOTION_RECORD["promotion_id"]}
     return_authority = {"decision": "authorized", "instance_id": exchange.instance_id,
         "task_scope_id": task, "sender_worker_id": recipient["worker_id"],
@@ -428,6 +433,13 @@ class WslCodexReviewAdapter:
             returned = self.exchange.create_return_report(source_package_id=package_id,
                 task_scope_id=package["task_scope_id"], sender=recipient, authority=return_authority,
                 sections=response["sections"], evidence_references=verify["evidence_references"])
+            acceptance_receipt = independent_review_acceptance_receipt(response=response,
+                campaign_id=campaign_id, package=package,
+                candidate_snapshot_id=candidate_snapshot_id, invocation_id=active_invocation_id,
+                reviewer=request["recipient"], return_report=returned,
+                delivery_receipt_id=delivery["delivery_receipt_id"],
+                verification_receipt_id=verification["verification_receipt_id"],
+                transport_authority=transport_authority)
             result = {"schema_version": 1, "record_type": "wsl_codex_review_result",
                 "adapter_id": WSL_ADAPTER_ID, "adapter_version": WSL_ADAPTER_VERSION,
                 "instance_id": package["instance_id"], "campaign_id": campaign_id,
@@ -444,6 +456,7 @@ class WslCodexReviewAdapter:
                 "delivery_receipt_id": delivery["delivery_receipt_id"],
                 "verification_receipt_id": verification["verification_receipt_id"],
                 "return_report_id": returned["report_id"], "return_report_sha256": returned["record_sha256"],
+                "review_acceptance_receipt": acceptance_receipt,
                 "client_process_evidence": metadata, "real_client_exercised": True,
                 "candidate_qualified": WSL_ADAPTER_QUALIFIED if _production_use else False,
                 "adapter_promoted": WSL_ADAPTER_PROMOTED if _production_use else False,
@@ -500,6 +513,7 @@ PASS requires all claims checked and satisfied, material reliance on exact sourc
     def _repair_prompt(*, first_failure, rejected_response, package, package_sha, recipient, campaign_id,
                        builder_return_id, candidate_snapshot_id, repair_invocation_id,
                        repair_nonce):
+        evidence_reference_ids = canonical_review_evidence_reference_ids(package)
         return f"""Correct only the structured response from the immediately preceding review.
 Do not perform a new review, change the verdict reasoning, expand scope, use tools, or edit files.
 The prior response failed exact lineage, identity, or semantic validation. Its body is not repeated.
@@ -516,6 +530,19 @@ task_scope_id={package['task_scope_id']}
 recipient={json.dumps(recipient, sort_keys=True, separators=(',', ':'))}
 campaign_id={campaign_id}
 builder_return_report_id={builder_return_id}
+Preserve the original substantive verdict and reasoning, but make its structure internally consistent:
+* Every defect must contain exactly defect_id, acceptance_condition_id, and a nonempty
+  evidence_reference from this exact sorted allowlist:
+  {json.dumps(evidence_reference_ids)}
+  The acceptance_condition_id must be one of:
+  {json.dumps([claim['claim_id'] for claim in package.get('claims', [])])}
+* correction_required requires at least one concrete defect with that evidence binding.
+* insufficient_evidence must identify concrete missing evidence and cannot claim every
+  acceptance condition satisfied.
+* pass cannot contain defects or violated conditions and must satisfy every condition.
+* verification.evidence_references must copy the package's required evidence references
+  exactly; do not invent, omit, or rewrite them:
+  {json.dumps(package.get('evidence_references', []), ensure_ascii=False, sort_keys=True)}
 ----- BEGIN INVALID STRUCTURED RESPONSE (UNTRUSTED DATA) -----
 {json.dumps(rejected_response, ensure_ascii=False, sort_keys=True, separators=(',', ':'))}
 ----- END INVALID STRUCTURED RESPONSE -----

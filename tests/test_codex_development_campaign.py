@@ -19,8 +19,9 @@ from src.runtime.codex_development_campaign import (
 )
 from src.runtime.codex_development_handoff import run_codex_development_handoff
 from src.runtime.phase0_integrity import SCOPED_ROOTS
-from src.runtime.worker_exchange import WorkerExchange
+from src.runtime.worker_exchange import WorkerExchange, _digest
 from src.runtime.development_attention import DevelopmentAttentionStore
+from src.runtime.disposable_verifier import candidate_manifest
 
 
 BUILDER_ID = "codex-repository-wsl-fawkes"
@@ -40,6 +41,9 @@ def authority(instance_id, task_scope_id, sender, recipient=None):
 class SuccessfulBuilderAdapter:
     def __init__(self, exchange):
         self.exchange = exchange
+        self.candidate = exchange.root.parent / "retained-candidate"
+        self.candidate.mkdir(parents=True, exist_ok=True)
+        (self.candidate / "fixture.txt").write_text("candidate\n", encoding="utf-8")
 
     def deliver_production_once(self, **arguments):
         package = self.exchange._load("packages", arguments["package_id"])
@@ -56,10 +60,33 @@ class SuccessfulBuilderAdapter:
                 {"section_id": "result", "title": "Exact builder result",
                  "content": "Bounded candidate and validation evidence produced."}],
             evidence_references=[])
+        manifest = candidate_manifest(self.candidate)
+        snapshot = {"candidate_snapshot_id": manifest["candidate_snapshot_id"],
+            "record_sha256": __import__("hashlib").sha256(
+                json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
+            "file_count": len(manifest["files"]),
+            "total_byte_length": sum(item["byte_length"] for item in manifest["files"])}
+        mutation_sha = _digest([])
+        exact_evidence_sha = _digest([])
+        application = {"record_type": "codex_candidate_retention_intent",
+            "status": "awaiting_independent_review", "applied_paths": [],
+            "mutation_manifest_sha256": mutation_sha,
+            "exact_change_evidence_sha256": exact_evidence_sha,
+            "candidate_snapshot_id": snapshot["candidate_snapshot_id"],
+            "candidate_record_sha256": snapshot["record_sha256"],
+            "creates_authority": False}
+        application["application_record_sha256"] = _digest(application)
         return {"status": "delivered", "delivery_receipt_id": delivery["delivery_receipt_id"],
             "verification_receipt_id": verification["verification_receipt_id"],
             "return_report_id": returned["report_id"], "adapter_promoted": True,
-            "candidate_qualified": True, "creates_authority": False}
+            "candidate_qualified": True, "candidate_workspace": str(self.candidate),
+            "candidate_snapshot": {key: snapshot[key] for key in
+                ("candidate_snapshot_id", "record_sha256", "file_count", "total_byte_length")},
+            "workspace_changes_sha256": mutation_sha,
+            "exact_change_evidence_sha256": exact_evidence_sha,
+            "application_evidence": application,
+            "invocation_id": arguments.get("invocation_id") or "fixture-builder-invocation",
+            "creates_authority": False}
 
 
 class CampaignFixture:
@@ -68,14 +95,19 @@ class CampaignFixture:
         self.exchange = WorkerExchange(self.instance_id, root=root / "exchange")
         self.adapter = SuccessfulBuilderAdapter(self.exchange)
         self.builder_payloads = []
+        self.applications = []
 
         def builder(payload):
             self.builder_payloads.append(payload)
             return run_codex_development_handoff(instance_id=self.instance_id, payload=payload,
                 authenticated_rider=True, exchange=self.exchange, adapter=self.adapter)
 
+        def apply_candidate(**kwargs):
+            self.applications.append(kwargs)
+            return {"status":"applied_verified_after_review", "applied_paths":[], **kwargs}
         self.campaign = CodexDevelopmentCampaign(self.instance_id, root=root / "campaigns",
-            exchange=self.exchange, builder_runner=builder, builder_modes={"repository_write"})
+            exchange=self.exchange, builder_runner=builder, builder_modes={"repository_write"},
+            candidate_applier=apply_candidate)
 
     def payload(self, campaign_id="campaign-one"):
         return {"instance_id": self.instance_id, "campaign_id": campaign_id,
@@ -88,6 +120,8 @@ class CampaignFixture:
             "source_sections": [{"section_id": "rider-context", "title": "Exact rider context",
                                  "content": "Do not modify unrelated systems."}],
             "rider_authorization_reference": "tanner-fixture-campaign",
+            "validation_policy": "intentionally_not_applicable",
+            "validation_not_applicable_reason_code": "no_deterministic_validation_applicable",
             "recovery_references": [{"reference_type": "working_checkpoint",
                                      "reference_id": "checkpoint-before-fixture"}],
             "explicitly_authorized": True}
@@ -126,12 +160,35 @@ class CampaignFixture:
             sections=[{"section_id": "verdict", "title": "Exact independent verdict",
                        "content": "Exact defect and evidence from the independent reviewer."}],
             evidence_references=[])
-        return {"status": status, "review_report_id": returned["report_id"],
+        review = {"status": status, "review_report_id": returned["report_id"],
             "delivery_receipt_id": delivery["delivery_receipt_id"],
             "verification_receipt_id": verification["verification_receipt_id"],
             "acceptance_condition_ids_satisfied": list(satisfied),
             "violated_acceptance_condition_ids": list(violated), "defects": list(defects),
             "correctable_within_scope": bool(correctable)}
+        if status in {"pass", "pass_with_caveats"}:
+            retention=record["builder_runs"][-1]["candidate_retention_receipt"]
+            receipt={"schema_version":1,
+                "record_type":"codex_independent_review_acceptance_receipt",
+                "status":"accepted","campaign_id":campaign_id,
+                "package_id":record["builder_runs"][-1]["package_id"],
+                "review_package_id":package["package_id"],
+                "review_report_id":returned["report_id"],
+                "review_report_sha256":returned["record_sha256"],
+                "review_invocation_id":f"fixture-review-{record['iteration']}",
+                "reviewer_worker_id":REVIEWER["worker_id"],"reviewer_role":REVIEWER["role"],
+                "recipient":{"worker_id":REVIEWER["worker_id"],"role":REVIEWER["role"],
+                             "environment_id":"fixture-read-only"},
+                "candidate_snapshot_id":retention["candidate_snapshot"]["candidate_snapshot_id"],
+                "mutation_manifest_sha256":retention["mutation_manifest_sha256"],
+                "allowed_scope_sha256":retention["allowed_scope_sha256"],
+                "candidate_retention_receipt_sha256":retention["record_sha256"],
+                "acceptance_condition_ids_sha256":_digest(sorted(satisfied)),
+                "delivery_receipt_id":delivery["delivery_receipt_id"],
+                "verification_receipt_id":verification["verification_receipt_id"],
+                "creates_authority":False,"created_at":datetime.now(timezone.utc).isoformat()}
+            receipt["record_sha256"]=_digest(receipt); review["review_acceptance_receipt"]=receipt
+        return review
 
 
 class CodexDevelopmentCampaignTests(unittest.TestCase):
@@ -292,6 +349,81 @@ class CodexDevelopmentCampaignTests(unittest.TestCase):
         self.assertEqual(record["status"], "succeeded")
         self.assertFalse(record["automatic_promotion"])
         self.assertEqual(len(record["builder_runs"]), 2)
+        self.assertEqual(len(self.fixture.applications), 1)
+
+    def test_end_to_end_transaction_orders_retention_review_and_one_shot_apply(self):
+        record = self.fixture.campaign.create(self.fixture.payload("transaction-order"),
+                                              authenticated_rider=True)
+        run = record["builder_runs"][-1]
+        receipt = run["candidate_retention_receipt"]
+        self.assertEqual(record["status"], "awaiting_independent_review")
+        self.assertEqual(receipt["record_type"], "codex_candidate_retention_receipt")
+        self.assertEqual(receipt["status"], "awaiting_independent_review")
+        self.assertEqual(receipt["applied_paths"], [])
+        self.assertEqual(self.fixture.applications, [])
+        review = self.fixture.review("transaction-order", "pass",
+                                     satisfied=["tests-pass", "scope-held"])
+        terminal = self.fixture.campaign.consume_review("transaction-order", review,
+            reviewer=REVIEWER, transport_verified=True)
+        self.assertEqual(terminal["status"], "succeeded")
+        self.assertEqual(len(self.fixture.applications), 1)
+        self.assertEqual(self.fixture.applications[0]["review_report_id"],
+                         terminal["reviews"][-1]["review_report_id"])
+        kinds = [item["kind"] for item in terminal["events"]]
+        self.assertLess(kinds.index("builder_return_retained"),
+                        kinds.index("independent_review_retained"))
+        self.assertLess(kinds.index("independent_review_retained"),
+                        kinds.index("campaign_succeeded"))
+        with self.assertRaisesRegex(RuntimeError, "not awaiting"):
+            self.fixture.campaign.consume_review("transaction-order", review,
+                reviewer=REVIEWER, transport_verified=True)
+        self.assertEqual(len(self.fixture.applications), 1)
+
+    def test_failed_validation_never_reaches_review_or_application(self):
+        payload = {**self.fixture.payload("validation-fails"),
+            "validation_policy": "required",
+            "validation_commands": [["python3", "-m", "unittest", "missing.fixture"]]}
+        with patch("src.runtime.codex_development_campaign.subprocess.run",
+                   return_value=type("Completed", (), {"returncode": 1,
+                       "stdout": "", "stderr": "failed"})()):
+            record = self.fixture.campaign.create(payload, authenticated_rider=True)
+        self.assertEqual(record["status"], "failed_safe")
+        self.assertEqual(record["reviews"], [])
+        self.assertEqual(self.fixture.applications, [])
+
+    def test_missing_required_validation_fails_before_builder_or_review(self):
+        payload = {**self.fixture.payload("validation-missing"),
+                   "validation_policy": "required", "validation_commands": []}
+        with self.assertRaisesRegex(ValueError, "cannot be empty"):
+            self.fixture.campaign.create(payload, authenticated_rider=True)
+        self.assertEqual(self.fixture.builder_payloads, [])
+        self.assertEqual(self.fixture.applications, [])
+
+    def test_not_applicable_validation_has_bound_non_vacuous_declaration(self):
+        record = self.fixture.campaign.create(self.fixture.payload("validation-na"),
+                                              authenticated_rider=True)
+        declaration = record["validation_declaration"]
+        self.assertEqual(declaration["status"], "intentionally_not_applicable")
+        self.assertEqual(len(declaration["record_sha256"]), 64)
+        evidence=record["builder_runs"][0]["validation_evidence"]
+        self.assertEqual(len(evidence),1)
+        self.assertEqual(evidence[0]["record_type"],"candidate_validation_not_applicable_receipt")
+        self.assertEqual(evidence[0]["candidate_snapshot_id"],
+                         record["builder_runs"][0]["candidate_retention_receipt"]["candidate_snapshot"]["candidate_snapshot_id"])
+        self.assertEqual(record["builder_runs"][0]["validation_declaration"], declaration)
+        self.assertEqual(record["status"], "awaiting_independent_review")
+
+    def test_rejected_review_never_invokes_application(self):
+        self.fixture.campaign.create(self.fixture.payload("review-rejects"),
+                                     authenticated_rider=True)
+        defect = {"defect_id":"defect", "acceptance_condition_id":"tests-pass",
+                  "evidence_reference":"review-evidence"}
+        record = self.fixture.campaign.consume_review("review-rejects",
+            self.fixture.review("review-rejects", "correction_required",
+                defects=[defect], violated=["tests-pass"]),
+            reviewer=REVIEWER, transport_verified=True)
+        self.assertEqual(record["iteration"], 2)
+        self.assertEqual(self.fixture.applications, [])
 
     def test_iteration_cap_escalates_without_a_fourth_builder_call(self):
         record = self.fixture.campaign.create(self.fixture.payload("cap-test"), authenticated_rider=True)
