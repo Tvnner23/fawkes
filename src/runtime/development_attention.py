@@ -21,6 +21,7 @@ ATTENTION_ROOT = ROOT / "database" / "development_attention"
 RUNTIME_STATE_ROOT_ENV = "FAWKES_RUNTIME_STATE_ROOT"
 CHOICES = {"approve_once", "deny", "cancel_campaign"}
 QUALIFICATION_CHOICES = {"approve_once", "deny"}
+SUPPORTED_RECOVERY_METHODS = {"item/commandExecution/requestApproval", "execCommandApproval"}
 ATTENTION_BASE_URL_ENV = "FAWKES_ATTENTION_BASE_URL"
 REMOTE_AUTHENTICATED_ENV = "FAWKES_ATTENTION_REMOTE_AUTHENTICATED"
 CONSUMER_LEASE_SECONDS = 5
@@ -192,7 +193,36 @@ class DevelopmentAttentionStore:
         self.root = resolve_attention_root(root, environment=self.environment)
         self.events = self.root / "events"
         self.decisions = self.root / "decisions"
+        self.transactions = self.root / "transactions"
         self.consumer_probe = consumer_probe or _linux_process_identity
+
+    def _recover_transactions(self):
+        """Roll durable multi-record intents forward to their one coherent state."""
+        if not self.transactions.exists():
+            return
+        for transaction_path in sorted(self.transactions.glob("*.json")):
+            with _decision_lock(transaction_path):
+                try:
+                    transaction = json.loads(transaction_path.read_text(encoding="utf-8"))
+                    for write in transaction["writes"]:
+                        target = self.root / write["relative_path"]
+                        if self.root not in target.resolve(strict=False).parents:
+                            raise ValueError("transaction target escapes Attention root")
+                        _write_json_atomic(target, write["value"])
+                    transaction_path.unlink(missing_ok=True)
+                except FileNotFoundError:
+                    continue
+
+    def _write_transaction(self, transaction_id, writes):
+        transaction_path = self.transactions / f"{transaction_id}.json"
+        transaction = {"schema_version": 1, "record_type": "development_attention_transaction",
+            "transaction_id": transaction_id, "writes": [
+                {"relative_path": str(Path(path).relative_to(self.root)), "value": value}
+                for path, value in writes]}
+        _write_json_atomic(transaction_path, transaction)
+        for path, value in writes:
+            _write_json_atomic(path, value)
+        transaction_path.unlink(missing_ok=True)
 
     def _new_consumer_binding(self, event_binding, binding_sha, created, *, owner_identity):
         # Typed app-server requests supply their exact child PID. Other bounded
@@ -245,6 +275,47 @@ class DevelopmentAttentionStore:
         return {**event, "stored_consumer_state": event.get("consumer_state"),
                 "consumer_state": effective, "actionable": actionable,
                 "consumer_unavailable_reason": reason}
+
+    @staticmethod
+    def _authority_binding(event):
+        """The body-free immutable tuple carried by every authority transition."""
+        protocol = event.get("protocol_binding") or {}
+        return {
+            "attention_id": event.get("attention_id"),
+            "campaign_id": event.get("campaign_id"),
+            "invocation_id": event.get("invocation_id"),
+            "rider_id": protocol.get("rider_id", "tanner"),
+            "recipient_sha256": protocol.get("recipient_sha256"),
+            "candidate_snapshot_id": protocol.get("candidate_snapshot_id"),
+            "candidate_record_sha256": protocol.get("candidate_record_sha256"),
+            "mutation_digest_sha256": (protocol.get("mutation_digest_sha256")
+                                       or protocol.get("workspace_changes_sha256")),
+            "authorized_scope_sha256": (protocol.get("authorized_scope_sha256")
+                                         or protocol.get("allowed_scope_sha256")),
+            "method": protocol.get("method"), "item_id": protocol.get("item_id"),
+            "action_digest": protocol.get("approved_action_sha256"),
+            "protocol_binding_sha256": event.get("protocol_binding_sha256"),
+            "expires_at": event.get("expires_at"),
+        }
+
+    @staticmethod
+    def _complete_recovery_evidence(event):
+        protocol = event.get("protocol_binding") or {}
+        recovery = protocol.get("recovery_evidence")
+        if protocol.get("method") not in SUPPORTED_RECOVERY_METHODS or not isinstance(recovery, dict):
+            return False
+        required = {"recovery_id", "payload_sha256", "candidate_snapshot_id",
+                    "mutation_digest_sha256", "authorized_scope_sha256",
+                    "protocol_binding_sha256"}
+        if any(not isinstance(recovery.get(key), str) or not recovery[key] for key in required):
+            return False
+        binding = DevelopmentAttentionStore._authority_binding(event)
+        return (recovery["candidate_snapshot_id"] == binding["candidate_snapshot_id"]
+                and recovery["mutation_digest_sha256"] == binding["mutation_digest_sha256"]
+                and recovery["authorized_scope_sha256"] == binding["authorized_scope_sha256"]
+                and recovery["protocol_binding_sha256"] == _digest({
+                    key: value for key, value in protocol.items()
+                    if key != "recovery_evidence"}))
 
     def _renew_consumer_lease(self, attention_id):
         path = self.events / f"{attention_id}.json"
@@ -397,6 +468,7 @@ class DevelopmentAttentionStore:
 
     def lifecycle(self, attention_id):
         """Return the event plus its exact decision/consumption outcome for presentation."""
+        self._recover_transactions()
         event = self._project_actionability(self.refresh_expiration(attention_id))
         decision = None
         if event.get("decision_id"):
@@ -413,19 +485,17 @@ class DevelopmentAttentionStore:
         event_path = self.events / f"{attention_id}.json"
         with _decision_lock(event_path):
             event = json.loads(event_path.read_text(encoding="utf-8"))
-            if expected_identity is not None:
-                binding = event.get("protocol_binding") or {}
-                canonical = {
-                    "attention_id": event.get("attention_id"),
-                    "campaign_id": event.get("campaign_id"),
-                    "invocation_id": event.get("invocation_id"),
-                    "method": binding.get("method"),
-                    "item_id": binding.get("item_id"),
-                    "action_digest": binding.get("approved_action_sha256"),
-                    "protocol_binding_sha256": event.get("protocol_binding_sha256"),
-                }
-                if expected_identity != canonical:
-                    raise PermissionError("decision identity tuple does not match the canonical pending request")
+            canonical = self._authority_binding(event)
+            required = ("attention_id", "campaign_id", "invocation_id", "rider_id",
+                "recipient_sha256", "candidate_snapshot_id", "candidate_record_sha256",
+                "mutation_digest_sha256", "authorized_scope_sha256", "method",
+                "action_digest", "protocol_binding_sha256")
+            if (not isinstance(expected_identity, dict)
+                    or any(not isinstance(expected_identity.get(key), str)
+                           or not expected_identity[key] for key in required)):
+                raise PermissionError("decision identity tuple is required and incomplete")
+            if expected_identity != canonical:
+                raise PermissionError("decision identity tuple does not match the canonical pending request")
             if event["state"] != "needs_tanner":
                 raise RuntimeError("attention event is no longer awaiting Tanner")
             if event.get("expires_at") and datetime.fromisoformat(event["expires_at"]) <= datetime.now(timezone.utc):
@@ -449,16 +519,24 @@ class DevelopmentAttentionStore:
                                 else "completed"),
             "creates_continuing_authority": False, "decided_by": "authenticated_tanner",
             "decided_at": _now()}
+            decision["authority_binding"] = self._authority_binding(event)
+            decision["authority_binding_sha256"] = _digest(decision["authority_binding"])
             decision["record_sha256"] = _digest(decision)
             # The decision is written first. If interruption occurs before the event
             # projection, it remains a recoverable, explicitly unconsumed grant.
-            _write_json_atomic(self.decisions / f"{decision['decision_id']}.json", decision)
+            decision_path = self.decisions / f"{decision['decision_id']}.json"
+            _write_json_atomic(decision_path, decision)
             event = {**event, "state": "approved_once" if choice == "approve_once" else choice,
                  "decision_id": decision["decision_id"], "acknowledged": True,
                  "decided_at": decision["decided_at"],
                  "approval_outcome": decision["lifecycle_state"]}
             event.pop("record_sha256", None); event["record_sha256"] = _digest(event)
-            _write_json_atomic(event_path, event)
+            try:
+                _write_json_atomic(event_path, event)
+            except Exception:
+                # A failed projection cannot leave a visible or consumable grant.
+                decision_path.unlink(missing_ok=True)
+                raise
         with _DECISION_CONDITION:
             _DECISION_CONDITION.notify_all()
         return {"event": event, "decision": decision}
@@ -469,8 +547,7 @@ class DevelopmentAttentionStore:
             event = json.loads(path.read_text(encoding="utf-8"))
             if event.get("process_state") == "detached":
                 return event
-            method = (event.get("protocol_binding") or {}).get("method")
-            resumable = method in {"item/commandExecution/requestApproval", "execCommandApproval"}
+            resumable = self._complete_recovery_evidence(event)
             event = {**event, "process_state": "detached",
                      "consumer_state": "durably_resumable" if resumable else "unavailable",
                      "process_detached_at": _now()}
@@ -521,16 +598,21 @@ class DevelopmentAttentionStore:
 
     def consume_approve_once(self, decision_id, *, attention_id, invocation_id,
                              protocol_binding_sha256=None, approved_action_sha256=None,
-                             continuation_id=None):
+                             continuation_id=None, expected_binding=None):
         path = self.decisions / f"{decision_id}.json"
         with _decision_lock(path):
             decision = json.loads(path.read_text(encoding="utf-8"))
             event = self._read_event(attention_id)
             binding = event.get("protocol_binding") or {}
+            canonical = self._authority_binding(event)
             if (decision["choice"] != "approve_once" or decision["attention_id"] != attention_id
                     or decision["invocation_id"] != invocation_id or decision["consumed"]
+                    or (event.get("expires_at") and
+                        datetime.fromisoformat(event["expires_at"]) <= datetime.now(timezone.utc))
                     or (protocol_binding_sha256 is not None and
                         decision.get("protocol_binding_sha256") != protocol_binding_sha256)
+                    or decision.get("authority_binding") != canonical
+                    or (expected_binding is not None and expected_binding != canonical)
                     or (approved_action_sha256 is not None and
                         binding.get("approved_action_sha256") != approved_action_sha256)):
                 raise PermissionError("one-time approval is invalid, mismatched, or already consumed")
@@ -541,30 +623,85 @@ class DevelopmentAttentionStore:
             decision = {**decision, "consumed": True, "consumed_at": _now(),
                         "consumed_by_continuation_id": continuation_id,
                         "lifecycle_state": "resumed" if continuation_id else "consumed"}
+            decision["consumption_receipt"] = {**canonical, "continuation_id": continuation_id,
+                "consumed_at": decision["consumed_at"], "creates_continuing_authority": False}
             decision.pop("record_sha256", None); decision["record_sha256"] = _digest(decision)
-            _write_json_atomic(path, decision)
             event = {**event, "approval_outcome": decision["lifecycle_state"]}
             event.pop("record_sha256", None); event["record_sha256"] = _digest(event)
-            _write_json_atomic(self.events / f"{attention_id}.json", event)
+            self._write_transaction("consume-" + decision_id, [
+                (path, decision), (self.events / f"{attention_id}.json", event)])
             return decision
 
     def reserve_detached_continuation(self, decision_id, *, attention_id, invocation_id,
-                                      protocol_binding_sha256, continuation_id):
+                                      protocol_binding_sha256, continuation_id,
+                                      expected_binding=None):
         path = self.decisions / f"{decision_id}.json"
         with _decision_lock(path):
             decision = json.loads(path.read_text(encoding="utf-8"))
             event = self._read_event(attention_id)
+            canonical = self._authority_binding(event)
             if (decision.get("choice") != "approve_once" or decision.get("consumed")
                     or decision.get("attention_id") != attention_id
                     or decision.get("invocation_id") != invocation_id
                     or decision.get("protocol_binding_sha256") != protocol_binding_sha256
+                    or decision.get("authority_binding") != canonical
+                    or (expected_binding is not None and expected_binding != canonical)
+                    or not self._complete_recovery_evidence(event)
                     or event.get("state") != "approved_once"
                     or (event.get("expires_at") and
                         datetime.fromisoformat(event["expires_at"]) <= datetime.now(timezone.utc))
                     or decision.get("continuation") is not None):
                 raise PermissionError("detached continuation grant is stale, mismatched, or replayed")
             decision["continuation"] = {"continuation_id": continuation_id, "state": "reserved",
-                "reserved_at": _now(), "original_protocol_binding_sha256": protocol_binding_sha256}
+                "reserved_at": _now(), "original_protocol_binding_sha256": protocol_binding_sha256,
+                "authority_binding": canonical,
+                "recovery_evidence_sha256": _digest((event.get("protocol_binding") or {}).get(
+                    "recovery_evidence"))}
+            decision.pop("record_sha256", None); decision["record_sha256"] = _digest(decision)
+            _write_json_atomic(path, decision)
+            return decision
+
+    def begin_recovery_execution(self, decision_id, continuation_id):
+        """Durably claim external recovery execution once before invoking its owner."""
+        path = self.decisions / f"{decision_id}.json"
+        with _decision_lock(path):
+            decision = json.loads(path.read_text(encoding="utf-8"))
+            continuation = decision.get("continuation") or {}
+            event = self._read_event(decision["attention_id"])
+            if event.get("expires_at") and datetime.fromisoformat(event["expires_at"]) <= datetime.now(timezone.utc):
+                raise PermissionError("reserved continuation authority has expired")
+            if continuation.get("continuation_id") != continuation_id:
+                raise PermissionError("continuation identity mismatch")
+            if continuation.get("state") == "outcome_recorded":
+                return decision, False
+            if continuation.get("state") == "executing":
+                # Execution may already have crossed its external boundary. Never replay it.
+                decision["continuation"] = {**continuation, "state": "outcome_recorded",
+                    "outcome_status": "failed", "ambiguous_execution": True,
+                    "outcome_recorded_at": _now()}
+                decision.pop("record_sha256", None); decision["record_sha256"] = _digest(decision)
+                _write_json_atomic(path, decision)
+                return decision, False
+            if continuation.get("state") != "reserved" or not decision.get("consumed"):
+                raise PermissionError("continuation is not executable")
+            decision["continuation"] = {**continuation, "state": "executing",
+                "execution_started_at": _now()}
+            decision.pop("record_sha256", None); decision["record_sha256"] = _digest(decision)
+            _write_json_atomic(path, decision)
+            return decision, True
+
+    def record_recovery_outcome(self, decision_id, continuation_id, *, status):
+        if status not in {"completed", "failed"}:
+            raise ValueError("invalid recovery outcome")
+        path = self.decisions / f"{decision_id}.json"
+        with _decision_lock(path):
+            decision = json.loads(path.read_text(encoding="utf-8"))
+            continuation = decision.get("continuation") or {}
+            if (continuation.get("continuation_id") != continuation_id
+                    or continuation.get("state") != "executing"):
+                raise PermissionError("recovery execution is not the claimed continuation")
+            decision["continuation"] = {**continuation, "state": "outcome_recorded",
+                "outcome_status": status, "outcome_recorded_at": _now()}
             decision.pop("record_sha256", None); decision["record_sha256"] = _digest(decision)
             _write_json_atomic(path, decision)
             return decision
@@ -576,16 +713,22 @@ class DevelopmentAttentionStore:
         with _decision_lock(path):
             decision = json.loads(path.read_text(encoding="utf-8"))
             continuation = decision.get("continuation") or {}
-            if continuation.get("continuation_id") != continuation_id:
+            event = self._read_event(decision["attention_id"])
+            if (continuation.get("continuation_id") != continuation_id
+                    or continuation.get("state") not in {"reserved", "outcome_recorded"}
+                    or not decision.get("consumed")
+                    or continuation.get("authority_binding") != self._authority_binding(event)):
                 raise PermissionError("continuation identity mismatch")
+            if (continuation.get("state") == "outcome_recorded"
+                    and continuation.get("outcome_status") != status):
+                raise PermissionError("continuation outcome does not match its durable receipt")
             decision["continuation"] = {**continuation, "state": status, "finished_at": _now()}
             decision["lifecycle_state"] = "completed" if status == "completed" else "failed_safe"
             decision.pop("record_sha256", None); decision["record_sha256"] = _digest(decision)
-            _write_json_atomic(path, decision)
-            event = self._read_event(decision["attention_id"])
             event = {**event, "approval_outcome": decision["lifecycle_state"]}
             event.pop("record_sha256", None); event["record_sha256"] = _digest(event)
-            _write_json_atomic(self.events / f"{decision['attention_id']}.json", event)
+            self._write_transaction("finish-" + decision_id, [
+                (path, decision), (self.events / f"{decision['attention_id']}.json", event)])
             return decision
 
     def finish_live_action(self, decision_id, *, status):

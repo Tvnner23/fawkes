@@ -13,7 +13,7 @@ from src.runtime.codex_app_server import (
     approval_response, typed_approval,
     extend_deadline_for_attention,
 )
-from src.runtime.development_attention import DevelopmentAttentionStore
+from src.runtime.development_attention import DevelopmentAttentionStore, _digest
 
 
 PARAMS = {"threadId": "thread-1", "turnId": "turn-1", "itemId": "item-1",
@@ -24,13 +24,28 @@ PARAMS = {"threadId": "thread-1", "turnId": "turn-1", "itemId": "item-1",
 class CodexAppServerProtocolTests(unittest.TestCase):
     def _approved_store(self, directory):
         store = DevelopmentAttentionStore(Path(directory))
-        binding = {"thread_id": "thread-1", "turn_id": "turn-1", "item_id": "item-1",
-                   "approved_action_sha256": "action-sha"}
+        binding = {
+            "method": "item/commandExecution/requestApproval",
+            "thread_id": "thread-1", "turn_id": "turn-1", "item_id": "item-1",
+            "approved_action_sha256": "action-sha",
+            "rider_id": "tanner", "recipient_sha256": "recipient-sha",
+            "candidate_snapshot_id": "candidate-snapshot-1",
+            "candidate_record_sha256": "candidate-record-sha",
+            "mutation_digest_sha256": "mutation-sha",
+            "authorized_scope_sha256": "scope-sha",
+        }
+        binding["recovery_evidence"] = {
+            "recovery_id": "recovery-1", "payload_sha256": "payload-sha",
+            "candidate_snapshot_id": binding["candidate_snapshot_id"],
+            "mutation_digest_sha256": binding["mutation_digest_sha256"],
+            "authorized_scope_sha256": binding["authorized_scope_sha256"],
+            "protocol_binding_sha256": _digest(binding),
+        }
         event = store.create(campaign_id="campaign-1", invocation_id="invocation-1",
             worker={"worker_id": "worker-1", "role": "builder"},
             kind="native_codex_approval_required", blocked_action="touch harmless.txt",
             why_required="test", requested_authority="one command", protocol_binding=binding)
-        decided = store.decide(event["attention_id"], "approve_once", authenticated_rider=True)
+        decided = store.decide(event["attention_id"], "approve_once", authenticated_rider=True, expected_identity=store._authority_binding(event))
         return store, event, decided["decision"]
 
     def test_exact_typed_mapping_and_decisions(self):
@@ -181,13 +196,20 @@ class CodexAppServerProtocolTests(unittest.TestCase):
             event = store.create(campaign_id="campaign-1", invocation_id="invocation-1",
                 worker={"worker_id": "worker-1", "role": "builder"}, kind="native_codex_approval_required",
                 blocked_action="touch harmless.txt", why_required="test",
-                requested_authority="one command", protocol_binding={"thread_id": "thread-1",
-                    "turn_id": "turn-1", "item_id": "item-1"})
+            requested_authority="one command", protocol_binding={"thread_id": "thread-1",
+                    "turn_id": "turn-1", "item_id": "item-1",
+                    "method": "item/commandExecution/requestApproval",
+                    "approved_action_sha256": "action-sha", "rider_id": "tanner",
+                    "recipient_sha256": "recipient-sha",
+                    "candidate_snapshot_id": "candidate-1",
+                    "candidate_record_sha256": "candidate-record-sha",
+                    "mutation_digest_sha256": "mutation-sha",
+                    "authorized_scope_sha256": "scope-sha"})
             result = {}
             waiter = threading.Thread(target=lambda: result.update(store.wait_for_decision(
                 event["attention_id"], timeout_seconds=3)))
             waiter.start(); time.sleep(.05)
-            decided = store.decide(event["attention_id"], "approve_once", authenticated_rider=True)
+            decided = store.decide(event["attention_id"], "approve_once", authenticated_rider=True, expected_identity=store._authority_binding(event))
             waiter.join(1)
             self.assertEqual(result["decision"]["decision_id"], decided["decision"]["decision_id"])
             self.assertEqual(result["decision"]["protocol_binding_sha256"],
@@ -245,7 +267,6 @@ class CodexAppServerProtocolTests(unittest.TestCase):
             expired = json.loads(path.read_text())
             expired["expires_at"] = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
             expired.pop("record_sha256", None)
-            from src.runtime.development_attention import _digest
             expired["record_sha256"] = _digest(expired)
             path.write_text(json.dumps(expired))
             with self.assertRaises(PermissionError):

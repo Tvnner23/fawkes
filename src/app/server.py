@@ -28,16 +28,23 @@ class BrowserSessionStore:
         self.root = Path(root)
 
     def create(self):
+        return self.create_bound()[0]
+
+    def create_bound(self):
         token = secrets.token_urlsafe(32)
+        csrf_token = secrets.token_urlsafe(32)
         digest = hashlib.sha256(token.encode()).hexdigest()
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.root.chmod(0o700)
         path = self.root / f"{digest}.json"
         temporary = self.root / f".{digest}.{secrets.token_hex(8)}.tmp"
-        temporary.write_text(json.dumps({"schema_version": 1, "expires_epoch": int(time.time()) + SESSION_MAX_AGE_SECONDS}), encoding="utf-8")
+        temporary.write_text(json.dumps({"schema_version": 1,
+            "expires_epoch": int(time.time()) + SESSION_MAX_AGE_SECONDS,
+            "rider_id": "tanner",
+            "csrf_sha256": hashlib.sha256(csrf_token.encode()).hexdigest()}), encoding="utf-8")
         temporary.chmod(0o600); temporary.replace(path)
         path.chmod(0o600)
-        return token
+        return token, csrf_token
 
     def valid(self, token):
         if not token:
@@ -47,6 +54,32 @@ class BrowserSessionStore:
             value = json.loads(path.read_text(encoding="utf-8"))
             return value.get("schema_version") == 1 and int(value["expires_epoch"]) > int(time.time())
         except (OSError, ValueError, KeyError, json.JSONDecodeError):
+            return False
+
+    def valid_csrf(self, token, csrf_token, *, rider_id="tanner"):
+        if not token or not csrf_token or rider_id != "tanner":
+            return False
+        path = self.root / f"{hashlib.sha256(token.encode()).hexdigest()}.json"
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+            expected = value.get("csrf_sha256", "")
+            supplied = hashlib.sha256(csrf_token.encode()).hexdigest()
+            return (value.get("schema_version") == 1
+                    and value.get("rider_id") == rider_id
+                    and int(value["expires_epoch"]) > int(time.time())
+                    and bool(expected) and hmac.compare_digest(supplied, expected))
+        except (OSError, ValueError, KeyError, json.JSONDecodeError):
+            return False
+
+    def revoke(self, token):
+        """Durably revoke one browser session without retaining its bearer value."""
+        if not token:
+            return False
+        path = self.root / f"{hashlib.sha256(token.encode()).hexdigest()}.json"
+        try:
+            path.unlink()
+            return True
+        except FileNotFoundError:
             return False
 
 
@@ -102,13 +135,33 @@ class FawkesAppHandler(BaseHTTPRequestHandler):
             if separator: cookies[name] = value
         return self.server.app_session_store.valid(cookies.get(SESSION_COOKIE, ""))
 
+    def _session_token(self):
+        for part in self.headers.get("Cookie", "").split(";"):
+            name, separator, value = part.strip().partition("=")
+            if separator and name == SESSION_COOKIE:
+                return value
+        return ""
+
     def _establish_session(self):
-        value = self.server.app_session_store.create()
+        value, csrf_token = self.server.app_session_store.create_bound()
         secure = "; Secure" if self.headers.get("X-Forwarded-Proto", "").lower() == "https" else ""
-        self.send_response(204)
+        body = json.dumps({"authenticated_rider": "tanner", "csrf_token": csrf_token}).encode("utf-8")
+        self.send_response(200)
         self.send_header("Set-Cookie", f"{SESSION_COOKIE}={value}; Path=/; HttpOnly; SameSite=Strict; Max-Age={SESSION_MAX_AGE_SECONDS}{secure}")
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
+        self.wfile.write(body)
+
+    def _require_attention_decision_auth(self):
+        session = self._session_token()
+        csrf_token = self.headers.get("X-Fawkes-CSRF-Token", "")
+        if self.server.app_session_store.valid_csrf(session, csrf_token, rider_id="tanner"):
+            return True
+        self._json(403, {"error": {"code": "attention_decision_auth_required",
+            "message": "A current Tanner browser session and session-bound CSRF token are required."}})
+        return False
 
     def _require_auth(self):
         if self._authorized():
@@ -326,6 +379,24 @@ class FawkesAppHandler(BaseHTTPRequestHandler):
                 return
             self._establish_session()
             return
+        if path == "/api/session/logout":
+            session = self._session_token()
+            csrf_token = self.headers.get("X-Fawkes-CSRF-Token", "")
+            if not self.server.app_session_store.valid_csrf(
+                    session, csrf_token, rider_id="tanner"):
+                self._json(403, {"error": {"code": "session_logout_auth_required",
+                    "message": "A current Tanner session and session-bound CSRF token are required."}})
+                return
+            self.server.app_session_store.revoke(session)
+            body = json.dumps({"authenticated_rider": None}).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Set-Cookie", f"{SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0")
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+            return
         observation_prefix = "/api/development/observations/"
         proposal_prefix = "/api/development/proposals/"
         test_prefix = "/api/development/test-center/tests/"
@@ -405,7 +476,7 @@ class FawkesAppHandler(BaseHTTPRequestHandler):
                     "message": "The formal campaign review is unavailable right now."}})
             return
         if path.startswith(campaign_prefix) and "/attention/" in path and path.endswith("/decision"):
-            if not self._require_auth():
+            if not self._require_attention_decision_auth():
                 return
             remainder = path[len(campaign_prefix):-len("/decision")].strip("/")
             campaign_id, marker, attention_id = remainder.partition("/attention/")

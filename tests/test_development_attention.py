@@ -2,6 +2,7 @@ import json
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -35,7 +36,10 @@ class DevelopmentAttentionTests(unittest.TestCase):
             reversible=True, provider_code="tool.approval_required",
             protocol_binding={"method": "item/commandExecution/requestApproval",
                 "process_id": 4242, "item_id": "item-synthetic",
-                "approved_action_sha256": "f" * 64})
+                "approved_action_sha256": "f" * 64, "rider_id": "tanner",
+                "recipient_sha256": "r" * 64, "candidate_snapshot_id": "candidate-synthetic",
+                "candidate_record_sha256": "c" * 64, "mutation_digest_sha256": "m" * 64,
+                "authorized_scope_sha256": "s" * 64})
 
     def test_store_root_precedence_environment_and_historical_fallback(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -108,7 +112,7 @@ class DevelopmentAttentionTests(unittest.TestCase):
 
     def test_approve_once_is_bound_and_consumable_once(self):
         event = self.create()
-        result = self.store.decide(event["attention_id"], "approve_once", authenticated_rider=True)
+        result = self.store.decide(event["attention_id"], "approve_once", authenticated_rider=True, expected_identity=self.store._authority_binding(event))
         decision = result["decision"]
         self.assertTrue(decision["one_time"])
         self.assertFalse(decision["creates_continuing_authority"])
@@ -128,12 +132,15 @@ class DevelopmentAttentionTests(unittest.TestCase):
             blocked_action="run exact noop", why_required="typed approval",
             requested_authority="one exact action", protocol_binding={
                 "method": "item/commandExecution/requestApproval", "item_id": "item-a",
-                "approved_action_sha256": "a" * 64, "process_id": 4242})
-        binding = event["protocol_binding"]
-        identity = {"attention_id": event["attention_id"], "campaign_id": "campaign-a",
-            "invocation_id": "invocation-a", "method": binding["method"],
-            "item_id": binding["item_id"], "action_digest": binding["approved_action_sha256"],
-            "protocol_binding_sha256": event["protocol_binding_sha256"]}
+                "approved_action_sha256": "a" * 64, "process_id": 4242,
+                "rider_id": "tanner", "recipient_sha256": "r" * 64,
+                "candidate_snapshot_id": "candidate-a", "candidate_record_sha256": "c" * 64,
+                "mutation_digest_sha256": "m" * 64, "authorized_scope_sha256": "s" * 64})
+        identity = self.store._authority_binding(event)
+        for missing in (None, {}, {**identity, "campaign_id": ""}):
+            with self.assertRaisesRegex(PermissionError, "required and incomplete"):
+                self.store.decide(event["attention_id"], "approve_once",
+                    authenticated_rider=True, expected_identity=missing)
         with self.assertRaisesRegex(PermissionError, "identity tuple"):
             self.store.decide(event["attention_id"], "approve_once", authenticated_rider=True,
                               expected_identity={**identity, "campaign_id": "campaign-b"})
@@ -182,14 +189,13 @@ class DevelopmentAttentionTests(unittest.TestCase):
                 why_required="paired qualification", requested_authority="one exact action",
                 protocol_binding={"method": "item/commandExecution/requestApproval",
                     "item_id": "item-" + suffix, "approved_action_sha256": suffix * 64,
-                    "process_id": 4242})
+                    "process_id": 4242, "rider_id": "tanner", "recipient_sha256": "r" * 64,
+                    "candidate_snapshot_id": "candidate-" + suffix,
+                    "candidate_record_sha256": "c" * 64, "mutation_digest_sha256": "m" * 64,
+                    "authorized_scope_sha256": "s" * 64})
             binding = event["protocol_binding"]
             events[suffix] = event
-            identities[suffix] = {"attention_id": event["attention_id"],
-                "campaign_id": event["campaign_id"], "invocation_id": event["invocation_id"],
-                "method": binding["method"], "item_id": binding["item_id"],
-                "action_digest": binding["approved_action_sha256"],
-                "protocol_binding_sha256": event["protocol_binding_sha256"]}
+            identities[suffix] = self.store._authority_binding(event)
         with ThreadPoolExecutor(max_workers=2) as pool:
             denied = pool.submit(self.store.decide, events["b"]["attention_id"], "deny",
                 authenticated_rider=True, expected_identity=identities["b"])
@@ -216,21 +222,69 @@ class DevelopmentAttentionTests(unittest.TestCase):
             protocol_binding={"method": "item/fileChange/requestApproval", "process_id": 4242})
         detached = self.store.mark_process_detached(event["attention_id"])
         self.assertEqual(detached["consumer_state"], "unavailable")
-        with self.assertRaisesRegex(RuntimeError, "no longer live or durably resumable"):
-            self.store.decide(event["attention_id"], "approve_once", authenticated_rider=True)
+        with self.assertRaisesRegex(PermissionError, "identity tuple"):
+            self.store.decide(event["attention_id"], "approve_once", authenticated_rider=True, expected_identity=self.store._authority_binding(event))
         self.assertEqual(self.store.get(event["attention_id"])["state"], "needs_tanner")
 
+    def test_supported_method_without_complete_recovery_evidence_records_no_grant(self):
+        event = self.create()
+        detached = self.store.mark_process_detached(event["attention_id"])
+        self.assertEqual(detached["consumer_state"], "unavailable")
+        with self.assertRaisesRegex(RuntimeError, "no longer live"):
+            self.store.decide(event["attention_id"], "approve_once",
+                              authenticated_rider=True,
+                              expected_identity=self.store._authority_binding(event))
+        self.assertFalse(self.store.decisions.exists())
+
+    def test_decision_projection_failure_rolls_back_consumable_receipt(self):
+        event = self.create()
+        from src.runtime import development_attention as module
+        real_write = module._write_json_atomic
+        writes = {"count": 0}
+        def fail_event_projection(path, value):
+            writes["count"] += 1
+            if writes["count"] == 2:
+                raise OSError("injected event persistence failure")
+            return real_write(path, value)
+        with mock.patch.object(module, "_write_json_atomic", side_effect=fail_event_projection):
+            with self.assertRaises(OSError):
+                self.store.decide(event["attention_id"], "approve_once",
+                    authenticated_rider=True,
+                    expected_identity=self.store._authority_binding(event))
+        self.assertEqual(self.store.get(event["attention_id"])["state"], "needs_tanner")
+        self.assertEqual(list(self.store.decisions.glob("*.json")), [])
+
     def test_detached_exact_command_remains_boundedly_resumable(self):
+        protocol = {"method": "item/commandExecution/requestApproval", "process_id": 4242,
+            "item_id": "item-3", "rider_id": "tanner", "recipient_sha256": "r" * 64,
+            "candidate_snapshot_id": "candidate-3", "mutation_digest_sha256": "m" * 64,
+            "candidate_record_sha256": "c" * 64,
+            "authorized_scope_sha256": "s" * 64, "approved_action_sha256": "a" * 64}
+        # Recovery evidence is bound to the final protocol digest, so construct
+        # the event once to obtain that digest and replace it with a fresh identity.
+        preliminary = self.store.create(campaign_id="preliminary-campaign-3",
+            invocation_id="preliminary-worker-3", worker=self.worker,
+            kind="native_codex_approval_required", blocked_action="echo harmless prelim",
+            why_required="protected boundary", requested_authority="one command",
+            protocol_binding=protocol)
+        protocol["recovery_evidence"] = {"recovery_id": "recovery-3", "payload_sha256": "p" * 64,
+            "candidate_snapshot_id": "candidate-3", "mutation_digest_sha256": "m" * 64,
+            "authorized_scope_sha256": "s" * 64,
+            "protocol_binding_sha256": None}
+        # The evidence binds to the immutable protocol envelope excluding itself.
+        from src.runtime.development_attention import _digest
+        protocol["recovery_evidence"]["protocol_binding_sha256"] = _digest({
+            key: value for key, value in protocol.items() if key != "recovery_evidence"})
         event = self.store.create(campaign_id="synthetic-attention-campaign-3",
             invocation_id="synthetic-worker-3", worker=self.worker,
             kind="native_codex_approval_required", blocked_action="echo harmless",
             why_required="protected boundary", requested_authority="one command",
-            protocol_binding={"method": "item/commandExecution/requestApproval", "process_id": 4242},
+            protocol_binding=protocol,
             expires_in_seconds=3600, expiration_reason="candidate staleness",
             expiration_effect="request fails closed", can_request_again=True, work_lost=False)
         detached = self.store.mark_process_detached(event["attention_id"])
         self.assertEqual(detached["consumer_state"], "durably_resumable")
-        result = self.store.decide(event["attention_id"], "approve_once", authenticated_rider=True)
+        result = self.store.decide(event["attention_id"], "approve_once", authenticated_rider=True, expected_identity=self.store._authority_binding(event))
         self.assertEqual(result["decision"]["lifecycle_state"], "recorded_pending_consumption")
 
     def test_expiration_requires_justification_and_silence_never_approves(self):
@@ -252,8 +306,8 @@ class DevelopmentAttentionTests(unittest.TestCase):
             now=datetime.fromisoformat(event["expires_at"]) + timedelta(seconds=1))
         self.assertEqual(expired["state"], "expired")
         self.assertFalse(expired["creates_authority"])
-        with self.assertRaisesRegex(RuntimeError, "no longer awaiting"):
-            self.store.decide(event["attention_id"], "approve_once", authenticated_rider=True)
+        with self.assertRaisesRegex(PermissionError, "identity tuple"):
+            self.store.decide(event["attention_id"], "approve_once", authenticated_rider=True, expected_identity=self.store._authority_binding(event))
         replacement = self.store.create(campaign_id="expiring-valid",
             invocation_id="invocation-new", worker=self.worker,
             kind="native_codex_approval_required", blocked_action="noop",
@@ -266,7 +320,8 @@ class DevelopmentAttentionTests(unittest.TestCase):
     def test_live_action_completion_is_visible_and_execute_at_most_once(self):
         event = self.create()
         decision = self.store.decide(event["attention_id"], "approve_once",
-                                     authenticated_rider=True)["decision"]
+                                     authenticated_rider=True,
+                                     expected_identity=self.store._authority_binding(event))["decision"]
         self.store.consume_approve_once(decision["decision_id"], attention_id=event["attention_id"],
                                         invocation_id="synthetic-worker-1")
         completed = self.store.finish_live_action(decision["decision_id"], status="completed")
@@ -276,19 +331,53 @@ class DevelopmentAttentionTests(unittest.TestCase):
         self.assertEqual(self.store.finish_live_action(decision["decision_id"], status="completed"),
                          completed)
 
+    def test_expired_grant_cannot_be_consumed_and_split_consumption_rolls_forward(self):
+        event = self.create()
+        decision = self.store.decide(event["attention_id"], "approve_once",
+            authenticated_rider=True,
+            expected_identity=self.store._authority_binding(event))["decision"]
+        event_path = self.store.events / f"{event['attention_id']}.json"
+        expired = json.loads(event_path.read_text(encoding="utf-8"))
+        expired["expires_at"] = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+        from src.runtime.development_attention import _digest
+        expired.pop("record_sha256", None); expired["record_sha256"] = _digest(expired)
+        event_path.write_text(json.dumps(expired), encoding="utf-8")
+        with self.assertRaises(PermissionError):
+            self.store.consume_approve_once(decision["decision_id"],
+                attention_id=event["attention_id"], invocation_id="synthetic-worker-1")
+
+        expired["expires_at"] = None
+        expired.pop("record_sha256", None); expired["record_sha256"] = _digest(expired)
+        event_path.write_text(json.dumps(expired), encoding="utf-8")
+        real_write = __import__("src.runtime.development_attention", fromlist=["_write_json_atomic"])._write_json_atomic
+        calls = {"count": 0}
+        def fail_second_write(path, value):
+            calls["count"] += 1
+            if calls["count"] == 2:
+                raise OSError("injected split commit")
+            return real_write(path, value)
+        with mock.patch("src.runtime.development_attention._write_json_atomic",
+                        side_effect=fail_second_write):
+            with self.assertRaises(OSError):
+                self.store.consume_approve_once(decision["decision_id"],
+                    attention_id=event["attention_id"], invocation_id="synthetic-worker-1")
+        recovered = self.store.lifecycle(event["attention_id"])
+        self.assertTrue(recovered["decision"]["consumed"])
+        self.assertEqual(recovered["event"]["approval_outcome"], "consumed")
+
     def test_deny_and_cancel_are_exact_choices(self):
         event = self.create()
-        result = self.store.decide(event["attention_id"], "deny", authenticated_rider=True)
+        result = self.store.decide(event["attention_id"], "deny", authenticated_rider=True, expected_identity=self.store._authority_binding(event))
         self.assertEqual(result["event"]["state"], "deny")
         with self.assertRaises(RuntimeError):
-            self.store.decide(event["attention_id"], "cancel_campaign", authenticated_rider=True)
+            self.store.decide(event["attention_id"], "cancel_campaign", authenticated_rider=True, expected_identity=self.store._authority_binding(event))
 
     def test_unknown_or_unauthenticated_decision_fails_closed(self):
         event = self.create()
         with self.assertRaises(PermissionError):
-            self.store.decide(event["attention_id"], "approve_once", authenticated_rider=False)
+            self.store.decide(event["attention_id"], "approve_once", authenticated_rider=False, expected_identity=self.store._authority_binding(event))
         with self.assertRaises(ValueError):
-            self.store.decide(event["attention_id"], "approve_forever", authenticated_rider=True)
+            self.store.decide(event["attention_id"], "approve_forever", authenticated_rider=True, expected_identity=self.store._authority_binding(event))
 
     def test_typed_codex_event_is_detected_but_agent_prose_is_not(self):
         typed = json.dumps({"type": "tool.approval_required", "item": {
@@ -334,7 +423,7 @@ class DevelopmentAttentionTests(unittest.TestCase):
                             for item in project(attention_store=self.store,
                                               receipt_store=ComponentReceiptStore(
                                                   Path(self.temporary.name) / "empty-receipts"))))
-        self.store.decide(event["attention_id"], "deny", authenticated_rider=True)
+        self.store.decide(event["attention_id"], "deny", authenticated_rider=True, expected_identity=self.store._authority_binding(event))
         self.assertFalse(any(item["source_id"] == event["attention_id"]
                              for item in project(attention_store=self.store,
                                                receipt_store=ComponentReceiptStore(
@@ -349,8 +438,7 @@ class DevelopmentAttentionTests(unittest.TestCase):
         retained = reopened.get(event["attention_id"])
         self.assertEqual(retained["state"], "needs_tanner")
         self.assertEqual(retained["process_state"], "detached")
-        self.assertEqual([item["attention_id"] for item in reopened.list(pending_only=True)],
-                         [event["attention_id"]])
+        self.assertEqual(reopened.list(pending_only=True), [])
 
     def test_dead_or_pid_reused_consumer_is_non_actionable_and_records_nothing(self):
         event = self.create()
@@ -365,7 +453,8 @@ class DevelopmentAttentionTests(unittest.TestCase):
                 self.consumer_identities[4242] = identity
             with self.assertRaisesRegex(RuntimeError, "no longer live"):
                 self.store.decide(event["attention_id"], "approve_once",
-                                  authenticated_rider=True)
+                                  authenticated_rider=True,
+                                  expected_identity=self.store._authority_binding(event))
         self.assertIsNone(self.store.get(event["attention_id"])["decision_id"])
         self.assertFalse(self.store.decisions.exists())
 
@@ -386,7 +475,7 @@ class DevelopmentAttentionTests(unittest.TestCase):
         self.assertTrue(self.store.lifecycle(event["attention_id"])["event"]["actionable"])
         self.consumer_identities.clear()
         with self.assertRaisesRegex(RuntimeError, "no longer live"):
-            self.store.decide(event["attention_id"], "deny", authenticated_rider=True)
+            self.store.decide(event["attention_id"], "deny", authenticated_rider=True, expected_identity=self.store._authority_binding(event))
         stored = json.loads((self.store.events / f"{event['attention_id']}.json").read_text())
         self.assertEqual(stored["state"], "needs_tanner")
         self.assertIsNone(stored["decision_id"])

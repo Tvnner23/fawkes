@@ -229,6 +229,93 @@ class CodexDevelopmentCampaignTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
         self.fixture = CampaignFixture(Path(self.tmp.name))
 
+    def _reserved_recovery_fixture(self, campaign_id):
+        campaign = self.fixture.campaign
+        protocol = {"method": "item/commandExecution/requestApproval", "item_id": "recovery-item",
+            "approved_action_sha256": "a" * 64, "rider_id": "tanner",
+            "recipient_sha256": "r" * 64, "candidate_snapshot_id": "candidate-recovery",
+            "candidate_record_sha256": "c" * 64, "mutation_digest_sha256": "m" * 64,
+            "authorized_scope_sha256": "s" * 64}
+        protocol["recovery_evidence"] = {"recovery_id": "recovery-once",
+            "payload_sha256": "p" * 64, "candidate_snapshot_id": "candidate-recovery",
+            "mutation_digest_sha256": "m" * 64, "authorized_scope_sha256": "s" * 64,
+            "protocol_binding_sha256": _digest(protocol)}
+        attention = campaign.attention_store.create(campaign_id=campaign_id,
+            invocation_id="recovery-invocation", worker={"worker_id": BUILDER_ID, "role": "builder"},
+            kind="native_codex_approval_required", blocked_action="bounded recovery",
+            why_required="test recovery", requested_authority="execute once",
+            protocol_binding=protocol, expires_in_seconds=3600,
+            expiration_reason="staleness", expiration_effect="remains unperformed",
+            can_request_again=True, work_lost=False)
+        campaign.attention_store.mark_process_detached(attention["attention_id"])
+        attention = campaign.attention_store.get(attention["attention_id"])
+        decision = campaign.attention_store.decide(attention["attention_id"], "approve_once",
+            authenticated_rider=True,
+            expected_identity=campaign.attention_store._authority_binding(attention))["decision"]
+        continuation = "continuation-once"
+        campaign.attention_store.reserve_detached_continuation(decision["decision_id"],
+            attention_id=attention["attention_id"], invocation_id=attention["invocation_id"],
+            protocol_binding_sha256=attention["protocol_binding_sha256"],
+            continuation_id=continuation,
+            expected_binding=campaign.attention_store._authority_binding(attention))
+        base = {"schema_version": 1, "record_type": "codex_development_campaign",
+            "contract_version": CAMPAIGN_CONTRACT_VERSION, "campaign_id": campaign_id,
+            "instance_id": "fawkes", "objective": "recovery", "objective_sha256": "o" * 64,
+            "objective_mode": "repository_write", "acceptance_condition_ids": ["condition"],
+            "acceptance_conditions": {"condition": "condition"}, "allowed_scope": ["fixture.txt"],
+            "source_sections": [], "validation_commands": [],
+            "validation_policy": "intentionally_not_applicable", "validation_declaration": {},
+            "rider_authorization_reference": "test", "recovery_references": [{}],
+            "builder": {"worker_id": BUILDER_ID}, "reviewer_requirement": {}, "maximum_iterations": 3,
+            "iteration": 1, "status": "ready_for_bounded_continuation",
+            "active_builder_task_scope_id": None, "builder_runs": [], "reviews": [],
+            "review_requests": [], "review_transport_attempts": [], "cache_lifecycle_events": [],
+            "acceptance_satisfied": [], "needs_tanner": None,
+            "attention_event_ids": [attention["attention_id"]], "cancelled": False,
+            "automatic_promotion": False, "creates_authority": False, "state_revision": 1,
+            "created_at": "2026-01-01T00:00:00+00:00", "updated_at": "2026-01-01T00:00:00+00:00",
+            "events": []}
+        campaign.store.write(base)
+        return campaign, attention, decision, continuation
+
+    def test_reserved_recovery_executes_once_across_crash_repeat_and_concurrency(self):
+        campaign, attention, decision, continuation = self._reserved_recovery_fixture("recovery-crash")
+        calls = []
+        def runner(_evidence, *, idempotency_id):
+            calls.append(idempotency_id)
+            return {"idempotency_id": idempotency_id, "status": "completed"}
+        with patch.object(campaign.attention_store, "finish_detached_continuation",
+                          side_effect=OSError("injected completion projection crash")):
+            with self.assertRaises(OSError):
+                campaign.resume_reserved_continuation("recovery-crash", attention["attention_id"],
+                    decision["decision_id"], continuation, recovery_runner=runner)
+        recovered = campaign.resume_reserved_continuation("recovery-crash", attention["attention_id"],
+            decision["decision_id"], continuation, recovery_runner=runner)
+        self.assertEqual(recovered["campaign"]["status"], "ready")
+        self.assertEqual(len(calls), 1)
+        with self.assertRaises(PermissionError):
+            campaign.resume_reserved_continuation("recovery-crash", attention["attention_id"],
+                decision["decision_id"], continuation, recovery_runner=runner)
+        self.assertEqual(len(calls), 1)
+
+        campaign, attention, decision, continuation = self._reserved_recovery_fixture("recovery-concurrent")
+        entered = threading.Event(); release = threading.Event(); concurrent_calls = []
+        def blocking_runner(_evidence, *, idempotency_id):
+            concurrent_calls.append(idempotency_id); entered.set(); release.wait(2)
+            return {"idempotency_id": idempotency_id, "status": "completed"}
+        results = []
+        def resume():
+            try:
+                results.append(campaign.resume_reserved_continuation("recovery-concurrent",
+                    attention["attention_id"], decision["decision_id"], continuation,
+                    recovery_runner=blocking_runner))
+            except Exception as exc:
+                results.append(exc)
+        first = threading.Thread(target=resume); second = threading.Thread(target=resume)
+        first.start(); entered.wait(1); second.start(); release.set(); first.join(2); second.join(2)
+        self.assertEqual(len(concurrent_calls), 1)
+        self.assertEqual(sum(isinstance(item, dict) for item in results), 1)
+
     def test_contract_is_fixed_small_and_has_no_orchestration_or_promotion(self):
         self.assertEqual(MAX_ITERATIONS, 3)
         self.assertEqual(CAMPAIGN_ACCEPTANCE_CONTRACT["hard_limits"]["maximum_builder_iterations"], 3)
@@ -299,16 +386,33 @@ class CodexDevelopmentCampaignTests(unittest.TestCase):
 
     def test_native_approval_failure_becomes_exact_needs_tanner_and_deny_is_bounded(self):
         def approval_builder(payload):
+            invocation_id = "synthetic-native-approval-1"
+            snapshot = {"candidate_snapshot_id": "candidate-snapshot-attention-1",
+                        "record_sha256": "a" * 64, "file_count": 1,
+                        "total_byte_length": 1}
+            mutation_sha = "b" * 64
+            exact_action = {"method": "tool.approval_required",
+                            "action": "touch harmless.txt", "cwd": "/disposable"}
             return {"source_report_id": None, "package_id": None,
                 "presentation": {"status": "failed", "verification_status": "unverified",
                     "return_report_id": None,
                     "failure": {"code": "native_approval_required", "detail": "noninteractive stop"},
-                    "attention_request": {"invocation_id": "synthetic-native-approval-1",
+                    "attention_request": {"campaign_id": payload["campaign_id"],
+                        "invocation_id": invocation_id,
                         "blocked_action": "touch harmless.txt", "why_required": "workspace write",
                         "requested_authority": "write harmless.txt once",
                         "resources": ["harmless.txt"], "reversible": True,
-                        "provider_code": "tool.approval_required"}},
-                "transport_result": {"status": "failed"}}
+                        "provider_code": "tool.approval_required", "exact_action": exact_action,
+                        "protocol": {"version": "fixture-v1", "method": "tool.approval_required",
+                            "item_id": "item-attention-1",
+                            "approved_action_sha256": _digest(exact_action),
+                            "candidate_snapshot_id": snapshot["candidate_snapshot_id"],
+                            "candidate_record_sha256": snapshot["record_sha256"],
+                            "mutation_digest_sha256": mutation_sha,
+                            "authorized_scope_sha256": _digest(payload["allowed_scope"])}},
+                    },
+                "transport_result": {"status": "failed", "invocation_id": invocation_id,
+                    "candidate_snapshot": snapshot, "workspace_changes_sha256": mutation_sha}}
         attention = DevelopmentAttentionStore(Path(self.tmp.name) / "attention")
         campaign = CodexDevelopmentCampaign("fawkes", root=Path(self.tmp.name) / "approval-campaign",
             exchange=self.fixture.exchange, builder_runner=approval_builder,
@@ -319,9 +423,73 @@ class CodexDevelopmentCampaignTests(unittest.TestCase):
         event = attention.get(record["needs_tanner"]["attention_id"])
         self.assertEqual(event["blocked_action"], "touch harmless.txt")
         result = campaign.decide_attention(record["campaign_id"], event["attention_id"], "deny",
-                                           authenticated_rider=True)
+                                           authenticated_rider=True,
+                                           expected_identity=attention._authority_binding(event))
         self.assertEqual(result["campaign"]["status"], "failed_safe")
         self.assertFalse(result["decision"]["creates_continuing_authority"])
+
+    def test_worker_attention_lineage_is_complete_and_coordinator_bound(self):
+        payload = self.fixture.payload("attention-binding")
+        record = {"campaign_id": payload["campaign_id"], "allowed_scope": payload["allowed_scope"]}
+        snapshot = {"candidate_snapshot_id": "candidate-snapshot-bound",
+                    "record_sha256": "c" * 64}
+        exact_action = {"method": "tool.approval_required", "action": "bounded",
+                        "cwd": "/disposable"}
+        protocol = {"version": "fixture-v1", "method": exact_action["method"],
+            "item_id": "item-bound", "approved_action_sha256": _digest(exact_action),
+            "candidate_snapshot_id": snapshot["candidate_snapshot_id"],
+            "candidate_record_sha256": snapshot["record_sha256"],
+            "mutation_digest_sha256": "d" * 64,
+            "authorized_scope_sha256": _digest(payload["allowed_scope"])}
+        attention = {"campaign_id": payload["campaign_id"], "invocation_id": "invocation-bound",
+            "provider_code": exact_action["method"], "exact_action": exact_action,
+            "protocol": protocol}
+        transport = {"invocation_id": "invocation-bound", "candidate_snapshot": snapshot,
+                     "workspace_changes_sha256": "d" * 64}
+        self.assertEqual(
+            CodexDevelopmentCampaign._validated_worker_attention_binding(
+                record, attention, transport), protocol)
+        mutations = (
+            ("missing candidate", lambda a, _t: a["protocol"].pop("candidate_snapshot_id")),
+            ("altered action", lambda a, _t: a["protocol"].update(
+                {"approved_action_sha256": "e" * 64})),
+            ("neighboring candidate", lambda _a, t: t["candidate_snapshot"].update(
+                {"candidate_snapshot_id": "candidate-snapshot-neighbor"})),
+            ("neighboring invocation", lambda _a, t: t.update(
+                {"invocation_id": "invocation-neighbor"})),
+            ("altered scope", lambda a, _t: a["protocol"].update(
+                {"authorized_scope_sha256": "f" * 64})),
+        )
+        for label, mutate in mutations:
+            with self.subTest(label=label):
+                candidate_attention = json.loads(json.dumps(attention))
+                candidate_transport = json.loads(json.dumps(transport))
+                mutate(candidate_attention, candidate_transport)
+                with self.assertRaises(PermissionError):
+                    CodexDevelopmentCampaign._validated_worker_attention_binding(
+                        record, candidate_attention, candidate_transport)
+
+    def test_incomplete_worker_attention_never_creates_approvable_event(self):
+        def incomplete_builder(payload):
+            return {"source_report_id": None, "package_id": None,
+                "presentation": {"status": "failed", "verification_status": "unverified",
+                    "return_report_id": None,
+                    "failure": {"code": "native_approval_required", "detail": "bounded stop"},
+                    "attention_request": {"campaign_id": payload["campaign_id"],
+                        "invocation_id": "incomplete-attention", "blocked_action": "bounded",
+                        "why_required": "approval", "requested_authority": "once",
+                        "provider_code": "tool.approval_required", "protocol": {}}},
+                "transport_result": {"status": "failed", "invocation_id": "incomplete-attention"}}
+        attention = DevelopmentAttentionStore(Path(self.tmp.name) / "incomplete-attention")
+        campaign = CodexDevelopmentCampaign("fawkes",
+            root=Path(self.tmp.name) / "incomplete-attention-campaign",
+            exchange=self.fixture.exchange, builder_runner=incomplete_builder,
+            builder_modes={"repository_write"}, attention_store=attention)
+        record = campaign.create(self.fixture.payload("incomplete-attention"),
+                                 authenticated_rider=True)
+        self.assertEqual(record["status"], "failed_safe")
+        self.assertEqual(record["needs_tanner"]["failure_code"], "attention_lineage_mismatch")
+        self.assertEqual(list(attention.events.glob("*.json")), [])
 
     def test_repository_write_is_an_explicit_separate_builder_mode(self):
         campaign = CodexDevelopmentCampaign("fawkes", root=Path(self.tmp.name) / "real-scope",

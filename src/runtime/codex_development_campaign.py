@@ -19,7 +19,10 @@ from src.runtime.codex_development_handoff import (
 )
 from src.runtime.disposable_verifier import DisposableVerifierWorkspace
 from src.runtime.worker_exchange import WorkerExchange, _digest, body_free_references
-from src.runtime.autonomy_supervision import campaign_activity_projection, retain_needs_tanner_notification
+from src.runtime.autonomy_supervision import (
+    campaign_activity_projection, retain_campaign_terminal_notification,
+    retain_needs_tanner_notification,
+)
 from src.runtime.development_attention import DevelopmentAttentionStore
 from src.runtime.codex_worker_adapter import (
     DEFAULT_TIMEOUT_SECONDS, _runtime_state_root, minimal_subprocess_environment,
@@ -350,6 +353,39 @@ class CodexDevelopmentCampaign:
                 "reserve": reserve, "finish": finish, "complete": complete}
 
     @staticmethod
+    def _validated_worker_attention_binding(record, attention, transport_result):
+        """Bind a returned Worker Attention request to coordinator-owned lineage."""
+        if not isinstance(attention, dict) or not isinstance(transport_result, dict):
+            raise PermissionError("Worker Attention lineage is missing")
+        protocol = attention.get("protocol")
+        snapshot = transport_result.get("candidate_snapshot")
+        if not isinstance(protocol, dict) or not isinstance(snapshot, dict):
+            raise PermissionError("Worker Attention lineage is incomplete")
+        invocation_id = transport_result.get("invocation_id")
+        expected = {
+            "candidate_snapshot_id": snapshot.get("candidate_snapshot_id"),
+            "candidate_record_sha256": snapshot.get("record_sha256"),
+            "mutation_digest_sha256": transport_result.get("workspace_changes_sha256"),
+            "authorized_scope_sha256": _digest(record["allowed_scope"]),
+        }
+        required_protocol = ("version", "method", "item_id", "approved_action_sha256",
+                             *expected)
+        if (not isinstance(invocation_id, str) or not invocation_id
+                or attention.get("invocation_id") != invocation_id
+                or attention.get("campaign_id") != record["campaign_id"]
+                or any(not isinstance(protocol.get(key), str) or not protocol[key]
+                       for key in required_protocol)
+                or any(protocol.get(key) != value for key, value in expected.items())
+                or protocol.get("method") != attention.get("provider_code")):
+            raise PermissionError("Worker Attention lineage is missing or mismatched")
+        exact_action = attention.get("exact_action")
+        if (not isinstance(exact_action, dict)
+                or protocol["approved_action_sha256"] != _digest(exact_action)
+                or exact_action.get("method") != protocol["method"]):
+            raise PermissionError("Worker Attention action identity is missing or mismatched")
+        return {**protocol, **expected}
+
+    @staticmethod
     def _event(kind, detail=None):
         value = {"event_id": f"campaign-event-{uuid.uuid4()}", "kind": kind,
                  "created_at": _now(), "detail": detail or {}}
@@ -362,6 +398,7 @@ class CodexDevelopmentCampaign:
                    "updated_at": _now(), "events": [*record["events"], self._event(event_kind, event_detail)]}
         retained = self.store.write(updated, expected_revision=current_revision)
         retain_needs_tanner_notification(retained)
+        retain_campaign_terminal_notification(retained)
         needs = retained.get("needs_tanner")
         if needs and needs != record.get("needs_tanner"):
             from src.runtime.component_supervision import ComponentReceiptStore
@@ -463,12 +500,16 @@ class CodexDevelopmentCampaign:
         record = self.store.load(campaign_id)
         if record["cancelled"] or record["status"] in {"succeeded", "cancelled"}:
             raise RuntimeError("terminal campaign cannot request new authority")
+        binding = dict(protocol_binding or {})
+        binding.setdefault("rider_id", "tanner")
+        binding.setdefault("recipient_sha256", _digest(worker))
+        binding.setdefault("authorized_scope_sha256", _digest(record["allowed_scope"]))
         event = self.attention_store.create(
             campaign_id=campaign_id, invocation_id=invocation_id, worker=worker,
             kind=kind, blocked_action=blocked_action, why_required=why_required,
             requested_authority=requested_authority, resources=resources,
             reversible=reversible, provider_code=provider_code,
-            protocol_binding=protocol_binding, expires_in_seconds=expires_in_seconds,
+            protocol_binding=binding, expires_in_seconds=expires_in_seconds,
             expiration_reason=expiration_reason, expiration_effect=expiration_effect,
             can_request_again=can_request_again, work_lost=work_lost)
         needs = {"urgency": "urgent_blocking_flow", "reason": kind,
@@ -504,6 +545,90 @@ class CodexDevelopmentCampaign:
             status="ready_for_bounded_continuation" if choice == "approve_once" else "failed_safe",
             needs_tanner=None)
         return {"campaign": updated, **result}
+
+    def resume_reserved_continuation(self, campaign_id, attention_id, decision_id,
+                                     continuation_id, *, recovery_runner):
+        with _lock(self.store.root / f"{campaign_id}.json"):
+            return self._resume_reserved_continuation(
+                campaign_id, attention_id, decision_id, continuation_id,
+                recovery_runner=recovery_runner)
+
+    def _resume_reserved_continuation(self, campaign_id, attention_id, decision_id,
+                                      continuation_id, *, recovery_runner):
+        """Canonical post-restart entrypoint for one already-reserved continuation.
+
+        Recovery code is supplied by the canonical campaign runtime; persisted
+        data can select no callable and therefore creates no execution authority.
+        """
+        record = self.store.load(campaign_id)
+        event = self.attention_store.get(attention_id)
+        expected = self.attention_store._authority_binding(event)
+        if (event.get("campaign_id") != campaign_id
+                or record.get("status") != "ready_for_bounded_continuation"
+                or not callable(recovery_runner)):
+            raise PermissionError("campaign is not eligible for bounded recovery")
+        decision = self.attention_store.lifecycle(attention_id).get("decision") or {}
+        continuation = decision.get("continuation") or {}
+        if (decision.get("decision_id") != decision_id
+                or continuation.get("continuation_id") != continuation_id
+                or continuation.get("state") not in {
+                    "reserved", "executing", "outcome_recorded", "completed", "failed"}
+                or continuation.get("authority_binding") != expected):
+            raise PermissionError("reserved continuation binding is missing or mismatched")
+        if continuation.get("state") in {"completed", "failed"}:
+            status = continuation["state"]
+            current = self.store.load(campaign_id)
+            updated = self._update(current, event_kind="bounded_continuation_" + status,
+                event_detail={"attention_id": attention_id, "decision_id": decision_id,
+                              "continuation_id": continuation_id, "recovered_projection": True},
+                status="ready" if status == "completed" else "failed_safe", needs_tanner=None)
+            return {"campaign": updated, "decision": decision, "consumption": decision}
+        if (event.get("expires_at")
+                and datetime.fromisoformat(event["expires_at"]) <= datetime.now(timezone.utc)):
+            raise PermissionError("reserved continuation authority has expired")
+        if decision.get("consumed"):
+            if (decision.get("consumed_by_continuation_id") != continuation_id
+                    or decision.get("lifecycle_state") != "resumed"):
+                raise PermissionError("continuation consumption is stale or belongs to a neighbor")
+            consumed = decision
+        else:
+            consumed = self.attention_store.consume_approve_once(
+                decision_id, attention_id=attention_id, invocation_id=event["invocation_id"],
+                protocol_binding_sha256=event["protocol_binding_sha256"],
+                approved_action_sha256=(event.get("protocol_binding") or {}).get(
+                    "approved_action_sha256"), continuation_id=continuation_id,
+                expected_binding=expected)
+        idempotency_id = _digest({"campaign_id": campaign_id, "attention_id": attention_id,
+            "decision_id": decision_id, "continuation_id": continuation_id,
+            "candidate_snapshot_id": expected["candidate_snapshot_id"],
+            "mutation_digest_sha256": expected["mutation_digest_sha256"],
+            "authorized_scope_sha256": expected["authorized_scope_sha256"]})
+        claimed, execute = self.attention_store.begin_recovery_execution(
+            decision_id, continuation_id)
+        if execute:
+            try:
+                outcome = recovery_runner(
+                    (event.get("protocol_binding") or {})["recovery_evidence"],
+                    idempotency_id=idempotency_id)
+                if (not isinstance(outcome, dict)
+                        or outcome.get("idempotency_id") != idempotency_id
+                        or outcome.get("status") not in {"completed", "failed"}):
+                    raise ValueError("recovery owner returned an unbound idempotency result")
+                status = outcome["status"]
+            except Exception:
+                status = "failed"
+            claimed = self.attention_store.record_recovery_outcome(
+                decision_id, continuation_id, status=status)
+        else:
+            status = (claimed.get("continuation") or {}).get("outcome_status", "failed")
+        finished = self.attention_store.finish_detached_continuation(
+            decision_id, continuation_id, status=status)
+        current = self.store.load(campaign_id)
+        updated = self._update(current, event_kind="bounded_continuation_" + status,
+            event_detail={"attention_id": attention_id, "decision_id": decision_id,
+                          "continuation_id": continuation_id},
+            status="ready" if status == "completed" else "failed_safe", needs_tanner=None)
+        return {"campaign": updated, "decision": finished, "consumption": consumed}
 
     def _builder_task(self, record, iteration, correction):
         lines = [
@@ -684,6 +809,18 @@ class CodexDevelopmentCampaign:
             failure_code = (run.get("failure") or {}).get("code")
             attention = (presentation or {}).get("attention_request")
             if failure_code == "native_approval_required" and isinstance(attention, dict):
+                try:
+                    protocol_binding = self._validated_worker_attention_binding(
+                        current, attention, transport_result)
+                except PermissionError:
+                    return self._update(current, event_kind="builder_attention_rejected",
+                        status="failed_safe", builder_runs=runs,
+                        active_builder_task_scope_id=None,
+                        cache_lifecycle_events=cache_events,
+                        needs_tanner={"urgency": "urgent_blocking_flow",
+                            "reason": "builder_attention_lineage_invalid",
+                            "failure_code": "attention_lineage_mismatch",
+                            "decision_needed": "inspect bound Worker Attention evidence"})
                 current = self._update(current, event_kind="builder_return_requires_tanner",
                     builder_runs=runs, active_builder_task_scope_id=None,
                     cache_lifecycle_events=cache_events)
@@ -695,7 +832,8 @@ class CodexDevelopmentCampaign:
                     requested_authority=attention["requested_authority"],
                     resources=attention.get("resources", ()),
                     reversible=attention.get("reversible"),
-                    provider_code=attention.get("provider_code"))
+                    provider_code=attention.get("provider_code"),
+                    protocol_binding=protocol_binding)
             return self._update(current, event_kind="builder_failed_safe", status="failed_safe",
                 builder_runs=runs, active_builder_task_scope_id=None,
                 cache_lifecycle_events=cache_events,

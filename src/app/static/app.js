@@ -30,6 +30,7 @@ function setAuthError(message) {
   authError.classList.toggle('hidden', !message);
 }
 let token = '';
+let csrfToken = '';
 let conversationId = null;
 let developerData = null;
 let testCenterData = null;
@@ -660,7 +661,7 @@ async function request(url, options = {}) {
   const controller = typeof AbortController === 'function' ? new AbortController() : null;
   const timer = controller ? window.setTimeout(() => controller.abort(), 15000) : null;
   let response;
-  try { response = await fetch(url, { credentials: 'same-origin', ...options, signal: controller ? controller.signal : options.signal, headers: { ...headers(), ...(options.headers || {}) } }); }
+  try { response = await fetch(url, { credentials: 'same-origin', ...options, signal: controller ? controller.signal : options.signal, headers: { ...headers(), ...(csrfToken ? {'X-Fawkes-CSRF-Token': csrfToken} : {}), ...(options.headers || {}) } }); }
   catch (error) { const safe = new Error(error && error.name === 'AbortError' ? 'Fawkes did not answer within 15 seconds. Reload this exact decision link or check Fawkes Status.' : 'Fawkes could not be reached. Reload this exact decision link or check Fawkes Status.'); safe.code='request_unavailable'; throw safe; }
   finally { if (timer) window.clearTimeout(timer); }
   const data = await response.json().catch(() => ({ error: { message: 'Fawkes is unavailable right now.' } }));
@@ -1166,7 +1167,7 @@ function renderDeveloperSection() {
     [['approve_once','Approve Once','Allow only this exact action one time. No continuing authority.'],
      ['deny','Deny','Reject only this action. No authority is granted.'],
      ['cancel_campaign','Cancel Campaign','Stop this campaign safely. No authority is granted.']].forEach(([choice,label,consequence]) => {
-      const immutableIdentity={attention_id:attention.attention_id,campaign_id:attention.campaign_id,invocation_id:attention.invocation_id,method:(attention.protocol_binding||{}).method||null,item_id:(attention.protocol_binding||{}).item_id||null,action_digest:(attention.protocol_binding||{}).approved_action_sha256||null,protocol_binding_sha256:attention.protocol_binding_sha256||null};
+      const immutableIdentity={attention_id:attention.attention_id,campaign_id:attention.campaign_id,invocation_id:attention.invocation_id,rider_id:(attention.protocol_binding||{}).rider_id||'tanner',recipient_sha256:(attention.protocol_binding||{}).recipient_sha256||null,candidate_snapshot_id:(attention.protocol_binding||{}).candidate_snapshot_id||null,candidate_record_sha256:(attention.protocol_binding||{}).candidate_record_sha256||null,mutation_digest_sha256:(attention.protocol_binding||{}).mutation_digest_sha256||(attention.protocol_binding||{}).workspace_changes_sha256||null,authorized_scope_sha256:(attention.protocol_binding||{}).authorized_scope_sha256||(attention.protocol_binding||{}).allowed_scope_sha256||null,method:(attention.protocol_binding||{}).method||null,item_id:(attention.protocol_binding||{}).item_id||null,action_digest:(attention.protocol_binding||{}).approved_action_sha256||null,protocol_binding_sha256:attention.protocol_binding_sha256||null,expires_at:attention.expires_at||null};
       const box=element('div','attention-choice'); const button=element('button','',label); button.type='button';
       const humanTarget=qualificationLabel||'this Fawkes request';
       button.addEventListener('click', async()=>{if(window.confirm&&!window.confirm(`${label} for ${humanTarget}\n\n${consequence}`))return;button.disabled=true; try{const result=await request(`/api/development/codex-campaigns/${encodeURIComponent(immutableIdentity.campaign_id)}/attention/${encodeURIComponent(immutableIdentity.attention_id)}/decision`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({choice,identity:immutableIdentity})});exactAttentionState=result;renderDeveloperSection();}catch(error){showError(error.message);button.disabled=false;}});
@@ -1453,7 +1454,11 @@ authForm.addEventListener('submit', async event => {
   const credential = tokenInput.value.trim(); tokenInput.value = '';
   connect.disabled=true; connect.textContent='Connecting…'; setAuthError('');
   try {
-    await request('/api/session', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({credential})});
+    const session = await request('/api/session', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({credential})});
+    // Older local test servers may still return an empty 204. They can serve
+    // read-only views, but the server will reject decisions without this token.
+    csrfToken = session && session.authenticated_rider === 'tanner'
+      && typeof session.csrf_token === 'string' ? session.csrf_token : '';
     token=''; const connected=await loadChat(true); if(connected&&requestedAttentionId)await loadExactAttention();
   } catch(error) { setAuthError(error.message); auth.classList.remove('hidden'); }
   finally { connect.disabled=false; connect.textContent='Connect'; }

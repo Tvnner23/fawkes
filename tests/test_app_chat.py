@@ -1,6 +1,7 @@
 import unittest
 import base64
 import tempfile
+from io import BytesIO
 from email.message import Message
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -340,8 +341,50 @@ class FawkesAppHTTPTests(unittest.TestCase):
             session = handler.server.app_session_store.create()
             handler.headers["Cookie"] = f"{SESSION_COOKIE}={session}"
             self.assertTrue(handler._authorized())
+            self.assertTrue(handler.server.app_session_store.revoke(session))
+            self.assertFalse(handler._authorized())
+            self.assertFalse(BrowserSessionStore(directory).valid(session))
             handler.headers.replace_header("Cookie", f"{SESSION_COOKIE}=wrong")
             self.assertFalse(handler._authorized())
+
+    def test_attention_decision_requires_session_bound_csrf_not_bearer(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            handler = self._handler("Bearer correct-token")
+            handler.server.app_session_store = BrowserSessionStore(directory)
+            session, csrf = handler.server.app_session_store.create_bound()
+            handler.headers["Cookie"] = f"{SESSION_COOKIE}={session}"
+            handler.headers["X-Fawkes-CSRF-Token"] = csrf
+            self.assertTrue(handler._require_attention_decision_auth())
+            handler.headers.replace_header("X-Fawkes-CSRF-Token", "wrong")
+            handler._json = Mock()
+            self.assertFalse(handler._require_attention_decision_auth())
+            handler._json.assert_called_once()
+            handler.headers.replace_header("Cookie", f"{SESSION_COOKIE}=wrong")
+            handler.headers.replace_header("X-Fawkes-CSRF-Token", csrf)
+            self.assertFalse(handler._require_attention_decision_auth())
+
+    def test_post_logout_requires_csrf_and_durably_invalidates_session(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = BrowserSessionStore(directory)
+            session, csrf = store.create_bound()
+            handler = self._handler()
+            handler.server.app_session_store = store
+            handler.path = "/api/session/logout"
+            handler.headers["Cookie"] = f"{SESSION_COOKIE}={session}"
+            handler._json = Mock()
+            handler.do_POST()
+            handler._json.assert_called_once_with(403, unittest.mock.ANY)
+            self.assertTrue(store.valid(session))
+
+            handler.headers["X-Fawkes-CSRF-Token"] = csrf
+            handler.send_response = Mock(); handler.send_header = Mock(); handler.end_headers = Mock()
+            handler.wfile = BytesIO()
+            handler.do_POST()
+            handler.send_response.assert_called_once_with(200)
+            self.assertFalse(store.valid(session))
+            self.assertFalse(BrowserSessionStore(directory).valid(session))
+            self.assertIn(b'"authenticated_rider": null', handler.wfile.getvalue())
 
     @patch("src.runtime.development_attention.DevelopmentAttentionStore.lifecycle")
     def test_exact_attention_api_shape_matches_decision_client(self, lifecycle):

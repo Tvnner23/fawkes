@@ -7,13 +7,14 @@ logical notification delivery state; it grants no campaign or rider authority.
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import hashlib
+import fcntl
 import json
 import os
 import re
 import uuid
 
 from src.runtime.worker_exchange import _digest
-from src.runtime.development_attention import validate_attention_detail_url
+from src.runtime.development_attention import sanitize_action, validate_attention_detail_url
 
 
 PROGRESS_INTERVAL_SECONDS = 10_800
@@ -143,6 +144,18 @@ class RiderNotificationStore:
         temporary.replace(path)
         return value
 
+    def _with_delivery_claim_lock(self, notification_id):
+        self.root.mkdir(parents=True, exist_ok=True)
+        lock_path = self.root / f".{notification_id}.delivery.lock"
+        handle = lock_path.open("a+b")
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        return handle
+
+    @staticmethod
+    def _release_delivery_claim_lock(handle):
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        handle.close()
+
     def create_once(self, *, kind, campaign_id, state_key, message, evidence_refs):
         logical_id = "rider-notification-" + hashlib.sha256(
             f"{self.instance_id}\0{kind}\0{campaign_id}\0{state_key}".encode()).hexdigest()
@@ -158,37 +171,46 @@ class RiderNotificationStore:
 
     def deliver(self, record, sender, *, transport_name="unspecified"):
         projection_sha256 = hashlib.sha256(record["message"].encode("utf-8")).hexdigest()
-        for retained in record.get("attempts", []):
-            if retained.get("transport") != transport_name:
-                continue
-            if retained.get("status") == "in_flight":
-                attempts = [({**item, "status": "accepted_receipt_ambiguous",
-                              "retry_permitted": False}
-                             if item.get("attempt_id") == retained.get("attempt_id") else item)
-                            for item in record["attempts"]]
-                return self._write({**record, "attempts": attempts})
-            if retained.get("status") in {"delivered", "accepted_receipt_ambiguous"}:
-                return record
-            if (retained.get("status") == "failed"
-                    and retained.get("failure_code") == "ValueError"
-                    and retained.get("projection_sha256") == projection_sha256):
-                # A deterministic local projection rejection cannot improve by
-                # retrying unchanged content. A new projection digest may try once.
-                return record
-        attempt = {"attempt_id": f"notification-attempt-{uuid.uuid4()}",
-            "attempted_at": datetime.now(timezone.utc).isoformat(), "transport": transport_name,
-            "status": "in_flight", "projection_sha256": projection_sha256}
-        current = self._write({**record, "attempts": [*record["attempts"], attempt]})
+        claim_lock = self._with_delivery_claim_lock(record["notification_id"])
         try:
-            receipt = sender(record["message"])
-            attempt.update({"status": "delivered", "provider_receipt": receipt})
-            delivered = True
-        except Exception as exc:
-            attempt.update({"status": "failed", "failure_code": type(exc).__name__})
-            delivered = False
-        value = {**current, "attempts": [*record["attempts"], attempt],
-                 "delivered": record["delivered"] or delivered}
-        return self._write(value)
+            path = self._path(record["notification_id"])
+            current = json.loads(path.read_text(encoding="utf-8")) if path.exists() else record
+            for retained in current.get("attempts", []):
+                if retained.get("transport") != transport_name:
+                    continue
+                if retained.get("status") == "in_flight":
+                    attempts = [({**item, "status": "accepted_receipt_ambiguous",
+                                  "retry_permitted": False}
+                                 if item.get("attempt_id") == retained.get("attempt_id") else item)
+                                for item in current["attempts"]]
+                    return self._write({**current, "attempts": attempts})
+                if retained.get("status") in {"delivered", "accepted_receipt_ambiguous"}:
+                    return current
+                if (retained.get("status") == "failed"
+                        and retained.get("failure_code") == "ValueError"
+                        and retained.get("projection_sha256") == projection_sha256):
+                    # A deterministic local projection rejection cannot improve by
+                    # retrying unchanged content. A new projection digest may try once.
+                    return current
+            attempt = {"attempt_id": f"notification-attempt-{uuid.uuid4()}",
+                "attempted_at": datetime.now(timezone.utc).isoformat(), "transport": transport_name,
+                "status": "in_flight", "projection_sha256": projection_sha256}
+            current = self._write({**current,
+                "attempts": [*current.get("attempts", []), attempt]})
+            try:
+                receipt = sender(record["message"])
+                attempt.update({"status": "delivered", "provider_receipt": receipt})
+                delivered = True
+            except Exception as exc:
+                attempt.update({"status": "failed", "failure_code": type(exc).__name__})
+                delivered = False
+            attempts = [attempt if item.get("attempt_id") == attempt["attempt_id"] else item
+                        for item in current.get("attempts", [])]
+            value = {**current, "attempts": attempts,
+                     "delivered": current.get("delivered", False) or delivered}
+            return self._write(value)
+        finally:
+            self._release_delivery_claim_lock(claim_lock)
 
 
 class TannerAttentionTransportRegistry:
@@ -304,6 +326,27 @@ def retain_needs_tanner_notification(record, *, root=None, registry=None, enviro
                         "reference_id": record["campaign_id"],
                         "record_sha256": record["record_sha256"]}])
     active = registry if registry is not None else configured_attention_transports()
+    return active.dispatch(notification, store)["notification"] if active._transports else notification
+
+
+def retain_campaign_terminal_notification(record, *, root=None, registry=None, environment=None):
+    """Send one body-free completion/failure status notice, never authority."""
+    status = record.get("status")
+    if status not in {"succeeded", "cancelled", "failed_safe"}:
+        return None
+    campaign_id = sanitize_action(record.get("campaign_id"))[:160]
+    state_revision = str(record.get("state_revision", "unknown"))
+    outcome = "completed successfully" if status == "succeeded" else "stopped safely"
+    message = (f"Campaign: {campaign_id}\nFawkes {outcome}.\n"
+               f"Status: {status}; revision: {state_revision}.\n"
+               "This notice contains no source body, prompt, secret, or authority.")
+    store = RiderNotificationStore(record["instance_id"], root=root, environment=environment)
+    notification, _ = store.create_once(kind="campaign_terminal", campaign_id=campaign_id,
+        state_key=f"{status}:{state_revision}", message=message,
+        evidence_refs=[{"reference_type": "development_campaign",
+                        "reference_id": campaign_id,
+                        "record_sha256": record.get("record_sha256")}])
+    active = registry if registry is not None else configured_attention_transports(environment)
     return active.dispatch(notification, store)["notification"] if active._transports else notification
 
 

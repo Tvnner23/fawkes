@@ -2,13 +2,16 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import json
 import tempfile
+import threading
+import time
 import unittest
 
 from src.runtime.autonomy_supervision import (
     NOTIFICATION_ROOT, PROGRESS_INTERVAL_SECONDS, RiderActivityStore, RiderNotificationStore,
     TannerAttentionTransportRegistry,
     campaign_activity_projection, expiration_reminder_stage, notification_eligibility,
-    resolve_notification_root, retain_needs_tanner_notification,
+    resolve_notification_root, retain_campaign_terminal_notification,
+    retain_needs_tanner_notification,
 )
 
 
@@ -286,6 +289,7 @@ class AutonomySupervisionTests(unittest.TestCase):
                 state_key="exact-blocker", message="Fawkes needs Tanner.", evidence_refs=[])
             logical["attempts"] = [{"attempt_id": "attempt-existing",
                 "transport": "discord_webhook", "status": "accepted_receipt_ambiguous"}]
+            logical = store._write(logical)
             result = store.deliver(logical, lambda message: sent.append(message),
                                    transport_name="discord_webhook")
         self.assertEqual(sent, [])
@@ -323,6 +327,57 @@ class AutonomySupervisionTests(unittest.TestCase):
                 f"{logical['notification_id']}.json").read_text())
         self.assertEqual(delivered["attempts"][0]["provider_receipt"]["http_status"], 204)
         self.assertEqual(retained["attempts"][0]["status"], "delivered")
+
+    def test_nonterminal_attention_never_emits_terminal_notice(self):
+        record = self.record(status="tanner_escalation", needs={"reason": "decision required"})
+        record.update({"instance_id": "phoenix", "record_sha256": "a" * 64})
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertIsNone(retain_campaign_terminal_notification(record, root=directory))
+            self.assertEqual(list(Path(directory).rglob("*.json")), [])
+
+    def test_concurrent_delivery_uses_one_durable_claim(self):
+        calls = []
+        calls_lock = threading.Lock()
+        with tempfile.TemporaryDirectory() as directory:
+            store = RiderNotificationStore("phoenix", root=directory)
+            logical, _ = store.create_once(kind="needs_tanner", campaign_id="campaign-one",
+                state_key="exact", message="safe", evidence_refs=[])
+            def send(message):
+                with calls_lock:
+                    calls.append(message)
+                time.sleep(0.05)
+                return {"provider": "discord", "http_status": 204}
+            results = []
+            threads = [threading.Thread(target=lambda: results.append(
+                store.deliver(logical, send, transport_name="discord_webhook"))) for _ in range(2)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+            retained = json.loads((Path(directory) / "phoenix" /
+                f"{logical['notification_id']}.json").read_text())
+        self.assertEqual(calls, ["safe"])
+        self.assertEqual(len(retained["attempts"]), 1)
+        self.assertEqual(retained["attempts"][0]["status"], "delivered")
+        self.assertTrue(all(result["attempts"][0]["status"] == "delivered"
+                            for result in results))
+
+    def test_failed_claim_can_be_recovered_once(self):
+        calls = []
+        with tempfile.TemporaryDirectory() as directory:
+            store = RiderNotificationStore("phoenix", root=directory)
+            logical, _ = store.create_once(kind="needs_tanner", campaign_id="campaign-one",
+                state_key="exact", message="safe", evidence_refs=[])
+            failed = store.deliver(logical,
+                lambda message: (_ for _ in ()).throw(RuntimeError("offline")),
+                transport_name="discord_webhook")
+            recovered = store.deliver(failed,
+                lambda message: calls.append(message) or {"http_status": 204},
+                transport_name="discord_webhook")
+        self.assertEqual(calls, ["safe"])
+        self.assertTrue(recovered["delivered"])
+        self.assertEqual([item["status"] for item in recovered["attempts"]],
+                         ["failed", "delivered"])
 
     def test_acceptance_followed_by_receipt_failure_stays_in_flight_and_deduplicates(self):
         sent = []
