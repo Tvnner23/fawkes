@@ -118,6 +118,7 @@ def prepare_wsl_review_package(*, exchange, campaign_record, candidate_snapshot,
     exact_ref = {"reference_type": "worker_exchange_report", "reference_id": builder["report_id"],
                  "sha256": builder["record_sha256"]}
     mutation, artifacts = _exact_builder_evidence(exchange, campaign_record, workspace)
+    retention = run["candidate_retention_receipt"]
     sections = [
         {"section_id": "campaign-objective", "title": "Exact campaign objective", "content": campaign_record["objective"]},
         {"section_id": "acceptance-conditions", "title": "Exact acceptance conditions",
@@ -134,6 +135,10 @@ def prepare_wsl_review_package(*, exchange, campaign_record, candidate_snapshot,
         {"section_id": "application-receipt", "title": "Exact authoritative apply receipt",
          "content": json.dumps(mutation["application_evidence"], sort_keys=True,
                                ensure_ascii=False, separators=(",", ":"))},
+        {"section_id": "candidate-retention-receipt",
+         "title": "Exact pre-review candidate-retention receipt",
+         "content": json.dumps(retention, sort_keys=True, ensure_ascii=False,
+                               separators=(",", ":"))},
         {"section_id": "validation-evidence", "title": "Exact coordinator validation evidence",
          "content": json.dumps(run.get("validation_evidence", []), sort_keys=True, ensure_ascii=False, separators=(",", ":"))},
         {"section_id": "candidate-snapshot", "title": "Exact frozen candidate snapshot identity",
@@ -157,7 +162,6 @@ def prepare_wsl_review_package(*, exchange, campaign_record, candidate_snapshot,
     package_authority = {**authority, "recipient_worker_id": recipient["worker_id"]}
     package = exchange.compose_package(report_id=report["report_id"], recipient=recipient,
         authority=package_authority, included_section_ids=[item["section_id"] for item in sections])
-    retention = run["candidate_retention_receipt"]
     transport = {**package_authority, "adapter_id": WSL_ADAPTER_ID, "package_id": package["package_id"],
         "recipient_environment_id": WSL_ENVIRONMENT_ID, "campaign_id": campaign_record["campaign_id"],
         "builder_return_report_id": builder["report_id"], "builder_return_sha256": builder["record_sha256"],

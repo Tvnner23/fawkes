@@ -1,4 +1,5 @@
 import hashlib
+import copy
 import json
 import os
 import subprocess
@@ -207,6 +208,42 @@ class WslFormalReviewerTests(unittest.TestCase):
         self.assertTrue(WSL_ADAPTER_PROMOTED)
         self.assertEqual(WSL_REVIEWER_REFERENCE["transport_status"], "promoted_bounded_read_only")
         self.assertEqual(len(WSL_QUALIFICATION_CONTRACT["hard_invariants"]), 16)
+
+    def test_wsl_package_carries_exact_candidate_retention_receipt(self):
+        package = self.exchange._load("packages", self.prepared["package_id"])
+        sections = {item["section_id"]: item for item in package["included_sections"]}
+        self.assertIn("candidate-retention-receipt", sections)
+        expected = self.campaign["builder_runs"][-1]["candidate_retention_receipt"]
+        self.assertEqual(json.loads(sections["candidate-retention-receipt"]["content"]), expected)
+        self.assertEqual(self.prepared["transport_authority"]
+                         ["candidate_retention_receipt_sha256"], expected["record_sha256"])
+
+    def test_wsl_package_rejects_missing_and_mismatched_retention_lineage(self):
+        def rejected(change):
+            campaign = copy.deepcopy(self.campaign)
+            change(campaign["builder_runs"][-1])
+            with self.assertRaises((KeyError, ValueError, PermissionError)):
+                prepare_wsl_review_package(exchange=self.exchange, campaign_record=campaign,
+                    candidate_snapshot=self.provenance, workspace=self.workspace)
+
+        rejected(lambda run: run.pop("candidate_retention_receipt"))
+        for field, value in (("campaign_id", "neighbor-campaign"),
+                             ("package_id", "worker-package-neighbor"),
+                             ("allowed_scope_sha256", "1" * 64),
+                             ("mutation_manifest_sha256", "2" * 64)):
+            def alter(run, field=field, value=value):
+                receipt = run["candidate_retention_receipt"]
+                receipt[field] = value
+                receipt["record_sha256"] = _digest(
+                    {key: item for key, item in receipt.items() if key != "record_sha256"})
+            rejected(alter)
+        def candidate_neighbor(run):
+            receipt = run["candidate_retention_receipt"]
+            receipt["candidate_snapshot"] = {**receipt["candidate_snapshot"],
+                "candidate_snapshot_id": "candidate-snapshot-neighbor"}
+            receipt["record_sha256"] = _digest(
+                {key: item for key, item in receipt.items() if key != "record_sha256"})
+        rejected(candidate_neighbor)
 
     def test_provider_schema_uses_historical_keywords_while_semantics_bind_exact_lineage(self):
         package = self.exchange._load("packages", self.prepared["package_id"])
