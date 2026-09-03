@@ -8,7 +8,9 @@ snapshot-policy-v2 candidate. Its older promotion remains historical evidence.
 
 from datetime import datetime, timezone
 from pathlib import Path
+import base64
 import copy
+import difflib
 import hashlib
 import json
 import os
@@ -24,6 +26,7 @@ from src.runtime.codex_worker_adapter import (
 )
 from src.runtime.disposable_verifier import candidate_manifest, materialize_candidate
 from src.runtime.worker_exchange import WorkerExchange, _authority, _digest, body_free_references
+from src.runtime.evidence_eligibility import classify_reviewer_source_evidence
 
 
 WRITE_ADAPTER_ID = "codex-cli-exec-local-write"
@@ -153,23 +156,34 @@ def _relative_scopes(values):
 
 
 def _workspace_snapshot(root):
+    """Return an exact, deterministic tree snapshot without following links."""
     root = Path(root).resolve()
     files = {}
+    regular_files = 0
     for path in sorted(root.rglob("*")):
         relative = path.relative_to(root)
         if any(part in EXCLUDED_PARTS for part in relative.parts):
             continue
         if path.is_symlink():
             files[relative.as_posix()] = {"file_type": "symlink",
-                                         "target": os.readlink(path)}
+                                         "target": os.readlink(path),
+                                         "mode": path.lstat().st_mode & 0o777}
+            continue
+        if path.is_dir():
+            files[relative.as_posix()] = {"file_type": "directory",
+                                         "mode": path.stat().st_mode & 0o777}
             continue
         if not path.is_file():
+            files[relative.as_posix()] = {"file_type": "other",
+                                         "mode": path.stat().st_mode & 0o777}
             continue
-        if len(files) >= MAX_TRACKED_FILES:
+        if regular_files >= MAX_TRACKED_FILES:
             raise ValueError("workspace exceeds bounded write snapshot file limit")
+        regular_files += 1
         data = path.read_bytes()
-        files[relative.as_posix()] = {"sha256": hashlib.sha256(data).hexdigest(),
-                                     "byte_length": len(data)}
+        files[relative.as_posix()] = {"file_type": "regular",
+            "sha256": hashlib.sha256(data).hexdigest(), "byte_length": len(data),
+            "mode": path.stat().st_mode & 0o777}
     return files
 
 
@@ -184,8 +198,126 @@ def _diff(before, after):
     return changes
 
 
+def _capture_frozen_tree(root, snapshot, scopes):
+    """Capture every baseline preimage once, before the execution copy is mutable."""
+    root = Path(root).resolve()
+    captured = {}
+    total = 0
+    for relative, metadata in sorted(snapshot.items()):
+        if not _in_scope(relative, scopes):
+            continue
+        item = {"metadata": metadata, "content": None}
+        if metadata.get("file_type") == "regular":
+            data = (root / relative).read_bytes()
+            total += len(data)
+            if total > MAX_APPLY_BYTES:
+                raise ValueError("authorized frozen preimages exceed bounded evidence limit")
+            item["content"] = data
+        captured[relative] = item
+    return captured
+
+
+def _canonical_node_evidence(metadata, content):
+    """Bind presence, kind, mode and exact body/target without hiding bytes."""
+    if metadata is None:
+        header = {"schema": "fawkes.filesystem_node.v1", "state": "absent",
+                  "file_type": None, "mode": None, "body_length": 0,
+                  "body_sha256": hashlib.sha256(b"").hexdigest()}
+        body = b""
+    else:
+        kind = metadata.get("file_type")
+        if kind not in {"regular", "directory", "symlink"}:
+            raise ValueError("unsupported filesystem node type")
+        if kind == "regular":
+            body = content
+        elif kind == "symlink":
+            body = metadata.get("target", "").encode("utf-8")
+        else:
+            body = b""
+        if body is None:
+            raise ValueError("filesystem node body unavailable")
+        header = {"schema": "fawkes.filesystem_node.v1", "state": "present",
+                  "file_type": kind, "mode": metadata.get("mode"),
+                  "body_length": len(body), "body_sha256": hashlib.sha256(body).hexdigest()}
+    encoded_header = json.dumps(header, sort_keys=True, separators=(",", ":")).encode("ascii")
+    # The decimal header length makes the following raw bytes unambiguous while
+    # leaving them visible to the eligibility classifier.
+    encoded = (b"FAWKES-FILESYSTEM-NODE-V1\n" + str(len(encoded_header)).encode("ascii") +
+               b"\n" + encoded_header + body)
+    return encoded, header
+
+
+def _exact_change_evidence(candidate_root, changes, captured, *, limit=MAX_APPLY_BYTES):
+    evidence=[]
+    for change in sorted(changes, key=lambda item: item["path"]):
+        path=change["path"];before=captured.get(path)
+        target=Path(candidate_root)/path
+        before_bytes=None if before is None else before["content"]
+        after_metadata=change.get("after") or {}
+        after_bytes=(target.read_bytes() if after_metadata.get("file_type") == "regular" else None)
+        expected_before = change.get("before") or {}
+        expected_after = change.get("after") or {}
+        classify_before, before_binding = _canonical_node_evidence(
+            change.get("before"), before_bytes)
+        classify_after, after_binding = _canonical_node_evidence(
+            change.get("after"), after_bytes)
+        expected_before = {"sha256": hashlib.sha256(classify_before).hexdigest(),
+                           "byte_length": len(classify_before)}
+        expected_after = {"sha256": hashlib.sha256(classify_after).hexdigest(),
+                          "byte_length": len(classify_after)}
+        if expected_before is not None and classify_before is None:
+            raise ValueError("frozen preimage unavailable within evidence bound: " + path)
+        # Classification is deliberately completed before an evidence item,
+        # body, or diff is constructed for this changed path.
+        receipt=classify_reviewer_source_evidence(path=path,before=classify_before,after=classify_after,
+            expected_before=expected_before,expected_after=expected_after,evidence_limit=limit)
+        if not receipt["disclosure_allowed"]:
+            raise PermissionError("reviewer_source_evidence_blocked:"+receipt["classification"]+":"+path)
+        item={"path":path,"status":change["status"],"eligibility_receipt":receipt,
+            "before_type":None if change.get("before") is None else change["before"].get("file_type"),
+            "after_type":None if change.get("after") is None else change["after"].get("file_type"),
+            "before_symlink_target":None if change.get("before") is None else change["before"].get("target"),
+            "after_symlink_target":None if change.get("after") is None else change["after"].get("target"),
+            "before_node_binding":before_binding,"after_node_binding":after_binding,
+            "before_mode":None if change.get("before") is None else change["before"].get("mode"),
+            "after_mode":None if change.get("after") is None else change["after"].get("mode"),
+            "before_base64":None if before_bytes is None else base64.b64encode(before_bytes).decode(),
+            "after_base64":None if after_bytes is None else base64.b64encode(after_bytes).decode()}
+        try:
+            left=[] if before_bytes is None else before_bytes.decode("utf-8").splitlines(keepends=True)
+            right=[] if after_bytes is None else after_bytes.decode("utf-8").splitlines(keepends=True)
+            item["text_diff"]="".join(difflib.unified_diff(left,right,fromfile="a/"+path,tofile="b/"+path,lineterm="\n"))
+            item["binary_delta"] = None
+        except UnicodeDecodeError:
+            item["text_diff"]=None;item["binary_delta"]={"encoding":"complete_base64_preimage_postimage"}
+        evidence.append(item)
+    return evidence, _digest(evidence)
+
+
 def _in_scope(path, scopes):
-    return any(path == scope or path.startswith(scope + "/") for scope in scopes)
+    return any(
+        (path == scope or path.startswith(scope + "/")) if isinstance(scope, str) else
+        (path == scope["path"] or
+         (scope["kind"] == "directory" and path.startswith(scope["path"] + "/")))
+        for scope in scopes)
+
+
+def _scope_contract(scopes, baseline):
+    return [{"path": scope,
+             "kind": ("directory" if (baseline.get(scope) or {}).get("file_type") == "directory"
+                      else "exact_file")}
+            for scope in scopes]
+
+
+def _change_in_scope(change, scopes):
+    if _in_scope(change["path"], scopes):
+        return True
+    # Missing parents for an authorized exact new file are structural only;
+    # they do not turn the exact-file grant into a subtree grant.
+    return ((change.get("after") or {}).get("file_type") == "directory" and
+            change["status"] == "added" and
+            any(scope["kind"] == "exact_file" and
+                scope["path"].startswith(change["path"] + "/") for scope in scopes))
 
 
 def _remove_new_python_caches(root, before):
@@ -221,12 +353,22 @@ def _regular_file_state(path):
     if not path.is_file():
         return {"file_type": "other"}
     data = path.read_bytes()
-    return {"sha256": hashlib.sha256(data).hexdigest(), "byte_length": len(data)}
+    return {"sha256": hashlib.sha256(data).hexdigest(), "byte_length": len(data),
+            "mode": path.stat().st_mode & 0o777}
 
 
 def _base_files(provenance):
     return {item["path"]: {"sha256": item["sha256"], "byte_length": item["byte_length"]}
             for item in provenance["files"]}
+
+
+def _content_state(metadata):
+    if metadata is None:
+        return None
+    if metadata.get("file_type") != "regular":
+        return metadata
+    return {"sha256": metadata["sha256"], "byte_length": metadata["byte_length"],
+            "mode": metadata["mode"]}
 
 
 def _validate_candidate_changes(changes, scopes):
@@ -235,30 +377,44 @@ def _validate_candidate_changes(changes, scopes):
     total = 0
     for change in changes:
         path = change["path"]
-        if not _in_scope(path, scopes):
+        if not _change_in_scope(change, scopes):
             raise PermissionError("candidate contains out-of-scope mutation: " + path)
+        before = change.get("before")
+        after = change.get("after")
         if change["status"] == "deleted":
             raise PermissionError("file deletion was not explicitly authorized: " + path)
-        if change["status"] == "added" and path not in scopes:
-            raise PermissionError("new file was not explicitly authorized: " + path)
-        after = change.get("after") or {}
-        if after.get("file_type") in {"symlink", "other"} or "sha256" not in after:
+        if after.get("file_type") == "directory" and change["status"] == "added":
+            continue
+        if (after.get("file_type") != "regular" or
+                before is not None and before.get("file_type") != "regular"):
             raise PermissionError("candidate mutation is not a regular file: " + path)
+        if before is not None and before.get("mode") != after.get("mode"):
+            raise PermissionError("candidate mode mutation is not an apply-supported type: " + path)
         total += after["byte_length"]
     if total > MAX_APPLY_BYTES:
         raise ValueError("validated apply exceeds bounded byte limit")
 
 
+def _applyable_changes(changes):
+    return [change for change in changes
+            if (change.get("after") or {}).get("file_type") == "regular"]
+
+
 def _apply_validated_changes(*, authoritative_root, candidate_root, base, changes,
-                             replace=os.replace, before_replace=None):
+                             replace=os.replace, before_replace=None,
+                             frozen_preimages=None):
     """Apply a fully validated regular-file set, rolling back any partial result."""
     authoritative_root = Path(authoritative_root).resolve()
     candidate_root = Path(candidate_root).resolve()
     drift = []
     for change in changes:
+        frozen = None if frozen_preimages is None else frozen_preimages.get(change["path"])
+        expected = base.get(change["path"])
+        if expected is not None and frozen is not None:
+            expected = {**expected, "mode": frozen["metadata"]["mode"]}
         live = _regular_file_state(authoritative_root / change["path"])
-        if live != base.get(change["path"]):
-            drift.append({"path": change["path"], "expected": base.get(change["path"]), "actual": live})
+        if live != expected:
+            drift.append({"path": change["path"], "expected": expected, "actual": live})
     if drift:
         raise RuntimeError("target_file_drift:" + json.dumps(drift, sort_keys=True))
 
@@ -296,21 +452,41 @@ def _apply_validated_changes(*, authoritative_root, candidate_root, base, change
             os.close(descriptor)
             temporary = Path(temporary)
             temporary.write_bytes(data)
-            os.chmod(temporary, target.stat().st_mode if target.exists() else 0o644)
-            originals[relative] = target.read_bytes() if target.exists() else None
+            frozen = None if frozen_preimages is None else frozen_preimages.get(relative)
+            frozen_metadata = {} if frozen is None else frozen.get("metadata") or {}
+            os.chmod(temporary, change["after"]["mode"])
+            # Production callers supply the immutable baseline-owned bytes.
+            # The fallback retains helper compatibility outside that path.
+            if frozen_preimages is None:
+                original = (None if not target.exists() else {
+                    "exists": True, "content": target.read_bytes(),
+                    "mode": target.stat().st_mode & 0o777})
+            else:
+                original = (None if frozen is None else {
+                    "exists": True, "content": frozen.get("content"),
+                    "mode": frozen_metadata.get("mode")})
+            originals[relative] = original
             staged.append((relative, temporary, target))
 
         # Recheck every target after all replacement bytes are staged.
         for change in changes:
             live = _regular_file_state(authoritative_root / change["path"])
-            if live != base.get(change["path"]):
+            frozen = None if frozen_preimages is None else frozen_preimages.get(change["path"])
+            expected = base.get(change["path"])
+            if expected is not None and frozen is not None:
+                expected = {**expected, "mode": frozen["metadata"]["mode"]}
+            if live != expected:
                 raise RuntimeError("target_file_drift_before_replace:" + change["path"])
 
         for index, (relative, temporary, target) in enumerate(staged):
             if before_replace is not None:
                 before_replace(index, relative, target)
             # Catch drift occurring between the set-level check and this target.
-            if _regular_file_state(target) != base.get(relative):
+            frozen = None if frozen_preimages is None else frozen_preimages.get(relative)
+            expected = base.get(relative)
+            if expected is not None and frozen is not None:
+                expected = {**expected, "mode": frozen["metadata"]["mode"]}
+            if _regular_file_state(target) != expected:
                 raise RuntimeError("target_file_drift_during_apply:" + relative)
             replace(temporary, target)
             applied.append(relative)
@@ -323,7 +499,7 @@ def _apply_validated_changes(*, authoritative_root, candidate_root, base, change
             if actual != change["after"]:
                 raise RuntimeError("post_apply_digest_mismatch:" + change["path"])
             resulting.append({"path": change["path"], "sha256": actual["sha256"],
-                              "byte_length": actual["byte_length"]})
+                              "byte_length": actual["byte_length"], "mode": actual["mode"]})
         return {"status": "applied", "applied_paths": applied,
                 "created_directories": [path.relative_to(authoritative_root).as_posix()
                                         for path in created_directories],
@@ -343,13 +519,14 @@ def _apply_validated_changes(*, authoritative_root, candidate_root, base, change
                         "reason": "rollback_target_drift", "expected_applied": expected,
                         "actual": live, "disposition": "preserved"})
                     continue
-                if original is None:
+                if original is None or original.get("exists") is not True:
                     target.unlink(missing_ok=True)
                 else:
                     descriptor, rollback_name = tempfile.mkstemp(prefix=".fawkes-rollback-", dir=target.parent)
                     os.close(descriptor)
                     rollback = Path(rollback_name)
-                    rollback.write_bytes(original)
+                    rollback.write_bytes(original["content"])
+                    os.chmod(rollback, original["mode"])
                     os.replace(rollback, target)
             except Exception as exc:
                 rollback_errors.append({"path": relative, "error": type(exc).__name__})
@@ -376,13 +553,14 @@ def _rollback_applied_changes(authoritative_root, originals, applied_states, *, 
             conflicts.append({"path": relative, "reason": "rollback_target_drift",
                 "expected_applied": expected, "actual": live, "disposition": "preserved"})
             continue
-        if original is None:
+        if original is None or original.get("exists") is not True:
             target.unlink(missing_ok=True)
         else:
             descriptor, name = tempfile.mkstemp(prefix=".fawkes-evidence-rollback-", dir=target.parent)
             os.close(descriptor)
             temporary = Path(name)
-            temporary.write_bytes(original)
+            temporary.write_bytes(original["content"])
+            os.chmod(temporary, original["mode"])
             replace(temporary, target)
         restored.append(relative)
     if conflicts:
@@ -514,19 +692,27 @@ class CodexWriteBuilderAdapter(CodexExecWorkerAdapter):
             for path in sorted(self.workspace.rglob("*")):
                 if path.is_symlink():
                     relative = path.relative_to(self.workspace).as_posix()
-                    if _in_scope(relative, scopes):
+                    if any(relative == scope or relative.startswith(scope + "/") or
+                           scope.startswith(relative + "/") for scope in scopes):
                         authoritative_symlinks.append(relative)
             if authoritative_symlinks:
                 return fail("preexisting_symlink_forbidden", ", ".join(authoritative_symlinks), [])
             candidate_temporary = tempfile.TemporaryDirectory(prefix="fawkes-write-candidate-")
+            baseline_root = Path(candidate_temporary.name) / "baseline"
             candidate_root = Path(candidate_temporary.name) / "candidate"
-            provenance = materialize_candidate(self.workspace, candidate_root)
-            base = _base_files(provenance)
-            before = _workspace_snapshot(candidate_root)
+            provenance = materialize_candidate(self.workspace, baseline_root)
+            before = _workspace_snapshot(baseline_root)
+            scope_contract = _scope_contract(scopes, before)
+            evidence_before = _capture_frozen_tree(baseline_root, before, scope_contract)
+            # Execution receives a distinct writable copy. The baseline is
+            # never passed to the worker and remains the sole preimage owner.
+            shutil.copytree(baseline_root, candidate_root, symlinks=True)
+            base = {path: _content_state(metadata) for path, metadata in before.items()}
         except ValueError as exc:
             return fail("workspace_snapshot_capacity_exceeded", str(exc), [])
         preexisting_symlinks = [path for path, metadata in before.items()
-                                if metadata.get("file_type") == "symlink"]
+                                if metadata.get("file_type") == "symlink" and
+                                _in_scope(path, scope_contract)]
         if preexisting_symlinks:
             return fail("preexisting_symlink_forbidden", ", ".join(preexisting_symlinks), [])
         prompt = self._write_prompt(package_path, package_sha, package, recipient, write_task,
@@ -568,7 +754,8 @@ class CodexWriteBuilderAdapter(CodexExecWorkerAdapter):
         changes = [item for item in changes if item["path"] != transport_output]
         symlink_changes = [item["path"] for item in changes
             if (item.get("after") or {}).get("file_type") == "symlink"]
-        out_of_scope = [item["path"] for item in changes if not _in_scope(item["path"], scopes)]
+        out_of_scope = [item["path"] for item in changes
+                        if not _change_in_scope(item, scope_contract)]
         if completed.returncode != 0:
             return fail("client_failure", f"exit {completed.returncode}", changes,
                 process_metadata=_process_metadata(completed))
@@ -591,7 +778,14 @@ class CodexWriteBuilderAdapter(CodexExecWorkerAdapter):
             return fail("malformed_or_unbound_response", str(exc), changes,
                 process_metadata=_process_metadata(completed), cache_cleanup=cache_cleanup)
         try:
-            _validate_candidate_changes(changes, scopes)
+            exact_change_evidence, exact_change_evidence_sha256 = _exact_change_evidence(
+                candidate_root, changes, evidence_before)
+            _validate_candidate_changes(changes, scope_contract)
+            apply_changes = _applyable_changes(changes)
+            normalized_apply_changes = [{**change,
+                "before": _content_state(change.get("before")),
+                "after": _content_state(change.get("after"))}
+                for change in apply_changes]
             application_intent = {"schema_version": 1,
                 "record_type": "codex_validated_apply_record", "status": "validated_staged",
                 "instance_id": package["instance_id"], "campaign_id": campaign_id,
@@ -605,8 +799,9 @@ class CodexWriteBuilderAdapter(CodexExecWorkerAdapter):
             application_intent["record_sha256"] = _digest(application_intent)
             application_path.write_text(json.dumps(application_intent, indent=2) + "\n", encoding="utf-8")
             application = _apply_validated_changes(authoritative_root=self.workspace,
-                candidate_root=candidate_root, base=base, changes=changes,
-                replace=self.apply_replace, before_replace=self.before_apply_replace)
+                candidate_root=candidate_root, base=base, changes=normalized_apply_changes,
+                replace=self.apply_replace, before_replace=self.before_apply_replace,
+                frozen_preimages=evidence_before)
             rollback_originals = application.pop("_rollback_originals")
             rollback_applied_states = application.pop("_rollback_applied_states")
             application.update({"candidate_snapshot_id": provenance["candidate_snapshot_id"],
@@ -683,6 +878,8 @@ class CodexWriteBuilderAdapter(CodexExecWorkerAdapter):
             "package_id": package_id, "package_sha256": package_sha, "invocation_id": invocation_id,
             "status": "delivered", "workspace_changes": changes,
             "workspace_changes_sha256": _digest(changes), "out_of_scope_changes": [],
+            "exact_change_evidence": exact_change_evidence,
+            "exact_change_evidence_sha256": exact_change_evidence_sha256,
             "cache_cleanup": cache_cleanup,
             "candidate_snapshot": {key: provenance[key] for key in
                 ("candidate_snapshot_id", "file_count", "total_byte_length", "record_sha256")},

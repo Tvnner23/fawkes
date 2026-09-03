@@ -664,10 +664,16 @@ class CodexDevelopmentCampaign:
                 or verification["package_id"] != package_id
                 or verification["recipient"]["worker_id"] != reviewer_id):
             raise PermissionError("review transport lineage is incomplete or mismatched")
-        satisfied = list(dict.fromkeys(review.get("acceptance_condition_ids_satisfied", ())))
+        satisfied_raw = review.get("acceptance_condition_ids_satisfied")
+        if not isinstance(satisfied_raw, list) or len(satisfied_raw) != len(set(satisfied_raw)):
+            raise ValueError("satisfied acceptance conditions must be a unique list")
+        satisfied = list(satisfied_raw)
         if any(item not in record["acceptance_condition_ids"] for item in satisfied):
             raise ValueError("review references an unknown acceptance condition")
-        violated = list(dict.fromkeys(review.get("violated_acceptance_condition_ids", ())))
+        violated_raw = review.get("violated_acceptance_condition_ids")
+        if not isinstance(violated_raw, list) or len(violated_raw) != len(set(violated_raw)):
+            raise ValueError("violated acceptance conditions must be a unique list")
+        violated = list(violated_raw)
         if any(item not in record["acceptance_condition_ids"] for item in violated):
             raise ValueError("review violates an unknown acceptance condition")
         defects = review.get("defects", [])
@@ -684,8 +690,15 @@ class CodexDevelopmentCampaign:
                 "acceptance_condition_id": condition,
                 "evidence_reference": require_id(item.get("evidence_reference"), "evidence_reference")})
         status = review["status"]
+        if set(satisfied) & set(violated):
+            raise ValueError("acceptance condition matrix is contradictory")
+        if status in {"pass", "pass_with_caveats"} and (violated or normalized_defects):
+            raise ValueError("accepted review cannot contain violated or blocking defects")
         if status == "correction_required" and not normalized_defects:
             raise ValueError("correction_required needs scoped defects")
+        if status == "correction_required" and (
+                {item["acceptance_condition_id"] for item in normalized_defects} - set(violated)):
+            raise ValueError("correction defect is not bound to a violated condition")
         review_record = {"iteration": record["iteration"], "status": status,
             "reviewer": {"worker_id": reviewer_id, "role": reviewer["role"],
                          "identity_status": reviewer["identity_status"]},
@@ -781,8 +794,7 @@ class CodexDevelopmentCampaign:
                               "decision_needed": "inspect exact failure evidence or stop campaign"})
         defects = []
         for item in result["defects"]:
-            try: evidence_reference = require_id(item.get("evidence_reference"), "evidence_reference")
-            except ValueError: evidence_reference = result["return_report_id"]
+            evidence_reference = require_id(item.get("evidence_reference"), "evidence_reference")
             defects.append({**item, "evidence_reference": evidence_reference})
         review = {"status": result["review_status"], "review_report_id": result["return_report_id"],
             "delivery_receipt_id": result["delivery_receipt_id"],

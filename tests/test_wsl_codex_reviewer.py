@@ -19,6 +19,7 @@ from src.runtime.codex_development_campaign import (
 )
 from src.runtime.codex_development_handoff import CODEX_REPO_WORKER_REFERENCE
 from src.runtime.worker_exchange import WorkerExchange, _digest
+from src.runtime.windows_codex_reviewer import exact_review_schema, validate_windows_structured_response
 from src.runtime.wsl_codex_reviewer import (
     FORMAL_REVIEW_ROLE, WSL_ADAPTER_ID, WSL_ADAPTER_QUALIFIED, WSL_ADAPTER_PROMOTED, WSL_ENVIRONMENT_ID,
     WSL_QUALIFICATION_CONTRACT, WSL_REVIEWER_REFERENCE, WSL_REVIEWER_ROLE,
@@ -29,22 +30,34 @@ from src.runtime.wsl_codex_reviewer import (
 class FakeWslReviewer:
     def __init__(self, *, status="pass", malformed=False, mutate=False):
         self.status, self.malformed, self.mutate = status, malformed, mutate
+        self.provider_turns = 0
+        self.last_package = None
+        self.last_package_sha = None
 
     def __call__(self, command, *, prompt, environment, timeout):
         if "--version" in command: return SimpleNamespace(returncode=0, stdout="codex-cli 0.151.0\n", stderr="")
         if command[1:3] == ["login", "status"]: return SimpleNamespace(returncode=0, stdout="Logged in using ChatGPT\n", stderr="")
+        self.provider_turns += 1
         output = Path(command[command.index("--output-last-message") + 1])
         start = "----- BEGIN EXACT WORKER EXCHANGE PACKAGE -----\n"
-        package_text = prompt.split(start, 1)[1].split("\n----- END EXACT WORKER EXCHANGE PACKAGE -----", 1)[0]
-        package = json.loads(package_text)
+        if start in prompt:
+            package_text = prompt.split(start, 1)[1].split("\n----- END EXACT WORKER EXCHANGE PACKAGE -----", 1)[0]
+            package = json.loads(package_text); self.last_package = package
+            self.last_package_sha = hashlib.sha256(package_text.encode()).hexdigest()
+        else:
+            package = self.last_package
+            package_text = json.dumps(package, sort_keys=True, separators=(",", ":"))
         if self.mutate:
             (Path(command[command.index("--cd") + 1]) / "src/allowed.py").write_text("reviewer mutation\n")
         violated = ["done"] if self.status == "correction_required" else []
         satisfied = ["done"] if self.status == "pass" else []
-        invocation = re.search(r"Review invocation: ([^\n]+)", prompt).group(1)
+        invocation_match = re.search(r"(?:Review invocation: |review_invocation_id=)([^\n]+)", prompt)
+        snapshot_match = re.search(r"(?:Frozen candidate: |candidate_snapshot_id=)([^\n]+)", prompt)
+        invocation = invocation_match.group(1); snapshot = snapshot_match.group(1)
         response = {"schema_version": 1, "review_invocation_id": invocation,
+            "candidate_snapshot_id": snapshot,
             "package_id": package["package_id"],
-            "package_sha256": hashlib.sha256(package_text.encode()).hexdigest(),
+            "package_sha256": self.last_package_sha,
             "source_report_id": package["source_report_id"], "task_scope_id": package["task_scope_id"],
             "recipient": {"worker_id": WSL_REVIEWER_WORKER_ID, "role": WSL_REVIEWER_ROLE,
                           "environment_id": WSL_ENVIRONMENT_ID},
@@ -60,12 +73,35 @@ class FakeWslReviewer:
                 "disputed" if self.status == "correction_required" else "insufficient"),
                 "checked_claim_ids": ["done"], "evidence_references": package["evidence_references"],
                 "method": "exact frozen candidate review", "material_reliance": True,
-                "relied_source_section_ids": ["exact-builder-return"], "caveats": [],
+                "relied_source_section_ids": ["exact-builder-return"],
+                "caveats": (["missing test receipt"] if self.status == "insufficient_evidence" else []),
                 "counterclaim": ({"claim": "Acceptance condition is not met",
                     "evidence_reference": "exact-builder-return"}
                     if self.status == "correction_required" else None)}}
         output.write_text("{" if self.malformed else json.dumps(response), encoding="utf-8")
         return SimpleNamespace(returncode=0, stdout="event", stderr="")
+
+
+class RepairSequenceReviewer(FakeWslReviewer):
+    def __init__(self, failures, *, after_first=None):
+        super().__init__(); self.failures=list(failures); self.after_first=after_first
+
+    def __call__(self, command, **kwargs):
+        completed=super().__call__(command, **kwargs)
+        if "--output-last-message" not in command: return completed
+        output=Path(command[command.index("--output-last-message")+1])
+        response=json.loads(output.read_text())
+        failure=self.failures[self.provider_turns-1] if self.provider_turns <= len(self.failures) else None
+        if failure == "lineage": response["package_id"]="neighbor-package"
+        elif failure == "semantic":
+            response["review_status"]="correction_required"
+            response["violated_acceptance_condition_ids"]=["done"]
+            response["defects"]=[]
+            response["verification"]["status"]="disputed"
+            response["acceptance_condition_ids_satisfied"]=[]
+        output.write_text(json.dumps(response))
+        if self.provider_turns == 1 and self.after_first: self.after_first()
+        return completed
 
 
 class WslFormalReviewerTests(unittest.TestCase):
@@ -137,6 +173,60 @@ class WslFormalReviewerTests(unittest.TestCase):
         self.assertEqual(WSL_REVIEWER_REFERENCE["transport_status"], "promoted_bounded_read_only")
         self.assertEqual(len(WSL_QUALIFICATION_CONTRACT["hard_invariants"]), 16)
 
+    def test_provider_schema_uses_historical_keywords_while_semantics_bind_exact_lineage(self):
+        package = self.exchange._load("packages", self.prepared["package_id"])
+        recipient = package["recipient"]
+        schema = exact_review_schema(package=package, package_sha256="a" * 64,
+            recipient=recipient, invocation_id="review-invocation-current",
+            candidate_snapshot_id=self.provenance["candidate_snapshot_id"])
+        self.assertEqual(len(schema["required"]), 16)
+        for key in ("review_invocation_id", "candidate_snapshot_id", "package_id",
+                    "package_sha256", "source_report_id", "task_scope_id"):
+            self.assertEqual(schema["properties"][key], {"type": "string"})
+            self.assertNotIn("const", schema["properties"][key])
+        for key in ("worker_id", "role", "environment_id"):
+            field = schema["properties"]["recipient"]["properties"][key]
+            self.assertEqual(field, {"type": "string"})
+            self.assertNotIn("const", field)
+        historical_keywords = {"type", "additionalProperties", "required", "properties",
+            "const", "enum", "items", "minItems", "anyOf"}
+        observed = set()
+        def collect(node):
+            if not isinstance(node, dict): return
+            for key in historical_keywords | {"minLength", "pattern", "format", "uniqueItems"}:
+                if key in node: observed.add(key)
+            properties = node.get("properties")
+            if isinstance(properties, dict):
+                for child in properties.values(): collect(child)
+            if isinstance(node.get("items"), dict): collect(node["items"])
+            for child in node.get("anyOf", []): collect(child)
+        collect(schema)
+        self.assertTrue(observed <= historical_keywords)
+        self.assertFalse({"minLength", "pattern", "format", "uniqueItems"} & observed)
+        response = FakeWslReviewer()( ["codex", "--output-last-message", str(Path(self.tmp.name) / "response.json"), "--cd", str(self.workspace)], prompt="Review invocation: review-invocation-current\nFrozen candidate: " + self.provenance["candidate_snapshot_id"] + "\n----- BEGIN EXACT WORKER EXCHANGE PACKAGE -----\n" + json.dumps(package, sort_keys=True, separators=(",", ":")) + "\n----- END EXACT WORKER EXCHANGE PACKAGE -----", environment={}, timeout=1)
+        self.assertEqual(response.returncode, 0)
+        parsed = json.loads((Path(self.tmp.name) / "response.json").read_text())
+        parsed["package_id"] = "neighbor-package"
+        with self.assertRaises(PermissionError):
+            validate_windows_structured_response(parsed, package,
+                hashlib.sha256(json.dumps(package, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
+                recipient, "review-invocation-current", self.provenance["candidate_snapshot_id"])
+        exact = FakeWslReviewer()( ["codex", "--output-last-message", str(Path(self.tmp.name) / "response-2.json"), "--cd", str(self.workspace)], prompt="Review invocation: review-invocation-current\nFrozen candidate: " + self.provenance["candidate_snapshot_id"] + "\n----- BEGIN EXACT WORKER EXCHANGE PACKAGE -----\n" + json.dumps(package, sort_keys=True, separators=(",", ":")) + "\n----- END EXACT WORKER EXCHANGE PACKAGE -----", environment={}, timeout=1)
+        self.assertEqual(exact.returncode, 0)
+        exact_response = json.loads((Path(self.tmp.name) / "response-2.json").read_text())
+        package_sha = hashlib.sha256(json.dumps(package, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        for key in ("review_invocation_id", "candidate_snapshot_id", "package_id",
+                    "package_sha256", "source_report_id", "task_scope_id"):
+            invalid = dict(exact_response); invalid[key] = ""
+            with self.assertRaises(PermissionError):
+                validate_windows_structured_response(invalid, package, package_sha,
+                    recipient, "review-invocation-current", self.provenance["candidate_snapshot_id"])
+        for key in ("worker_id", "role", "environment_id"):
+            invalid = json.loads(json.dumps(exact_response)); invalid["recipient"][key] = ""
+            with self.assertRaises(PermissionError):
+                validate_windows_structured_response(invalid, package, package_sha,
+                    recipient, "review-invocation-current", self.provenance["candidate_snapshot_id"])
+
     def test_exact_frozen_package_pass_retains_lineage_and_no_authority(self):
         result = self.invoke()
         self.assertEqual((result["status"], result["review_status"]), ("delivered", "pass"))
@@ -171,8 +261,54 @@ class WslFormalReviewerTests(unittest.TestCase):
                     output.write_text(json.dumps(response))
                 return completed
         result = self.invoke(WrongInvocation(), invocation_id="wsl-review-current")
-        self.assertEqual(result["failure_reason"], "malformed_or_unbound_response")
+        self.assertEqual(result["failure_reason"], "semantic_repair_failed")
         self.assertNotIn("review_status", result)
+
+    def test_semantic_repair_is_single_fresh_bound_turn_without_premature_success(self):
+        valid=FakeWslReviewer(); result=self.invoke(valid,invocation_id="review-original")
+        self.assertEqual((result["status"],valid.provider_turns),("delivered",1))
+        self.setUp(); lineage=RepairSequenceReviewer(["lineage",None])
+        repaired=self.invoke(lineage,invocation_id="review-original")
+        self.assertEqual((repaired["status"],lineage.provider_turns),("delivered",2))
+        self.assertEqual(repaired["original_invocation_id"],"review-original")
+        self.assertRegex(repaired["invocation_id"],r"^review-original-repair-[0-9a-f]{32}$")
+        failure_path=self.exchange.root/"wsl_codex_review_adapter"/self.prepared["package_id"]/"attempt-1-failure.json"
+        failure=json.loads(failure_path.read_text())
+        self.assertEqual(failure["failure_category"],"lineage_identity_or_semantic_validation")
+        self.assertNotIn("response",failure); self.assertFalse(failure["creates_authority"])
+        deliveries=[json.loads(p.read_text()) for p in (self.exchange.root/"delivery_receipts").glob("*.json")]
+        reviewer=[x for x in deliveries if x.get("adapter_id")==WSL_ADAPTER_ID]
+        self.assertEqual([x["status"] for x in reviewer],["delivered"])
+        self.assertEqual(repaired["client_process_evidence"]["attempt_count"],2)
+        self.assertNotEqual(repaired["client_process_evidence"]["repair_nonce_sha256"],"0"*64)
+
+    def test_semantic_invalid_response_repairs_and_two_invalid_responses_fail_closed(self):
+        semantic=RepairSequenceReviewer(["semantic",None])
+        self.assertEqual(self.invoke(semantic)["status"],"delivered")
+        self.assertEqual(semantic.provider_turns,2)
+        self.setUp(); twice=RepairSequenceReviewer(["lineage","lineage"])
+        failed=self.invoke(twice)
+        self.assertEqual((failed["status"],failed["failure_reason"],twice.provider_turns),
+                         ("failed","semantic_repair_failed",2))
+        self.assertNotIn("review_status",failed)
+        reports=[json.loads(p.read_text()) for p in (self.exchange.root/"reports").glob("*.json")]
+        self.assertFalse(any(x.get("sender",{}).get("worker_id")==WSL_REVIEWER_WORKER_ID for x in reports))
+
+    def test_repair_stops_on_candidate_or_package_scope_drift(self):
+        mutate=RepairSequenceReviewer(["lineage"],after_first=lambda:
+            (self.workspace/"src/allowed.py").write_text("concurrent\n"))
+        changed=self.invoke(mutate)
+        self.assertEqual((changed["failure_reason"],mutate.provider_turns),
+                         ("candidate_snapshot_changed",1))
+        self.setUp()
+        def change_package():
+            path=self.exchange._path("packages",self.prepared["package_id"])
+            package=json.loads(path.read_text()); package["task_scope_id"]="changed-scope"
+            package["record_sha256"]=_digest({k:v for k,v in package.items() if k!="record_sha256"})
+            path.write_text(json.dumps(package))
+        drift=RepairSequenceReviewer(["lineage"],after_first=change_package)
+        failed=self.invoke(drift)
+        self.assertEqual((failed["failure_reason"],drift.provider_turns),("repair_binding_changed",1))
 
     def test_dynamic_candidate_is_exact_and_qualification_fixture_cannot_substitute(self):
         from src.runtime.wsl_codex_reviewer import WSL_QUALIFIED_SNAPSHOT_ID

@@ -298,11 +298,13 @@ class CodexDevelopmentCampaignTests(unittest.TestCase):
         defect = {"defect_id": "repeat-defect", "acceptance_condition_id": "tests-pass",
                   "evidence_reference": "review-evidence"}
         for expected in (2, 3):
-            review = self.fixture.review("cap-test", "correction_required", defects=[defect])
+            review = self.fixture.review("cap-test", "correction_required", defects=[defect],
+                                         violated=["tests-pass"])
             record = self.fixture.campaign.consume_review("cap-test", review,
                 reviewer=REVIEWER, transport_verified=True)
             self.assertEqual(record["iteration"], expected)
-        review = self.fixture.review("cap-test", "correction_required", defects=[defect])
+        review = self.fixture.review("cap-test", "correction_required", defects=[defect],
+                                     violated=["tests-pass"])
         record = self.fixture.campaign.consume_review("cap-test", review,
             reviewer=REVIEWER, transport_verified=True)
         self.assertEqual(record["status"], "tanner_escalation")

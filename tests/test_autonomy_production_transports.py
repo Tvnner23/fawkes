@@ -16,7 +16,8 @@ from src.runtime.codex_write_builder_adapter import (
     MAX_TRACKED_FILES, WRITE_ADAPTER_ID, WRITE_ADAPTER_VERSION, WRITE_ADAPTER_QUALIFIED, WRITE_ADAPTER_PROMOTED,
     WRITE_PROMOTION_RECORD,
     WRITE_QUALIFICATION_CONTRACT, CodexWriteBuilderAdapter, _exact_return_schema,
-    _workspace_snapshot,
+    _canonical_node_evidence, _capture_frozen_tree, _diff, _exact_change_evidence, _relative_scopes,
+    _scope_contract, _validate_candidate_changes, _workspace_snapshot,
 )
 from src.runtime.windows_codex_reviewer import (
     WINDOWS_ADAPTER_ID, WINDOWS_ADAPTER_QUALIFIED, WINDOWS_ADAPTER_PROMOTED,
@@ -158,7 +159,9 @@ class FakeWindowsCodex:
             "\n----- END EXACT WORKER EXCHANGE PACKAGE -----", 1)[0]
         package = json.loads(package_text); package_bytes = package_text.encode()
         invocation = re.search(r"Exact review invocation: ([^\n]+)", prompt).group(1)
+        snapshot = re.search(r"Frozen read-only candidate snapshot: ([^\n]+)", prompt).group(1)
         response = {"schema_version": 1, "review_invocation_id": invocation,
+            "candidate_snapshot_id": snapshot,
             "package_id": package["package_id"],
             "package_sha256": hashlib.sha256(package_bytes).hexdigest(),
             "source_report_id": package["source_report_id"], "task_scope_id": package["task_scope_id"],
@@ -310,6 +313,133 @@ class AutonomyProductionTransportTests(unittest.TestCase):
         returned = self.exchange._load("reports", result["return_report_id"])
         self.assertFalse(returned["creates_authority"])
         self.assertEqual(fake.environment["PYTHONDONTWRITEBYTECODE"], "1")
+
+    def test_batch_e_directory_scope_captures_nested_modify_add_remove_exactly(self):
+        baseline = Path(self.tmp.name) / "frozen"; candidate = Path(self.tmp.name) / "mutable"
+        for root in (baseline, candidate):
+            (root / "src/tree").mkdir(parents=True)
+            (root / "src/tree/kept.py").write_text("old\n")
+            (root / "src/tree/removed.py").write_text("remove\n")
+        before = _workspace_snapshot(baseline)
+        contract = _scope_contract(["src/tree"], before)
+        frozen = _capture_frozen_tree(baseline, before, contract)
+        (candidate / "src/tree/kept.py").write_text("new\n")
+        (candidate / "src/tree/removed.py").unlink()
+        (candidate / "src/tree/nested").mkdir()
+        (candidate / "src/tree/nested/added.py").write_text("added\n")
+        changes = _diff(before, _workspace_snapshot(candidate))
+        evidence, digest = _exact_change_evidence(candidate, changes, frozen)
+        self.assertEqual([item["path"] for item in changes], sorted(item["path"] for item in changes))
+        self.assertEqual({item["path"] for item in evidence}, {item["path"] for item in changes})
+        removed = next(item for item in evidence if item["path"].endswith("removed.py"))
+        self.assertIsNotNone(removed["before_base64"]); self.assertIsNone(removed["after_base64"])
+        self.assertEqual(digest, _digest(evidence))
+        with self.assertRaisesRegex(PermissionError, "deletion"):
+            _validate_candidate_changes(changes, contract)
+
+    def test_batch_e_exact_file_scope_rejects_nested_neighbor_and_traversal(self):
+        baseline = _workspace_snapshot(self.workspace)
+        contract = _scope_contract(["src/allowed.py"], baseline)
+        neighbor = {"path": "src/allowed.py/neighbor", "status": "added", "before": None,
+            "after": {"file_type": "regular", "sha256": "0" * 64,
+                      "byte_length": 0, "mode": 0o644}}
+        with self.assertRaisesRegex(PermissionError, "out-of-scope"):
+            _validate_candidate_changes([neighbor], contract)
+        for scope in ("../escape", "src/../../escape", "/absolute"):
+            with self.subTest(scope=scope), self.assertRaises(ValueError):
+                _relative_scopes([scope])
+
+    def test_batch_e_mode_symlink_and_type_replacements_are_evidenced_then_closed(self):
+        baseline = Path(self.tmp.name) / "frozen-types"; candidate = Path(self.tmp.name) / "mutable-types"
+        for root in (baseline, candidate):
+            root.mkdir(); (root / "mode.py").write_text("same\n"); (root / "kind.py").write_text("old\n")
+        before = _workspace_snapshot(baseline)
+        contract = _scope_contract(["mode.py", "kind.py"], before)
+        frozen = _capture_frozen_tree(baseline, before, contract)
+        (candidate / "mode.py").chmod(0o755)
+        (candidate / "kind.py").unlink(); (candidate / "kind.py").symlink_to("mode.py")
+        changes = _diff(before, _workspace_snapshot(candidate))
+        evidence, _ = _exact_change_evidence(candidate, changes, frozen)
+        self.assertEqual(next(item for item in evidence if item["path"] == "mode.py")["after_mode"], 0o755)
+        kind = next(item for item in evidence if item["path"] == "kind.py")
+        self.assertEqual(kind["after_type"], "symlink")
+        self.assertEqual(kind["after_symlink_target"], "mode.py")
+        with self.assertRaises(PermissionError):
+            _validate_candidate_changes(changes, contract)
+
+    def test_batch_e_symlink_add_change_remove_targets_are_exact(self):
+        baseline = Path(self.tmp.name) / "frozen-links"
+        candidate = Path(self.tmp.name) / "mutable-links"
+        for root in (baseline, candidate):
+            root.mkdir()
+            (root / "target-a").write_text("a\n")
+            (root / "target-b").write_text("b\n")
+        (baseline / "changed").symlink_to("target-a")
+        (baseline / "removed").symlink_to("target-a")
+        (candidate / "changed").symlink_to("target-b")
+        (candidate / "added").symlink_to("target-a")
+        before = _workspace_snapshot(baseline)
+        contract = _scope_contract(["changed", "removed", "added"], before)
+        frozen = _capture_frozen_tree(baseline, before, contract)
+        evidence, _ = _exact_change_evidence(
+            candidate, _diff(before, _workspace_snapshot(candidate)), frozen)
+        by_path = {item["path"]: item for item in evidence}
+        self.assertEqual((by_path["changed"]["before_symlink_target"],
+                          by_path["changed"]["after_symlink_target"]),
+                         ("target-a", "target-b"))
+        self.assertEqual(by_path["removed"]["before_symlink_target"], "target-a")
+        self.assertIsNone(by_path["removed"]["after_symlink_target"])
+        self.assertIsNone(by_path["added"]["before_symlink_target"])
+        self.assertEqual(by_path["added"]["after_symlink_target"], "target-a")
+        self.assertNotEqual(by_path["changed"]["eligibility_receipt"]["before"]["sha256"],
+                            by_path["changed"]["eligibility_receipt"]["after"]["sha256"])
+        self.assertEqual(by_path["changed"]["before_node_binding"]["body_sha256"],
+                         hashlib.sha256(b"target-a").hexdigest())
+        self.assertEqual(by_path["changed"]["after_node_binding"]["body_sha256"],
+                         hashlib.sha256(b"target-b").hexdigest())
+
+    def test_batch_e_node_binding_distinguishes_presence_type_and_mode(self):
+        absent, _ = _canonical_node_evidence(None, None)
+        regular, _ = _canonical_node_evidence(
+            {"file_type": "regular", "mode": 0o644}, b"")
+        directory, _ = _canonical_node_evidence(
+            {"file_type": "directory", "mode": 0o644}, None)
+        symlink, _ = _canonical_node_evidence(
+            {"file_type": "symlink", "mode": 0o777, "target": ""}, None)
+        executable, _ = _canonical_node_evidence(
+            {"file_type": "regular", "mode": 0o755}, b"")
+        bindings = {hashlib.sha256(item).hexdigest()
+                    for item in (absent, regular, directory, symlink, executable)}
+        self.assertEqual(len(bindings), 5)
+        self.assertEqual(regular, _canonical_node_evidence(
+            {"file_type": "regular", "mode": 0o644}, b"")[0])
+
+    def test_batch_e_node_binding_leaves_source_bytes_visible_to_classifier(self):
+        marker = b"synthetic-visible-source-marker"
+        encoded, binding = _canonical_node_evidence(
+            {"file_type": "regular", "mode": 0o600}, marker)
+        self.assertTrue(encoded.endswith(marker))
+        self.assertEqual(binding["body_sha256"], hashlib.sha256(marker).hexdigest())
+
+    def test_batch_e_frozen_preimage_determinism_and_classification_precedes_bodies(self):
+        baseline = Path(self.tmp.name) / "frozen-proof"; candidate = Path(self.tmp.name) / "mutable-proof"
+        baseline.mkdir(); candidate.mkdir()
+        (baseline / "one.py").write_text("baseline\n"); (candidate / "one.py").write_text("after\n")
+        before = _workspace_snapshot(baseline); contract = _scope_contract(["one.py"], before)
+        frozen = _capture_frozen_tree(baseline, before, contract)
+        # Later authoritative drift cannot alter the already frozen preimage.
+        (self.workspace / "src/allowed.py").write_text("concurrent unrelated\n")
+        changes = _diff(before, _workspace_snapshot(candidate))
+        first, first_digest = _exact_change_evidence(candidate, changes, frozen)
+        second, second_digest = _exact_change_evidence(candidate, list(reversed(changes)), frozen)
+        self.assertEqual(first, second); self.assertEqual(first_digest, second_digest)
+        self.assertIn("YmFzZWxpbmUK", first[0]["before_base64"])
+        denied = {"classification": "blocked_fixture", "disclosure_allowed": False}
+        with patch("src.runtime.codex_write_builder_adapter.classify_reviewer_source_evidence",
+                   return_value=denied) as classify:
+            with self.assertRaisesRegex(PermissionError, "blocked_fixture"):
+                _exact_change_evidence(candidate, changes, frozen)
+        classify.assert_called_once()
 
     def test_external_runtime_root_reaches_every_adapter_subprocess_without_secrets(self):
         external = Path(self.tmp.name) / "external-state"

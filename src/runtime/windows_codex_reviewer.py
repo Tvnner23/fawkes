@@ -99,13 +99,14 @@ WINDOWS_TRANSPORT_CONFORMANCE = {
 
 WINDOWS_REVIEW_SCHEMA = {
     "type": "object", "additionalProperties": False,
-    "required": ["schema_version", "review_invocation_id", "package_id", "package_sha256", "source_report_id",
+    "required": ["schema_version", "review_invocation_id", "candidate_snapshot_id", "package_id", "package_sha256", "source_report_id",
         "task_scope_id", "recipient", "source_summary_distinction_confirmed", "review_status",
         "acceptance_condition_ids_satisfied", "violated_acceptance_condition_ids", "defects",
         "correctable_within_scope", "sections", "verification"],
     "properties": {
         "schema_version": {"type": "integer", "const": 1},
         "review_invocation_id": {"type": "string"},
+        "candidate_snapshot_id": {"type": "string"},
         "package_id": {"type": "string"}, "package_sha256": {"type": "string"},
         "source_report_id": {"type": "string"}, "task_scope_id": {"type": "string"},
         "recipient": {"type": "object", "additionalProperties": False,
@@ -148,6 +149,21 @@ WINDOWS_REVIEW_SCHEMA = {
 
 def _now(): return datetime.now(timezone.utc).isoformat()
 def _sha(value): return hashlib.sha256(value).hexdigest()
+
+
+def exact_review_schema(*, package, package_sha256, recipient, invocation_id,
+                        candidate_snapshot_id):
+    """Return the provider-compatible schema; exact lineage is checked after parsing."""
+    import copy
+    schema = copy.deepcopy(WINDOWS_REVIEW_SCHEMA)
+    # The physically proven provider boundary accepts the historical stable
+    # keyword vocabulary.  Per-request const, minLength, pattern, format,
+    # uniqueItems, and dynamic item enums do not belong in this transport
+    # schema.  validate_windows_structured_response remains the authority for
+    # nonempty exact invocation, candidate, package, digest, source, scope,
+    # recipient and acceptance-condition equality, freshness, and replay
+    # rejection before any success-shaped evidence is written.
+    return schema
 
 
 def _windows_path(path):
@@ -301,6 +317,14 @@ def _exact_builder_evidence(exchange, campaign_record, workspace):
             or result.get("return_report_id") != run["return_report_id"]
             or result.get("workspace_changes_sha256") != run["transport_result_reference"]["workspace_changes_sha256"]):
         raise PermissionError("builder mutation evidence does not bind the current campaign return")
+    exact_changes = result.get("exact_change_evidence")
+    if (not isinstance(exact_changes, list)
+            or result.get("exact_change_evidence_sha256") != _digest(exact_changes)):
+        raise ValueError("builder exact change evidence integrity mismatch")
+    application = result.get("application_evidence")
+    if (not isinstance(application, dict) or application.get("status") != "applied"
+            or application.get("mutation_manifest_sha256") != result.get("workspace_changes_sha256")):
+        raise ValueError("builder application receipt is missing or incoherent")
     artifacts = []
     total = 0
     for change in result["workspace_changes"]:
@@ -361,6 +385,12 @@ def prepare_windows_review_package(*, exchange, campaign_record, candidate_snaps
         {"section_id": "mutation-manifest", "title": "Exact adapter mutation manifest",
          "content": json.dumps(mutation["workspace_changes"], sort_keys=True, ensure_ascii=False,
                                separators=(",", ":"))},
+        {"section_id": "exact-change-evidence", "title": "Canonical exact preimage/postimage and diff evidence",
+         "content": json.dumps(mutation["exact_change_evidence"], sort_keys=True,
+                               ensure_ascii=False, separators=(",", ":"))},
+        {"section_id": "application-receipt", "title": "Exact authoritative apply receipt",
+         "content": json.dumps(mutation["application_evidence"], sort_keys=True,
+                               ensure_ascii=False, separators=(",", ":"))},
         {"section_id": "validation-evidence", "title": "Exact coordinator validation evidence",
          "content": json.dumps(run.get("validation_evidence", []), sort_keys=True, ensure_ascii=False,
                                separators=(",", ":"))},
@@ -481,18 +511,29 @@ class WindowsCodexReviewAdapter:
             expected_package_id=package_id, expected_source_report=source,
             expected_authorization_reference=grant["authorization_reference"])
         package_sha = _sha(exported); directory = self.root / package_id; result_path = directory / "result.json"
+        invocation_id = require_id(invocation_id or f"windows-review-{uuid.uuid4()}", "invocation_id")
         if result_path.exists():
             cached = json.loads(result_path.read_text(encoding="utf-8"))
             if cached.get("record_sha256") != _digest({k: v for k, v in cached.items() if k != "record_sha256"}):
                 raise ValueError("cached Windows review result integrity mismatch")
             self.exchange.validate_transport_authorization(package_id=package_id, authority=transport_authority)
-            if invocation_id is not None and require_id(invocation_id, "invocation_id") != cached.get("invocation_id"):
+            if invocation_id != cached.get("invocation_id"):
                 raise PermissionError("cached Windows review belongs to another invocation")
+            cached_expected = {"status": "delivered", "package_id": package_id,
+                "package_sha256": package_sha, "source_report_id": package["source_report_id"],
+                "task_scope_id": package["task_scope_id"], "candidate_snapshot_id": candidate_snapshot_id,
+                "recipient": {"worker_id": recipient["worker_id"], "role": recipient["role"],
+                              "environment_id": WINDOWS_ENVIRONMENT_ID}}
+            if any(cached.get(key) != value for key, value in cached_expected.items()):
+                raise PermissionError("cached Windows review lineage mismatch")
+            try: current_snapshot_id = candidate_manifest(snapshot_root)["candidate_snapshot_id"]
+            except Exception as exc: raise ValueError("candidate_manifest_verification_failed") from exc
+            if current_snapshot_id != candidate_snapshot_id:
+                raise PermissionError("cached Windows review candidate is stale")
             return {**cached, "idempotent_replay": True}
         if directory.exists(): raise RuntimeError("incomplete review attempt exists; blind retry forbidden")
         directory.mkdir(parents=True)
         (directory / "transport-package.json").write_bytes(exported)
-        invocation_id = require_id(invocation_id or f"windows-review-{uuid.uuid4()}", "invocation_id")
         request = {"schema_version": 1, "record_type": "windows_codex_review_request",
             "adapter_id": WINDOWS_ADAPTER_ID, "adapter_version": WINDOWS_ADAPTER_VERSION,
             "qualification_contract_version": WINDOWS_REVIEW_CONTRACT_VERSION,
@@ -521,7 +562,10 @@ class WindowsCodexReviewAdapter:
         temp_root = Path(tempfile.mkdtemp(prefix="fawkes-windows-review-", dir=self.temporary_parent))
         try:
             schema = temp_root / "schema.json"; output = temp_root / "last.json"
-            schema.write_text(json.dumps(WINDOWS_REVIEW_SCHEMA), encoding="utf-8")
+            response_recipient = request["recipient"]
+            schema.write_text(json.dumps(exact_review_schema(package=package,
+                package_sha256=package_sha, recipient=response_recipient,
+                invocation_id=invocation_id, candidate_snapshot_id=candidate_snapshot_id)), encoding="utf-8")
             command = [self.codex_binary, "--ask-for-approval", "never", "exec", "--ephemeral",
                 "--ignore-user-config", "--strict-config", "--sandbox", "read-only",
                 "--cd", _windows_path(snapshot_root),
@@ -546,7 +590,12 @@ class WindowsCodexReviewAdapter:
                                      "no schema-bound return", metadata)
             try:
                 response = json.loads(output.read_text(encoding="utf-8")); self._validate_response(
-                    response, package, package_sha, request["recipient"], invocation_id)
+                    response, package, package_sha, request["recipient"], invocation_id,
+                    candidate_snapshot_id)
+                try: current_snapshot_id = candidate_manifest(snapshot_root)["candidate_snapshot_id"]
+                except Exception as exc: raise ValueError("candidate_manifest_verification_failed") from exc
+                if current_snapshot_id != candidate_snapshot_id:
+                    raise PermissionError("candidate_snapshot_changed")
                 delivery = self.exchange.record_delivery(package_id=package_id, authority=transport_authority,
                     adapter_id=WINDOWS_ADAPTER_ID, adapter_version=WINDOWS_ADAPTER_VERSION,
                     status="delivered", delivery_reference=invocation_id)
@@ -567,6 +616,7 @@ class WindowsCodexReviewAdapter:
                 "instance_id": package["instance_id"], "campaign_id": campaign_id,
                 "task_scope_id": package["task_scope_id"], "package_id": package_id,
                 "package_sha256": package_sha, "builder_return_reference": exact_ref,
+                "source_report_id": package["source_report_id"], "recipient": request["recipient"],
                 "candidate_snapshot_id": candidate_snapshot_id,
                 "invocation_id": invocation_id, "status": "delivered", "review_status": response["review_status"],
                 "review_response_sha256": _digest(response),
@@ -581,22 +631,21 @@ class WindowsCodexReviewAdapter:
                 "adapter_promoted": WINDOWS_ADAPTER_PROMOTED if _production_use else False,
                 "adapter_promotion_reference": request.get("adapter_promotion_reference"),
                 "creates_authority": False, "created_at": _now()}
-            if candidate_manifest(snapshot_root)["candidate_snapshot_id"] != candidate_snapshot_id:
-                return self._failure(result_path, request, package, transport_authority,
-                    "candidate_snapshot_changed", "read-only review snapshot changed during invocation", metadata)
             result["record_sha256"] = _digest(result); result_path.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
             return result
         finally: shutil.rmtree(temp_root, ignore_errors=True)
 
     @staticmethod
-    def _validate_response(response, package, package_sha, recipient, invocation_id):
+    def _validate_response(response, package, package_sha, recipient, invocation_id,
+                           candidate_snapshot_id=None):
         if not isinstance(response, dict) or set(response) != set(WINDOWS_REVIEW_SCHEMA["required"]):
             raise ValueError("Windows review return schema is invalid")
         for key, expected in (("schema_version", 1), ("review_invocation_id", invocation_id),
+            ("candidate_snapshot_id", candidate_snapshot_id),
             ("package_id", package["package_id"]),
             ("package_sha256", package_sha), ("source_report_id", package["source_report_id"]),
             ("task_scope_id", package["task_scope_id"]), ("recipient", recipient)):
-            if response.get(key) != expected: raise PermissionError("Windows review return lineage mismatch")
+            if expected is not None and response.get(key) != expected: raise PermissionError("Windows review return lineage mismatch")
         if response.get("source_summary_distinction_confirmed") is not True:
             raise ValueError("source/summary distinction not preserved")
         review_status = response.get("review_status")
@@ -621,6 +670,8 @@ class WindowsCodexReviewAdapter:
                     or any(not isinstance(defect.get(key), str) or not defect.get(key)
                            for key in ("defect_id", "acceptance_condition_id", "evidence_reference"))):
                 raise ValueError("review defect is malformed or out of acceptance scope")
+        if len({item["defect_id"] for item in defects}) != len(defects):
+            raise ValueError("review defect IDs must be unique")
         sections = response.get("sections")
         if not isinstance(sections, list) or not sections:
             raise ValueError("review evidence is incomplete")
@@ -674,6 +725,7 @@ class WindowsCodexReviewAdapter:
             if (verification["status"] != allowed_verification or counterclaim is not None
                     or set(response["acceptance_condition_ids_satisfied"]) != claim_ids
                     or set(checked) != claim_ids or verification["material_reliance"] is not True
+                    or response["violated_acceptance_condition_ids"] or defects
                     or not exact_package_evidence or not exact_package_evidence <= returned_evidence):
                 raise ValueError("pass state contradicts verification evidence")
         if review_status == "correction_required" and not defects:
@@ -682,9 +734,14 @@ class WindowsCodexReviewAdapter:
                 verification["status"] not in {"disputed", "unverified", "insufficient"}
                 or not response["violated_acceptance_condition_ids"]):
             raise ValueError("correction_required contradicts verification evidence")
+        if review_status == "correction_required" and (
+                {item["acceptance_condition_id"] for item in defects}
+                - set(response["violated_acceptance_condition_ids"])):
+            raise ValueError("defect is not bound to a violated acceptance condition")
         if review_status == "insufficient_evidence" and (
                 verification["status"] not in {"insufficient", "unverified"}
-                or set(response["acceptance_condition_ids_satisfied"]) == claim_ids):
+                or set(response["acceptance_condition_ids_satisfied"]) == claim_ids
+                or not any(isinstance(item, str) and item.strip() for item in verification["caveats"])):
             raise ValueError("insufficient_evidence contradicts verification evidence")
         if review_status == "blocked" and verification["status"] in {
                 "accepted", "accepted_with_caveats"}:
@@ -724,7 +781,9 @@ Frozen read-only candidate snapshot: {candidate_snapshot_id}
 Expected package/digest/bytes: {package['package_id']} / {package_sha} / {len(exported)}
 Expected source/builder/task: {package['source_report_id']} / {builder_return_id} / {package['task_scope_id']}
 Recipient: {WINDOWS_REVIEWER_WORKER_ID} / {WINDOWS_ENVIRONMENT_ID}
+Echo every exact lineage value above, including candidate_snapshot_id, in the response.
 Verify lineage. Review only supplied exact evidence. Preserve caveats, disputes, and insufficiency.
+The ONLY valid acceptance condition IDs are: {json.dumps([c['claim_id'] for c in package.get('claims', [])])}
 Return only the schema. The ONLY valid relied_source_section_ids are these exact original section IDs:
 {json.dumps(original_section_ids)}
 Do not put report IDs, evidence reference IDs, claim IDs, or invented labels in relied_source_section_ids.
@@ -757,6 +816,7 @@ def validate_windows_review_return(*, exchange, campaign_record, review, reviewe
         "transport_qualified": WINDOWS_ADAPTER_QUALIFIED, "transport_promoted": WINDOWS_ADAPTER_PROMOTED}
 
 
-def validate_windows_structured_response(response, package, package_sha256, recipient, invocation_id):
+def validate_windows_structured_response(response, package, package_sha256, recipient, invocation_id,
+                                         candidate_snapshot_id=None):
     return WindowsCodexReviewAdapter._validate_response(
-        response, package, package_sha256, recipient, invocation_id)
+        response, package, package_sha256, recipient, invocation_id, candidate_snapshot_id)
