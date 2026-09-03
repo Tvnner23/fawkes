@@ -7,6 +7,7 @@ import json
 import os
 import shutil
 import signal
+import stat
 import subprocess
 import tempfile
 import uuid
@@ -325,22 +326,74 @@ def _exact_builder_evidence(exchange, campaign_record, workspace):
     if (not isinstance(application, dict) or application.get("status") != "applied"
             or application.get("mutation_manifest_sha256") != result.get("workspace_changes_sha256")):
         raise ValueError("builder application receipt is missing or incoherent")
+    workspace = Path(workspace).resolve()
+    scopes = campaign_record["allowed_scope"]
+    directory_scopes = {scope for scope in scopes
+        if isinstance(scope, str) and (workspace / scope).is_dir()
+        and not (workspace / scope).is_symlink()}
+    exact_by_path = {item.get("path"): item for item in exact_changes
+                     if isinstance(item, dict) and isinstance(item.get("path"), str)}
+    if len(exact_by_path) != len(exact_changes):
+        raise ValueError("builder exact change evidence paths are invalid or duplicated")
+
+    def normalized(relative):
+        candidate = Path(relative)
+        if (not isinstance(relative, str) or not relative or candidate.is_absolute()
+                or "\\" in relative or any(part in {"", ".", ".."} for part in candidate.parts)
+                or candidate.as_posix() != relative):
+            raise PermissionError("changed artifact path is not normalized")
+        return relative
+
+    def in_authorized_file_scope(relative):
+        return relative in scopes or any(relative.startswith(scope + "/")
+            for scope in directory_scopes)
+
+    authorized_regular_changes = {normalized(change["path"])
+        for change in result["workspace_changes"]
+        if (change.get("after") or {}).get("file_type") == "regular"
+        and in_authorized_file_scope(change["path"])}
     artifacts = []
     total = 0
     for change in result["workspace_changes"]:
-        path = (Path(workspace) / change["path"]).resolve()
-        try: path.relative_to(Path(workspace).resolve())
+        relative = normalized(change["path"])
+        path = (workspace / relative).resolve()
+        try: path.relative_to(workspace)
         except ValueError as exc: raise PermissionError("changed artifact escaped workspace") from exc
-        if change["path"] not in campaign_record["allowed_scope"] or change.get("after") is None:
+        after = change.get("after")
+        evidence = exact_by_path.get(relative)
+        if after is None or evidence is None:
             raise PermissionError("review evidence contains an unavailable or out-of-scope artifact")
-        if path.is_symlink() or not path.is_file():
+        receipt = evidence.get("eligibility_receipt")
+        if (not isinstance(receipt, dict) or receipt.get("path") != relative
+                or receipt.get("disclosure_allowed") is not True
+                or receipt.get("record_sha256") != _digest(
+                    {key: value for key, value in receipt.items() if key != "record_sha256"})):
+            raise PermissionError("changed artifact eligibility evidence is invalid")
+        binding = evidence.get("after_node_binding")
+        if (not isinstance(binding, dict) or binding.get("state") != "present"
+                or binding.get("file_type") != after.get("file_type")
+                or binding.get("mode") != after.get("mode")):
+            raise ValueError("changed artifact node binding is mismatched")
+        if after.get("file_type") == "directory":
+            necessary_ancestor = any(item.startswith(relative + "/")
+                                     for item in authorized_regular_changes)
+            within_directory_scope = any(relative == scope or relative.startswith(scope + "/")
+                                         for scope in directory_scopes)
+            if not (necessary_ancestor or within_directory_scope):
+                raise PermissionError("directory evidence has no authorized changed descendant")
+            if path.is_symlink() or not path.is_dir() or stat.S_IMODE(path.stat().st_mode) != after.get("mode"):
+                raise ValueError("changed directory metadata is stale or mismatched")
+            continue
+        if not in_authorized_file_scope(relative):
+            raise PermissionError("review evidence contains an unavailable or out-of-scope artifact")
+        if path.is_symlink() or not path.is_file() or after.get("file_type") != "regular":
             raise ValueError("changed artifact is not an inspectable regular file")
         data = path.read_bytes(); total += len(data)
         if total > 256_000 or hashlib.sha256(data).hexdigest() != change["after"]["sha256"]:
             raise ValueError("changed artifact bytes are stale or exceed the review evidence limit")
         try: content = data.decode("utf-8")
         except UnicodeDecodeError as exc: raise ValueError("changed artifact is not bounded UTF-8 source") from exc
-        artifacts.append({"path": change["path"], "sha256": change["after"]["sha256"],
+        artifacts.append({"path": relative, "sha256": change["after"]["sha256"],
                           "byte_length": len(data), "content": content})
     return result, artifacts
 

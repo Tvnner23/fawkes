@@ -527,6 +527,70 @@ class AutonomyProductionTransportTests(unittest.TestCase):
                     "file_count": len(snapshot["files"]), "total_byte_length": 0},
                 workspace=self.workspace)
 
+    def test_review_package_accepts_only_necessary_directory_metadata_for_new_file(self):
+        self.scopes = ["qualification/nested/result.txt"]
+        fake = FakeWriteCodex(self.workspace, self.scopes[0])
+        result = self.invoke(fake)
+        self.assertEqual(result["status"], "delivered")
+        self.assertEqual([item["path"] for item in result["workspace_changes"]],
+                         ["qualification", "qualification/nested", self.scopes[0]])
+        returned = self.exchange._load("reports", result["return_report_id"])
+        campaign = {"instance_id": "fawkes", "campaign_id": self.campaign,
+            "status": "awaiting_independent_review", "iteration": 1,
+            "objective": "Review exact nested addition.",
+            "acceptance_condition_ids": ["done"],
+            "acceptance_conditions": {"done": "The nested file is exact."},
+            "allowed_scope": self.scopes, "recovery_references": self.recovery,
+            "contract_version": "fixture-campaign-v1",
+            "builder_runs": [{"iteration": 1, "package_id": self.package["package_id"],
+                "return_report_id": returned["report_id"],
+                "transport_result_reference": {"workspace_changes_sha256":
+                    result["workspace_changes_sha256"]}, "validation_evidence": [],
+                "completed_at": datetime.now(timezone.utc).isoformat()}]}
+        snapshot = candidate_manifest(self.workspace)
+        prepared = prepare_windows_review_package(exchange=self.exchange,
+            campaign_record=campaign, candidate_snapshot={**snapshot,
+                "record_sha256": _digest(snapshot), "file_count": len(snapshot["files"]),
+                "total_byte_length": sum(item["byte_length"] for item in snapshot["files"])},
+            workspace=self.workspace)
+        package = self.exchange._load("packages", prepared["package_id"])
+        sections = {item["section_id"]: item["content"]
+                    for item in package["included_sections"]}
+        self.assertIn("qualification", sections["exact-change-evidence"])
+        artifacts = [key for key in sections if key.startswith("changed-artifact-")]
+        self.assertEqual(len(artifacts), 1)
+        self.assertIn(self.scopes[0], sections[artifacts[0]])
+        self.assertNotIn("BEGIN EXACT UTF-8 ARTIFACT", sections["exact-change-evidence"])
+
+    def test_review_package_directory_scope_does_not_authorize_siblings(self):
+        self.scopes = ["src"]
+        result = self.invoke(FakeWriteCodex(self.workspace, "src/nested/result.txt"))
+        self.assertEqual(result["status"], "delivered")
+        returned = self.exchange._load("reports", result["return_report_id"])
+        campaign = {"instance_id": "fawkes", "campaign_id": self.campaign,
+            "status": "awaiting_independent_review", "iteration": 1,
+            "objective": "Review directory-scoped addition.",
+            "acceptance_condition_ids": ["done"],
+            "acceptance_conditions": {"done": "Only the scoped file changed."},
+            "allowed_scope": self.scopes, "recovery_references": self.recovery,
+            "contract_version": "fixture-campaign-v1",
+            "builder_runs": [{"iteration": 1, "package_id": self.package["package_id"],
+                "return_report_id": returned["report_id"],
+                "transport_result_reference": {"workspace_changes_sha256":
+                    result["workspace_changes_sha256"]}, "validation_evidence": [],
+                "completed_at": datetime.now(timezone.utc).isoformat()}]}
+        snapshot = candidate_manifest(self.workspace)
+        prepare_windows_review_package(exchange=self.exchange, campaign_record=campaign,
+            candidate_snapshot={**snapshot, "record_sha256": _digest(snapshot),
+                "file_count": len(snapshot["files"]),
+                "total_byte_length": sum(item["byte_length"] for item in snapshot["files"])},
+            workspace=self.workspace)
+        # A similarly-prefixed sibling remains outside the adapter's exact scope.
+        self.setUp(); self.scopes = ["src"]
+        rejected = self.invoke(FakeWriteCodex(self.workspace, "src-neighbor/result.txt"))
+        self.assertEqual(rejected["status"], "failed")
+        self.assertEqual(rejected["failure_reason"], "unauthorized_file_mutation")
+
     def test_out_of_scope_disposable_write_fails_without_authoritative_recovery(self):
         result = self.invoke(FakeWriteCodex(self.workspace, "outside.py"))
         self.assertEqual(result["status"], "failed")
