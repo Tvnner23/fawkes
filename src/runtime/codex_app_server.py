@@ -18,6 +18,7 @@ import time
 
 PROTOCOL_VERSION = "codex-app-server-0.151.0"
 SUPPORTED_CLI_VERSION = "codex-cli 0.151.0"
+SHELL_ENVIRONMENT_POLICY_OVERRIDE = "shell_environment_policy.inherit=all"
 PROTOCOL_SCHEMA_SHA256 = {
     "item/commandExecution/requestApproval": "c9728280b8f3204fd729d0fb3d1ca7bb05b1150de26b3653f7163e6a9bd941e7",
     "item/fileChange/requestApproval": "13848b26814c286ad6425a20d01c1691c86790e1f9e2529399677a8a22fe0d18",
@@ -177,7 +178,8 @@ class CodexAppServerTransport:
             campaign_id, invocation_id, worker, environment, approval_handler=None,
             allow_detached_continuation=True):
         qualification = self.qualify(environment)
-        process = self.popen([self.codex_binary, "app-server", "--listen", "stdio://"],
+        process = self.popen([self.codex_binary, "-c", SHELL_ENVIRONMENT_POLICY_OVERRIDE,
+                              "app-server", "--listen", "stdio://"],
             cwd=str(cwd), env=environment, text=True, bufsize=1,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         inbox, stderr_lines = queue.Queue(), []

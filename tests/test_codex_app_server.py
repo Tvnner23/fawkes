@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 
 from src.runtime.codex_app_server import (
     AppServerResult, CodexAppServerError, CodexAppServerTransport, PROTOCOL_VERSION,
+    SHELL_ENVIRONMENT_POLICY_OVERRIDE,
     approval_response, typed_approval,
     extend_deadline_for_attention,
 )
@@ -44,6 +45,57 @@ class CodexAppServerProtocolTests(unittest.TestCase):
                          {"decision": "decline"})
         self.assertEqual(approval_response("item/commandExecution/requestApproval", "cancel_campaign", PARAMS),
                          {"decision": "cancel"})
+
+    def test_launch_inherits_only_the_supplied_minimal_environment(self):
+        frames = [
+            {"id": 1, "result": {}},
+            {"id": 2, "result": {"thread": {"id": "thread-1"}}},
+            {"id": 3, "result": {"turn": {"id": "turn-1"}}},
+            {"method": "item/completed", "params": {"item": {
+                "id": "agent-1", "type": "agentMessage", "text": '{"ok":true}'}}},
+            {"method": "turn/completed", "params": {"turn": {"status": "completed"}}},
+        ]
+        launched = {}
+        class Process:
+            pid = 77
+            returncode = None
+            def __init__(self):
+                self.stdin = io.StringIO()
+                self.stdout = io.StringIO("".join(json.dumps(value) + "\n" for value in frames))
+                self.stderr = io.StringIO()
+            def poll(self): return self.returncode
+            def terminate(self): self.returncode = 0
+            def wait(self, timeout=None): return self.returncode
+            def kill(self): self.returncode = -9
+        def popen(command, **kwargs):
+            launched.update(command=command, environment=kwargs["env"])
+            return Process()
+        class Transport(CodexAppServerTransport):
+            def qualify(self, environment):
+                return {"protocol_version": PROTOCOL_VERSION, "cli_version": "test",
+                        "typed_approval_methods": [], "request_schema_sha256": {}}
+
+        minimal_environment = {
+            "PATH": "/usr/bin",
+            "FAWKES_RUNTIME_STATE_ROOT": "/safe/fawkes-state",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            result = Transport(popen=popen).run(
+                cwd=directory, prompt="test", output_schema={"type": "object"},
+                output_path=Path(directory) / "last.json", sandbox="workspace-write",
+                campaign_id="campaign-1", invocation_id="invocation-1",
+                worker={"worker_id": "worker-1"}, environment=minimal_environment)
+
+        self.assertIsInstance(result, AppServerResult)
+        self.assertEqual(launched["command"], [
+            "codex", "-c", SHELL_ENVIRONMENT_POLICY_OVERRIDE,
+            "app-server", "--listen", "stdio://",
+        ])
+        self.assertIs(launched["environment"], minimal_environment)
+        self.assertEqual(launched["environment"], {
+            "PATH": "/usr/bin",
+            "FAWKES_RUNTIME_STATE_ROOT": "/safe/fawkes-state",
+        })
 
     def test_tanner_pause_does_not_consume_turn_budget_at_old_boundary(self):
         original_deadline = 420.0
