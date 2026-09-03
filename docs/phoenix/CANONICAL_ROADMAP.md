@@ -378,7 +378,10 @@ the experiment evidence.
 ## Cross-cutting contracts
 
 These are extension requirements, not permission grants or demands to build
-distant features prematurely.
+distant features prematurely. The accepted future architecture below records
+ownership and compatibility direction only: it grants no implementation,
+scheduling, provider selection, production, promotion, spending, external
+action, or continuing authority; it does not block near-term roadmap work.
 
 ### Schema evolution and compatibility
 
@@ -485,6 +488,48 @@ event names, correlation/causation IDs, and idempotency keys. Durable work
 items, atomic claims, retry states, and result references prevent crashes and
 client retries from creating unknowable half-states.
 
+### Canonical run and campaign execution context
+
+Future coordinated work uses one immutable, canonical `RunContext` created at
+bootstrap. It carries run/campaign/work IDs; actor and role; provider, model,
+version, and configuration; workspace and separately declared external roots;
+capabilities and allowed paths; model/tool/test/retry/concurrency/time/cost
+budgets; and policy, authorization, correlation, and trace IDs. Downstream
+stages consume that context rather than guessing values or depending on ambient
+environment beyond bootstrap. A durable, idempotent lifecycle records campaign
+creation, dispatch, checkpoint, pause, retry, resumption, completion,
+rejection, cancellation, and rollback so replay cannot duplicate effects.
+
+A named least-authority Capability Broker resolves each operation against the
+context's explicit grants. Typed handoffs carry exact inputs, lineage,
+constraints, and requested work, but never inherit or forward the sender's
+authority; recipients must receive their own independently valid grant.
+
+### Unified execution evidence and qualification
+
+Work emits a versioned, sanitized event/trace envelope with run, actor/role,
+stage, correlation/causation, timing, policy, capability, status, and evidence
+references, without bodies, secrets, or private prompt content. This is the
+eventual source for Worker Pulse visibility, not a second execution authority
+or canonical evidence store.
+
+A provider-neutral qualification registry records the scoped evidence by which
+a provider/model/version/configuration may serve a role. A body-free Usage and
+Outcome Ledger records provider, model, version, role, task and context class,
+tokens or credits, estimated cost, latency, retries, tools, tests, verdict,
+corrections, regressions, escalation, acceptance, rejection, and rollback.
+Derived routing measures remain versioned projections of that evidence; they do
+not grant authority, replace exact evidence, or turn cost into a verdict.
+
+### Memory write gateway
+
+Future writes pass through one policy-enforcing Memory Write Gateway that keeps
+working context, operational state, evidence, personal continuity, and durable
+Archive/Memory distinct. A successful run, handoff, model statement, summary,
+or Worker Pulse event cannot silently become personal continuity or durable
+Memory; each destination retains its own provenance, review, privacy, and
+lifecycle rules.
+
 ### Actor, consent, and third-party privacy
 
 Operations identify whether they were initiated by a rider, Phoenix,
@@ -539,6 +584,13 @@ versions, archetype/rig compatibility, rights, provenance, safety review, and
 fallbacks. Asset ownership or purchase does not become personality, Memory, or
 Phoenix identity. Future third-party assets are untrusted data, never scripts
 or authority-bearing instructions.
+
+The future Phoenix Embodiment Fabric presents one continuing Phoenix through
+many genuine forms. Every form declares its perception, expression, action,
+presence, identity, consent, privacy, and authority capabilities. Renderers,
+devices, and manifestations remain replaceable without fragmenting continuity;
+connection, handoff, appearance, or presence never implicitly transfers
+authority between forms.
 
 ### Development coordination and approval
 
@@ -833,6 +885,14 @@ history, Memory, relationships, Development, embodiment, provenance, authority,
 temporal integrity, information loss, and behavioral drift. A matched control is
 a different Phoenix created from the same genesis template, never a concurrent
 copy of the lived Phoenix under test.
+
+Phoenix Continuity Proof v1 is the future evidence contract for this work and
+is validated primarily through Ghost Rider Alpha. It covers chain integrity,
+clean resurrection, cross-model restoration, behavioral continuity, privacy,
+corruption recovery, and Worker Pulse visibility. Ghost Rider progresses from
+deterministic scenarios to disposable Phoenixes, simulated time, adversarial
+trials, and longitudinal Alpha evidence; no stage may claim continuity merely
+from model similarity, a passing summary, or an unfenced copy.
 
 This is a useful Alpha-time Development tool, not a v0.1 Alpha gate and not a
 dependency that blocks Phases 7–10. Initial targets are retrieval/continuity,
@@ -1279,6 +1339,14 @@ Assurance evidence; preserve dissent; and route Human Review. Coordination does
 not confer certification or promotion authority and must not create a second
 message bus.
 
+The Phase 17 role router is evidence-based and provider-neutral. Models earn
+specific roles through equivalent frozen trials, deterministic tests,
+independent review, and shadow then canary qualification recorded in the
+qualification registry. Qualification is scoped to provider/model/version,
+configuration, role, and task class, is revocable on regression, and is never
+authority. Cost is one routing factor only and cannot override qualification,
+policy, privacy, capability, or action authority.
+
 ## Phase 18 — Intelligence budget and model router
 
 Track task, provider/model, calls, tokens, cost, latency, quality, failure, and
@@ -1288,6 +1356,13 @@ Maximum policies without pretending incomplete budget-limited work succeeded.
 Model/provider routing may later improve verifier diversity and Tool Scout
 evaluation, subject to privacy, capability, cost, and authority. Discovery
 produces attributed proposals/evidence, never installation or assignment.
+
+Add the RunContext Efficiency and Budget Controller for model tier, context
+allocation, tests, retries, concurrency, elapsed time, and cost. Deterministic
+code owns hashes, diffs, schema and policy validation, rollback mechanics, test
+selection, and bookkeeping. Select lighter, workhorse, or frontier models by
+qualified task need and evidence, preserving incomplete or escalated outcomes
+rather than spending past policy or treating a larger model as authority.
 
 ### Post-Phase 18 capability — Mature Ghost Rider longitudinal research platform
 
@@ -1426,6 +1501,10 @@ falsification.
   synthetic-scope Ghost Rider conformance/evolution experiments while keeping
   rendered checkpoints derived and preventing experimental embodiment from
   becoming production identity evidence.
+- Realize the Phoenix Embodiment Fabric contract so each form negotiates an
+  explicit capability manifest while remaining a manifestation of the same
+  continuity. Form or renderer replacement must preserve identity/continuity
+  references and cannot import the prior form's action or presence authority.
 
 ### Post-Phase 28 capability — Ambient and experiential embodiment
 
