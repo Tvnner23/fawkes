@@ -10,6 +10,26 @@ MEMORY_TYPES = {
     "user_fact": {
         "description": "Stable factual information about the user.",
     },
+    "education_institution": {
+        "description": "The institution where the user studies or plans to study.",
+    },
+    "degree": {
+        "description": "A specific degree or credential the user is pursuing or holds.",
+    },
+    "career_direction": {
+        "description": "The user's current professional field, specialization, or direction.",
+    },
+    "career_goal": {
+        "description": "A longer-term professional outcome or progression the user wants.",
+        "lifecycle": (
+            "active",
+            "paused",
+            "completed",
+            "abandoned",
+            "superseded",
+            "uncertain",
+        ),
+    },
     "preference": {
         "description": "Things the user likes, dislikes, prefers, or avoids.",
     },

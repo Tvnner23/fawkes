@@ -19,6 +19,23 @@ class FawkesMemoryTaxonomyTests(unittest.TestCase):
         self.assertIn("personality_development", MEMORY_TYPES)
         self.assertIn("self_history", MEMORY_TYPES)
 
+    def test_education_and_career_concepts_are_distinct_types(self):
+        self.assertIn("education_institution", MEMORY_TYPES)
+        self.assertIn("degree", MEMORY_TYPES)
+        self.assertIn("career_direction", MEMORY_TYPES)
+        self.assertIn("career_goal", MEMORY_TYPES)
+        self.assertEqual(
+            len(
+                {
+                    "education_institution",
+                    "degree",
+                    "career_direction",
+                    "career_goal",
+                }
+            ),
+            4,
+        )
+
     def test_relationship_types_exist(self):
         self.assertIn("supports", RELATIONSHIP_TYPES)
         self.assertIn("contradicts", RELATIONSHIP_TYPES)
