@@ -28,8 +28,25 @@ from src.runtime.disposable_verifier import candidate_manifest, materialize_cand
 from src.runtime.durable_reviewed_application import (
     DurableReviewedApplication, unrelated_workspace_sha256, write_durable_record,
 )
+from src.runtime.git_commit_transaction import GitCommitTransaction
 from src.runtime.worker_exchange import WorkerExchange, _authority, _digest, body_free_references
 from src.runtime.evidence_eligibility import classify_reviewer_source_evidence
+
+
+def _reviewed_commit_projection(repository, state_root, *, operation_id,
+                                expected_parent_head, scope, review_receipt_sha256):
+    probe=subprocess.run(["git","rev-parse","--git-dir"],cwd=repository,
+        text=True,capture_output=True,check=False)
+    if probe.returncode:
+        value={"schema_version":1,"record_type":"reviewed_application_non_git_projection",
+            "operation_id":operation_id,"expected_parent_head":expected_parent_head,
+            "scope":list(scope),"review_receipt_sha256":review_receipt_sha256,
+            "creates_authority":False}
+        value["record_sha256"]=_digest(value);return value
+    state_root.mkdir(parents=True,exist_ok=True,mode=0o700)
+    return GitCommitTransaction(repository,state_root).reviewed_application_projection(
+        operation_id=operation_id,expected_parent_head=expected_parent_head,scope=scope,
+        review_receipt_sha256=review_receipt_sha256)
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -1149,14 +1166,104 @@ class CodexWriteBuilderAdapter(CodexExecWorkerAdapter):
         if state["state"] != "completed":
             raise RuntimeError("reviewed application terminated " + state["state"])
         terminal = transaction.terminal_receipt(operation_id)
+        projection_root=directory/"git-projection"
+        projection=_reviewed_commit_projection(self.workspace,projection_root,
+            operation_id=operation_id,expected_parent_head=request["expected_repository_head"],
+            scope=[item["path"] for item in path_records],
+            review_receipt_sha256=receipt["record_sha256"])
         record = {**application, **terminal, "review_report_id": review_report_id,
             "review_acceptance_receipt_sha256": receipt["record_sha256"],
             "candidate_snapshot_id": final_candidate["candidate_snapshot_id"],
             "candidate_record_sha256": final_candidate["record_sha256"],
-            "mutation_manifest_sha256": _digest(changes), "completed_at": _now()}
+            "mutation_manifest_sha256": _digest(changes), "completed_at": _now(),
+            "reviewed_commit_projection": projection,
+            "creates_continuing_authority": False}
         record.pop("record_sha256", None); record["record_sha256"] = _digest(record)
         write_durable_record(application_path, record)
         return record
+
+    def reconcile_reviewed_candidate_application(self, *, operation_id, package_id,
+            campaign_id, review_report_id, review_acceptance_receipt):
+        """Return one exact completed application without replaying its side effects."""
+        operation_id = require_id(operation_id, "operation_id")
+        package_id = require_id(package_id, "package_id")
+        campaign_id = require_id(campaign_id, "campaign_id")
+        review_report_id = require_id(review_report_id, "review_report_id")
+        receipt = review_acceptance_receipt
+        if (not isinstance(receipt, dict)
+                or receipt.get("record_sha256") != _digest(
+                    {key: value for key, value in receipt.items() if key != "record_sha256"})
+                or receipt.get("record_type") != "codex_independent_review_acceptance_receipt"
+                or receipt.get("status") != "accepted"
+                or receipt.get("campaign_id") != campaign_id
+                or receipt.get("package_id") != package_id
+                or receipt.get("review_report_id") != review_report_id
+                or receipt.get("creates_authority") is not False):
+            raise PermissionError("exact bound independent-review acceptance receipt is required")
+        expected_operation = "reviewed-application-" + _digest({"package_id": package_id,
+            "campaign_id": campaign_id, "review_receipt": receipt["record_sha256"]})
+        if operation_id != expected_operation:
+            raise PermissionError("reviewed application operation identity mismatch")
+        directory = self.root / "write-candidate" / package_id
+        result = json.loads((directory / "result.json").read_text(encoding="utf-8"))
+        request = json.loads((directory / "request.json").read_text(encoding="utf-8"))
+        application = json.loads((directory / "application.json").read_text(encoding="utf-8"))
+        for value in (result, request, application):
+            if value.get("record_sha256") != _digest(
+                    {key: item for key, item in value.items() if key != "record_sha256"}):
+                raise PermissionError("reviewed application evidence integrity mismatch")
+        if (application.get("record_type") != "codex_post_review_authoritative_application_receipt"
+                or application.get("status") != "applied_verified_after_review"
+                or application.get("operation_id") != operation_id
+                or application.get("application_count") != 1
+                or application.get("review_report_id") != review_report_id
+                or application.get("review_acceptance_receipt_sha256") != receipt["record_sha256"]
+                or application.get("candidate_snapshot_id") != receipt.get("candidate_snapshot_id")
+                or application.get("mutation_manifest_sha256") != receipt.get("mutation_manifest_sha256")
+                or not isinstance(application.get("reviewed_commit_projection"),dict)
+                or application.get("creates_continuing_authority") is not False
+                or application.get("creates_authority") is not False):
+            raise PermissionError("terminal reviewed application receipt lineage mismatch")
+        binding = application.get("binding") or {}
+        if (binding.get("campaign_id") != campaign_id
+                or binding.get("review_package_id") != receipt.get("review_package_id")
+                or binding.get("review_acceptance_receipt_sha256") != receipt["record_sha256"]
+                or binding.get("candidate_snapshot_id") != receipt.get("candidate_snapshot_id")
+                or binding.get("mutation_manifest_sha256") != receipt.get("mutation_manifest_sha256")
+                or binding.get("authorized_scope_sha256") != receipt.get("allowed_scope_sha256")):
+            raise PermissionError("terminal reviewed application binding mismatch")
+        transaction = DurableReviewedApplication(self.workspace,
+            directory / "application-transaction", replace=self.apply_replace)
+        state = transaction.reconcile(operation_id)
+        terminal = transaction.terminal_receipt(operation_id)
+        if (state.get("state") != "completed" or state.get("application_count") != 1
+                or terminal.get("record_sha256") != application.get("record_sha256") and
+                   terminal.get("transaction_record_sha256") != application.get("transaction_record_sha256")):
+            raise PermissionError("durable terminal application is not exact")
+        projection_root=directory/"git-projection"
+        expected_projection=_reviewed_commit_projection(self.workspace,projection_root,
+            operation_id=operation_id,
+            expected_parent_head=binding["expected_repository_head"],
+            scope=application.get("applied_paths") or [],
+            review_receipt_sha256=receipt["record_sha256"])
+        if application["reviewed_commit_projection"] != expected_projection:
+            raise PermissionError("reviewed commit projection drift")
+        candidate_root = (directory / "candidate").resolve()
+        final_manifest = candidate_manifest(candidate_root)
+        retained = result.get("candidate_snapshot") or {}
+        if (final_manifest["candidate_snapshot_id"] != retained.get("candidate_snapshot_id")
+                or retained.get("candidate_snapshot_id") != receipt.get("candidate_snapshot_id")):
+            raise PermissionError("retained candidate changed after review")
+        changes = result.get("workspace_changes") or []
+        expected_paths = sorted(item["path"] for item in _applyable_changes(changes))
+        if sorted(application.get("applied_paths") or []) != expected_paths:
+            raise PermissionError("terminal application scope mismatch")
+        actual = _workspace_snapshot(self.workspace)
+        for change in changes:
+            expected = _content_state(change.get("after"))
+            if _content_state(actual.get(change["path"])) != expected:
+                raise PermissionError("authoritative postimage drift after application")
+        return application
 
     def _write_failure(self, path, request, package, authority, reason, detail, changes,
                        process_metadata=None, cache_cleanup=None, application_evidence=None):

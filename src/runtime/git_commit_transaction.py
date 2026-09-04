@@ -148,6 +148,121 @@ class GitCommitTransaction:
         prepared["record_sha256"]=_digest(prepared)
         return prepared
 
+    def _reviewed_application(self, receipt):
+        if (not isinstance(receipt,dict)
+                or receipt.get("record_type")!="codex_post_review_authoritative_application_receipt"
+                or receipt.get("status")!="applied_verified_after_review"
+                or receipt.get("application_count")!=1
+                or receipt.get("creates_authority") is not False
+                or receipt.get("creates_continuing_authority") is not False
+                or receipt.get("record_sha256")!=_digest(
+                    {key:value for key,value in receipt.items() if key!="record_sha256"})):
+            raise PermissionError("exact terminal reviewed-application receipt is required")
+        binding=receipt.get("binding") or {}
+        required=("campaign_id","candidate_snapshot_id","mutation_manifest_sha256",
+                  "review_package_id","review_acceptance_receipt_sha256",
+                  "authorized_scope_sha256","expected_repository_head")
+        if any(binding.get(key) in (None,"") for key in required):
+            raise PermissionError("terminal reviewed-application lineage is incomplete")
+        projection=receipt.get("reviewed_commit_projection")
+        if (not isinstance(projection,dict)
+                or projection.get("record_type")!="reviewed_application_commit_projection"
+                or projection.get("record_sha256")!=_digest(
+                    {key:value for key,value in projection.items() if key!="record_sha256"})):
+            raise PermissionError("reviewed application commit projection is malformed")
+        return receipt
+
+    def reviewed_application_projection(self, *, operation_id, expected_parent_head,
+            scope, review_receipt_sha256):
+        """Derive the sole Git tree, diff, and metadata allowed for an application."""
+        for name,value in (("operation_id",operation_id),("expected_parent_head",expected_parent_head),
+                           ("review_receipt_sha256",review_receipt_sha256)):
+            if not isinstance(value,str) or not value:raise ValueError(f"{name} is required")
+        paths=self._paths(scope)
+        if self._head()!=expected_parent_head:raise RuntimeError("Git parent HEAD changed")
+        normal_index=self._index_identity()
+        descriptor,index_name=tempfile.mkstemp(prefix="reviewed-projection-index-",dir=self.state_root)
+        os.close(descriptor);os.unlink(index_name);environment={**os.environ,"GIT_INDEX_FILE":index_name}
+        try:
+            self._run(["read-tree",expected_parent_head],env=environment)
+            self._run(["add","-A","--",*paths],env=environment)
+            tree=self._run(["write-tree"],env=environment,text=True).stdout.strip()
+        finally:Path(index_name).unlink(missing_ok=True)
+        changed=tuple(sorted(filter(None,self._run(["diff-tree","--no-commit-id","--name-only",
+            "-r",expected_parent_head,tree],text=True).stdout.splitlines())))
+        if changed!=paths:raise RuntimeError("reviewed projection changed outside or omitted scope")
+        diff=self._run(["diff-tree","--binary","--no-ext-diff","--no-commit-id","-p",
+            expected_parent_head,tree,"--",*paths]).stdout
+        if self._index_identity()!=normal_index:raise RuntimeError("normal Git index changed")
+        parent_date=self._run(["show","-s","--format=%aI",expected_parent_head],text=True).stdout.strip()
+        message=f"Reviewed application {operation_id}"
+        commit_message=(message+"\n\nFawkes-Operation-ID: "+operation_id+
+            "\nFawkes-Review-Receipt: "+review_receipt_sha256+"\n")
+        value={"schema_version":1,"record_type":"reviewed_application_commit_projection",
+          "operation_id":operation_id,"expected_parent_head":expected_parent_head,
+          "scope":list(paths),"scope_sha256":_digest(list(paths)),"expected_tree":tree,
+          "expected_diff_sha256":hashlib.sha256(diff).hexdigest(),"message":message,
+          "commit_message":commit_message,"author_name":"Fawkes Cleanup",
+          "author_email":"fawkes-cleanup@localhost.invalid","author_date":parent_date,
+          "committer_name":"Fawkes Cleanup","committer_email":"fawkes-cleanup@localhost.invalid",
+          "committer_date":parent_date,"review_receipt_sha256":review_receipt_sha256,
+          "creates_authority":False}
+        value["record_sha256"]=_digest(value);return value
+
+    def prepare_reviewed_application(self, *, terminal_application_receipt,
+            operation_id, expected_parent_head, reviewed_tree_sha256, scope,
+            exact_diff_sha256, mutation_manifest_sha256, review_receipt_sha256, message):
+        """Prepare a commit only for one exact completed canonical application."""
+        receipt=self._reviewed_application(terminal_application_receipt)
+        binding=receipt["binding"]
+        projection=receipt["reviewed_commit_projection"]
+        if (receipt.get("operation_id")!=operation_id
+                or binding.get("expected_repository_head")!=expected_parent_head
+                or binding.get("mutation_manifest_sha256")!=mutation_manifest_sha256
+                or binding.get("review_acceptance_receipt_sha256")!=review_receipt_sha256
+                or tuple(sorted(receipt.get("applied_paths") or ()))!=tuple(sorted(scope))
+                or projection.get("expected_tree")!=reviewed_tree_sha256
+                or projection.get("expected_diff_sha256")!=exact_diff_sha256
+                or projection.get("message")!=message):
+            raise PermissionError("reviewed application does not bind the exact commit")
+        observed=self.reviewed_application_projection(operation_id=operation_id,
+            expected_parent_head=expected_parent_head,scope=scope,
+            review_receipt_sha256=review_receipt_sha256)
+        if observed!=projection:raise PermissionError("reviewed commit projection drift")
+        prepared=self.prepare(operation_id=operation_id,expected_parent_head=expected_parent_head,
+            reviewed_tree_sha256=reviewed_tree_sha256,scope=scope,
+            exact_diff_sha256=exact_diff_sha256,
+            mutation_manifest_sha256=mutation_manifest_sha256,
+            review_receipt_sha256=review_receipt_sha256,message=message)
+        prepared={**prepared,"terminal_application_receipt_sha256":receipt["record_sha256"],
+            "application_operation_id":receipt["operation_id"],
+            "application_candidate_snapshot_id":binding["candidate_snapshot_id"],
+            "application_package_id":binding["review_package_id"],
+            "reviewed_commit_projection_sha256":projection["record_sha256"]}
+        prepared.pop("record_sha256",None);prepared["record_sha256"]=_digest(prepared)
+        return prepared
+
+    def reconcile_reviewed_application(self, prepared, terminal_application_receipt):
+        receipt=self._reviewed_application(terminal_application_receipt)
+        prepared=self._validate_prepared(prepared)
+        if (prepared.get("terminal_application_receipt_sha256")!=receipt["record_sha256"]
+                or prepared.get("application_operation_id")!=receipt["operation_id"]
+                or prepared.get("application_candidate_snapshot_id")!=
+                    receipt["binding"]["candidate_snapshot_id"]
+                or prepared.get("application_package_id")!=receipt["binding"]["review_package_id"]):
+            raise PermissionError("neighboring reviewed application commit binding")
+        if prepared.get("reviewed_commit_projection_sha256")!=receipt[
+                "reviewed_commit_projection"]["record_sha256"]:
+            raise PermissionError("reviewed commit projection binding mismatch")
+        return self.reconcile(prepared)
+
+    def advance_reviewed_application(self, prepared, terminal_application_receipt):
+        state=self.reconcile_reviewed_application(prepared,terminal_application_receipt)
+        if state["status"]=="committed":return state
+        self._run(["update-ref",prepared["branch_ref"],prepared["prepared_commit"],
+                   prepared["expected_parent_head"]])
+        return self.reconcile_reviewed_application(prepared,terminal_application_receipt)
+
     def reconcile(self, prepared):
         prepared=self._validate_prepared(prepared);paths=self._paths(prepared["scope"])
         if (self._branch_ref()!=prepared["branch_ref"]
