@@ -2,9 +2,11 @@
 
 from datetime import datetime, timezone
 from pathlib import Path
+import base64
 import hashlib
 import json
 import uuid
+import zlib
 
 from src.capabilities.core import CapabilityDefinition
 from src.library.artifacts import require_id
@@ -408,6 +410,83 @@ class WorkerExchange:
 
     def export_package(self, package_id):
         return (_canonical(self._load("packages", package_id)) + "\n").encode()
+
+    def export_package_transport(self, package_id, *, max_transport_bytes,
+                                 max_resolved_bytes):
+        """Losslessly transport one immutable package without changing its identity."""
+        logical = self.export_package(package_id)
+        if len(logical) > max_resolved_bytes:
+            raise ValueError("resolved Exchange package exceeds byte limit")
+        if len(logical) <= max_transport_bytes:
+            return logical
+        compressed = zlib.compress(logical, level=9)
+        payload = {"schema_version": 1,
+            "record_type": "worker_exchange_package_transport",
+            "encoding": "zlib-base64-v1", "package_id": package_id,
+            "resolved_byte_length": len(logical),
+            "resolved_sha256": hashlib.sha256(logical).hexdigest(),
+            "compressed_byte_length": len(compressed),
+            "compressed_sha256": hashlib.sha256(compressed).hexdigest(),
+            "body": base64.b64encode(compressed).decode("ascii"),
+            "creates_authority": False}
+        envelope = {**payload, "record_sha256": _digest(payload)}
+        transported = (_canonical(envelope) + "\n").encode()
+        if len(transported) > max_transport_bytes:
+            raise ValueError("transported Exchange package exceeds byte limit")
+        return transported
+
+    @staticmethod
+    def resolve_package_transport(data, *, max_transport_bytes,
+                                  max_resolved_bytes):
+        """Resolve an exact bounded transport envelope to the original package bytes."""
+        transported = bytes(data)
+        if len(transported) > max_transport_bytes:
+            raise ValueError("transported Exchange package exceeds byte limit")
+        try:
+            value = json.loads(transported.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError, TypeError) as exc:
+            raise ValueError("Exchange package transport encoding is invalid") from exc
+        if value.get("record_type") == "worker_exchange_package":
+            if len(transported) > max_resolved_bytes:
+                raise ValueError("resolved Exchange package exceeds byte limit")
+            return transported
+        expected_keys = {"schema_version", "record_type", "encoding", "package_id",
+            "resolved_byte_length", "resolved_sha256", "compressed_byte_length",
+            "compressed_sha256", "body", "creates_authority", "record_sha256"}
+        if (set(value) != expected_keys or value.get("schema_version") != 1
+                or value.get("record_type") != "worker_exchange_package_transport"
+                or value.get("encoding") != "zlib-base64-v1"
+                or value.get("creates_authority") is not False
+                or value.get("record_sha256") != _digest(
+                    {key: item for key, item in value.items() if key != "record_sha256"})):
+            raise ValueError("Exchange package transport integrity mismatch")
+        if (not isinstance(value.get("resolved_byte_length"), int)
+                or value["resolved_byte_length"] < 0
+                or value["resolved_byte_length"] > max_resolved_bytes):
+            raise ValueError("resolved Exchange package exceeds byte limit")
+        try:
+            compressed = base64.b64decode(value["body"], validate=True)
+        except (ValueError, TypeError) as exc:
+            raise ValueError("Exchange package transport body is invalid") from exc
+        if (len(compressed) != value.get("compressed_byte_length")
+                or hashlib.sha256(compressed).hexdigest() != value.get("compressed_sha256")):
+            raise ValueError("Exchange package transport body mismatch")
+        decoder = zlib.decompressobj()
+        logical = decoder.decompress(compressed, max_resolved_bytes + 1)
+        if (len(logical) > max_resolved_bytes or decoder.unconsumed_tail
+                or not decoder.eof or decoder.unused_data):
+            raise ValueError("resolved Exchange package is invalid or oversized")
+        logical += decoder.flush()
+        if (len(logical) != value["resolved_byte_length"]
+                or hashlib.sha256(logical).hexdigest() != value["resolved_sha256"]):
+            raise ValueError("resolved Exchange package identity mismatch")
+        try:
+            package = json.loads(logical.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("resolved Exchange package encoding is invalid") from exc
+        if package.get("package_id") != value.get("package_id"):
+            raise ValueError("resolved Exchange package identity mismatch")
+        return logical
 
     @staticmethod
     def verify_export(data, *, expected_instance_id, expected_task_scope_id, expected_recipient_id,

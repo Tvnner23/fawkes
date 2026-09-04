@@ -20,7 +20,8 @@ from src.runtime.disposable_verifier import candidate_manifest
 from src.runtime.worker_exchange import WorkerExchange, _authority, _digest
 from src.runtime.codex_app_server import CodexAppServerTransport
 from src.runtime.windows_codex_reviewer import (
-    MAX_REVIEW_PACKAGE_BYTES, WINDOWS_REVIEW_SCHEMA, _exact_builder_evidence,
+    MAX_REVIEW_PACKAGE_BYTES, MAX_REVIEW_RESOLVED_PACKAGE_BYTES,
+    WINDOWS_REVIEW_SCHEMA, _exact_builder_evidence,
     canonical_review_evidence_reference_ids, independent_review_acceptance_receipt, exact_review_schema,
     validate_windows_structured_response,
 )
@@ -251,8 +252,12 @@ class WslCodexReviewAdapter:
             binding["adapter_promotion_reference"] = WSL_PROMOTION_RECORD["promotion_id"]
         if any(transport_authority.get(k) != v for k, v in binding.items()):
             raise PermissionError("WSL review authority does not bind the exact request")
-        exported = self.exchange.export_package(package_id)
-        if len(exported) > MAX_REVIEW_PACKAGE_BYTES: raise ValueError("exact review package exceeds byte limit")
+        transported = self.exchange.export_package_transport(package_id,
+            max_transport_bytes=MAX_REVIEW_PACKAGE_BYTES,
+            max_resolved_bytes=MAX_REVIEW_RESOLVED_PACKAGE_BYTES)
+        exported = WorkerExchange.resolve_package_transport(transported,
+            max_transport_bytes=MAX_REVIEW_PACKAGE_BYTES,
+            max_resolved_bytes=MAX_REVIEW_RESOLVED_PACKAGE_BYTES)
         WorkerExchange.verify_export(exported, expected_instance_id=package["instance_id"],
             expected_task_scope_id=package["task_scope_id"], expected_recipient_id=recipient["worker_id"],
             expected_package_id=package_id, expected_source_report=source,

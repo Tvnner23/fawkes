@@ -71,6 +71,7 @@ WINDOWS_PROMOTION_RECORD = {
     "repository_write": False, "creates_approval_or_promotion_authority": False,
 }
 MAX_REVIEW_PACKAGE_BYTES = 512_000
+MAX_REVIEW_RESOLVED_PACKAGE_BYTES = 2_000_000
 WINDOWS_ENVIRONMENT_ID = "windows-codex-exec:tanner-windows:fawkes-exact-package"
 
 WINDOWS_CODEX_WORKER_REFERENCE = {
@@ -656,8 +657,12 @@ class WindowsCodexReviewAdapter:
             binding["adapter_promotion_reference"] = WINDOWS_PROMOTION_RECORD["promotion_id"]
         if any(transport_authority.get(k) != v for k, v in binding.items()):
             raise PermissionError("Windows review authority does not bind the exact request")
-        exported = self.exchange.export_package(package_id)
-        if len(exported) > MAX_REVIEW_PACKAGE_BYTES: raise ValueError("exact review package exceeds byte limit")
+        transported = self.exchange.export_package_transport(package_id,
+            max_transport_bytes=MAX_REVIEW_PACKAGE_BYTES,
+            max_resolved_bytes=MAX_REVIEW_RESOLVED_PACKAGE_BYTES)
+        exported = WorkerExchange.resolve_package_transport(transported,
+            max_transport_bytes=MAX_REVIEW_PACKAGE_BYTES,
+            max_resolved_bytes=MAX_REVIEW_RESOLVED_PACKAGE_BYTES)
         WorkerExchange.verify_export(exported, expected_instance_id=package["instance_id"],
             expected_task_scope_id=package["task_scope_id"], expected_recipient_id=recipient["worker_id"],
             expected_package_id=package_id, expected_source_report=source,
@@ -685,7 +690,7 @@ class WindowsCodexReviewAdapter:
             return {**cached, "idempotent_replay": True}
         if directory.exists(): raise RuntimeError("incomplete review attempt exists; blind retry forbidden")
         directory.mkdir(parents=True)
-        (directory / "transport-package.json").write_bytes(exported)
+        (directory / "transport-package.json").write_bytes(transported)
         request = {"schema_version": 1, "record_type": "windows_codex_review_request",
             "adapter_id": WINDOWS_ADAPTER_ID, "adapter_version": WINDOWS_ADAPTER_VERSION,
             "qualification_contract_version": WINDOWS_REVIEW_CONTRACT_VERSION,

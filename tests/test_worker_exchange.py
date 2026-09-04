@@ -1,4 +1,5 @@
 import json
+import hashlib
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -71,6 +72,49 @@ class WorkerExchangeTests(unittest.TestCase):
                 expected_task_scope_id="task-1",expected_recipient_id="blender-1",
                 expected_package_id=package["package_id"],expected_source_report=report,
                 expected_authorization_reference=package["recipient_authorization_reference"])
+
+    def test_bounded_lossless_transport_round_trip_dedup_and_tamper_guards(self):
+        content = "exact-source-body-" * 20000
+        report = self.exchange.create_report(task_scope_id="task-1", sender=self.codex,
+            authority=self.authority("codex-1"), sections=[
+                {"section_id":"one", "title":"One", "content":content},
+                {"section_id":"two", "title":"Two", "content":content}], claims=[])
+        package = self.exchange.compose_package(report_id=report["report_id"],
+            recipient=self.blender, authority=self.authority("codex-1", "blender-1"),
+            included_section_ids=["one", "two"])
+        logical = self.exchange.export_package(package["package_id"])
+        first = self.exchange.export_package_transport(package["package_id"],
+            max_transport_bytes=512_000, max_resolved_bytes=2_000_000)
+        second = self.exchange.export_package_transport(package["package_id"],
+            max_transport_bytes=512_000, max_resolved_bytes=2_000_000)
+        self.assertEqual(first, second)
+        self.assertLess(len(first), len(logical))
+        self.assertEqual(WorkerExchange.resolve_package_transport(first,
+            max_transport_bytes=512_000, max_resolved_bytes=2_000_000), logical)
+        envelope = json.loads(first)
+        self.assertEqual(envelope["resolved_sha256"], hashlib.sha256(logical).hexdigest())
+        self.assertFalse(envelope["creates_authority"])
+        for label, mutate in (
+            ("body", lambda item: item.__setitem__("body", item["body"][:-4] + "AAAA")),
+            ("digest", lambda item: item.__setitem__("resolved_sha256", "0" * 64)),
+            ("package", lambda item: item.__setitem__("package_id", "worker-package-neighbor")),
+            ("encoding", lambda item: item.__setitem__("encoding", "unknown")),
+        ):
+            with self.subTest(label=label):
+                changed = json.loads(first); mutate(changed)
+                changed["record_sha256"] = __import__(
+                    "src.runtime.worker_exchange", fromlist=["_digest"])._digest(
+                        {key:value for key,value in changed.items()
+                         if key != "record_sha256"})
+                with self.assertRaises(ValueError):
+                    WorkerExchange.resolve_package_transport(json.dumps(changed).encode(),
+                        max_transport_bytes=512_000, max_resolved_bytes=2_000_000)
+        with self.assertRaisesRegex(ValueError, "transported"):
+            WorkerExchange.resolve_package_transport(first,
+                max_transport_bytes=len(first)-1, max_resolved_bytes=2_000_000)
+        with self.assertRaisesRegex(ValueError, "resolved"):
+            WorkerExchange.resolve_package_transport(first,
+                max_transport_bytes=512_000, max_resolved_bytes=len(logical)-1)
 
     def test_export_rejects_rehashed_inner_source_summary_and_typed_state_mutations(self):
         package=self.package(); exported=self.exchange.export_package(package["package_id"])
