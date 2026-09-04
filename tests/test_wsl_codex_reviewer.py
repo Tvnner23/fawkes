@@ -523,12 +523,14 @@ class WslFormalReviewerTests(unittest.TestCase):
         coordinator.store.write(record)
         return coordinator
 
-    def test_campaign_default_uses_promoted_wsl_and_consumes_terminal_pass(self):
+    def test_campaign_review_pass_cannot_promote_noncanonical_application_callback(self):
         coordinator = self._formal_campaign()
         with patch("src.runtime.codex_development_campaign.ROOT", self.workspace):
             terminal = coordinator.run_to_terminal("campaign", reviewer_adapter=WslCodexReviewAdapter(
                 self.exchange, run_process=FakeWslReviewer(), timeout_seconds=5))
-        self.assertEqual(terminal["status"], "succeeded")
+        self.assertEqual(terminal["status"], "failed_safe")
+        self.assertEqual(terminal["needs_tanner"]["reason"],
+                         "reviewed_candidate_apply_failed")
         self.assertEqual(terminal["reviews"][-1]["reviewer"]["worker_id"], WSL_REVIEWER_WORKER_ID)
         self.assertEqual(terminal["maximum_iterations"], 3)
         self.assertFalse(terminal["creates_authority"])

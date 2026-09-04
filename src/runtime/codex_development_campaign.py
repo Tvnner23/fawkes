@@ -308,6 +308,105 @@ class CodexDevelopmentCampaign:
                 review_report_id=review_report_id,
                 review_acceptance_receipt=review_acceptance_receipt)
 
+    def _canonical_application_adapter(self):
+        """Resolve the canonical owner without accepting caller-supplied validation logic."""
+        from src.runtime.codex_write_builder_adapter import CodexWriteBuilderAdapter
+        owner = getattr(self.candidate_applier, "__self__", None)
+        function = getattr(self.candidate_applier, "__func__", None)
+        if (isinstance(owner, CodexWriteBuilderAdapter)
+                and function is CodexWriteBuilderAdapter.apply_reviewed_candidate_once):
+            return owner
+        if (owner is self
+                and function is CodexDevelopmentCampaign._apply_reviewed_builder_candidate):
+            return CodexWriteBuilderAdapter(self.exchange, workspace=ROOT,
+                runtime_state_root=self.runtime_state_root,
+                timeout_seconds=self.worker_timeout_seconds)
+        raise PermissionError("campaign application owner is not canonically reconcilable")
+
+    def reconcile_completed_application(self, campaign_id):
+        """Retrieve one exact terminal application without replaying its authority."""
+        record = self.store.load(campaign_id)
+        if record.get("status") != "succeeded":
+            raise RuntimeError("campaign application is not terminally successful")
+        reviews = record.get("reviews") or []
+        if not reviews:
+            raise PermissionError("campaign has no accepted independent review")
+        review = reviews[-1]
+        receipt = review.get("review_acceptance_receipt")
+        application = record.get("application_evidence")
+        if (review.get("status") not in {"pass", "pass_with_caveats"}
+                or not isinstance(receipt, dict)
+                or receipt.get("record_sha256") != _digest(
+                    {key: value for key, value in receipt.items() if key != "record_sha256"})
+                or receipt.get("campaign_id") != campaign_id
+                or not isinstance(application, dict)
+                or application.get("status") != "applied_verified_after_review"
+                or application.get("application_count") != 1
+                or application.get("operation_id") !=
+                    review.get("reviewed_application_operation_id")
+                or application.get("review_report_id") != review.get("review_report_id")
+                or application.get("review_acceptance_receipt_sha256") !=
+                    receipt.get("record_sha256")):
+            raise PermissionError("campaign terminal application lineage is incomplete")
+        runs = record.get("builder_runs") or []
+        if not runs:
+            raise PermissionError("campaign has no retained candidate")
+        run = runs[-1]
+        if (receipt.get("package_id") != run.get("package_id")
+                or receipt.get("review_report_id") != review.get("review_report_id")
+                or receipt.get("review_package_id") != review.get("review_package_id")
+                or receipt.get("candidate_snapshot_id") !=
+                    (run.get("candidate_snapshot") or {}).get("candidate_snapshot_id")
+                or receipt.get("mutation_manifest_sha256") !=
+                    (run.get("candidate_retention_receipt") or {}).get(
+                        "mutation_manifest_sha256")
+                or receipt.get("allowed_scope_sha256") != _digest(record["allowed_scope"])):
+            raise PermissionError("campaign acceptance receipt is neighboring or mismatched")
+        adapter = self._canonical_application_adapter()
+        return adapter.reconcile_reviewed_candidate_application(
+            operation_id=application["operation_id"], package_id=run["package_id"],
+            campaign_id=campaign_id, review_report_id=review["review_report_id"],
+            review_acceptance_receipt=receipt)
+
+    def _complete_pending_reviewed_application(self, record):
+        """Apply once or reconcile an exact application completed before checkpointing."""
+        if record.get("status") != "review_accepted_application_pending":
+            raise RuntimeError("campaign has no pending reviewed application")
+        review = (record.get("reviews") or [])[-1]
+        receipt = review.get("review_acceptance_receipt")
+        run = (record.get("builder_runs") or [])[-1]
+        try:
+            adapter = self._canonical_application_adapter()
+        except Exception as exc:
+            return self._update(record, event_kind="reviewed_candidate_apply_failed",
+                status="failed_safe", needs_tanner={"urgency":"urgent_blocking_flow",
+                "reason":"reviewed_candidate_apply_failed", "failure_code":type(exc).__name__,
+                "decision_needed":"inspect retained candidate and apply failure evidence"})
+        try:
+            self.candidate_applier(
+                package_id=run["package_id"], campaign_id=record["campaign_id"],
+                review_report_id=review["review_report_id"],
+                review_acceptance_receipt=receipt)
+        except Exception:
+            # A process may have completed the durable application before the
+            # campaign checkpoint. Only canonical reconciliation can classify it.
+            pass
+        try:
+            application = adapter.reconcile_reviewed_candidate_application(
+                operation_id=review["reviewed_application_operation_id"],
+                package_id=run["package_id"], campaign_id=record["campaign_id"],
+                review_report_id=review["review_report_id"],
+                review_acceptance_receipt=receipt)
+        except Exception as exc:
+            return self._update(record, event_kind="reviewed_candidate_apply_failed",
+                status="failed_safe", needs_tanner={"urgency":"urgent_blocking_flow",
+                "reason":"reviewed_candidate_apply_failed", "failure_code":type(exc).__name__,
+                "decision_needed":"inspect retained candidate and apply failure evidence"})
+        event = ("campaign_succeeded_with_nonblocking_caveats"
+                 if review["status"] == "pass_with_caveats" else "campaign_succeeded")
+        return self._update(record, event_kind=event, status="succeeded",
+            needs_tanner=None, application_evidence=application)
+
     def _handle_typed_approval(self, approval, *, timeout_seconds, process_alive=None):
         """Project one exact typed request into the accepted Rider boundary."""
         paused = self.require_tanner(
@@ -941,6 +1040,37 @@ class CodexDevelopmentCampaign:
         if status == "correction_required" and (
                 {item["acceptance_condition_id"] for item in normalized_defects} - set(violated)):
             raise ValueError("correction defect is not bound to a violated condition")
+        all_satisfied = set(satisfied) == set(record["acceptance_condition_ids"])
+        acceptance_receipt = review.get("review_acceptance_receipt")
+        if status in {"pass", "pass_with_caveats"} and all_satisfied and not violated:
+            builder_run = record["builder_runs"][-1]
+            retention = builder_run.get("candidate_retention_receipt") or {}
+            expected = {"record_type": "codex_independent_review_acceptance_receipt",
+                "status": "accepted", "campaign_id": campaign_id,
+                "package_id": builder_run["package_id"], "review_report_id": report["report_id"],
+                "review_report_sha256": report["record_sha256"],
+                "review_package_id": package_id, "reviewer_worker_id": reviewer_id,
+                "review_package_sha256": package["record_sha256"],
+                "source_report_id": package["source_report_id"],
+                "review_invocation_id": require_id(
+                    review.get("invocation_id"), "review_invocation_id"),
+                "reviewer_role": reviewer["role"],
+                "recipient": review.get("recipient"),
+                "candidate_snapshot_id": (retention.get("candidate_snapshot") or {}).get(
+                    "candidate_snapshot_id"),
+                "mutation_manifest_sha256": retention.get("mutation_manifest_sha256"),
+                "allowed_scope_sha256": retention.get("allowed_scope_sha256"),
+                "candidate_retention_receipt_sha256": retention.get("record_sha256"),
+                "acceptance_condition_ids_sha256": _digest(sorted(satisfied)),
+                "delivery_receipt_id": delivery["delivery_receipt_id"],
+                "verification_receipt_id": verification["verification_receipt_id"],
+                "verdict": status,
+                "creates_authority": False}
+            if (not isinstance(acceptance_receipt, dict)
+                    or acceptance_receipt.get("record_sha256") != _digest(
+                        {k:v for k,v in acceptance_receipt.items() if k != "record_sha256"})
+                    or any(acceptance_receipt.get(k) != v for k,v in expected.items())):
+                raise PermissionError("validated Reviewer-authored acceptance receipt is required")
         review_record = {"iteration": record["iteration"], "status": status,
             "reviewer": {"worker_id": reviewer_id, "role": reviewer["role"],
                          "identity_status": reviewer["identity_status"]},
@@ -951,59 +1081,23 @@ class CodexDevelopmentCampaign:
             "acceptance_condition_ids_satisfied": satisfied,
             "violated_acceptance_condition_ids": violated, "defects": normalized_defects,
             "transport_verified": True, "creates_authority": False, "received_at": _now()}
+        if status in {"pass", "pass_with_caveats"} and all_satisfied and not violated:
+            review_record["review_acceptance_receipt"] = acceptance_receipt
+            review_record["reviewed_application_operation_id"] = (
+                "reviewed-application-" + _digest({"package_id": record["builder_runs"][-1]["package_id"],
+                    "campaign_id": campaign_id,
+                    "review_receipt": acceptance_receipt["record_sha256"]}))
         reviews = [*record["reviews"], review_record]
+        accepted = status in {"pass", "pass_with_caveats"} and all_satisfied and not violated
         record = self._update(record, event_kind="independent_review_retained",
             event_detail={"iteration": record["iteration"], "status": status,
                           "review_report_id": report["report_id"]},
             reviews=reviews, acceptance_satisfied=satisfied,
             reviewer_requirement={**record["reviewer_requirement"], "worker_id": reviewer_id,
-                                  "transport_binding": "verified_for_recorded_review"})
-        all_satisfied = set(satisfied) == set(record["acceptance_condition_ids"])
-        acceptance_receipt = review.get("review_acceptance_receipt")
-        if status in {"pass", "pass_with_caveats"} and all_satisfied and not violated:
-            builder_run = record["builder_runs"][-1]
-            retention = builder_run.get("candidate_retention_receipt") or {}
-            expected = {"record_type": "codex_independent_review_acceptance_receipt",
-                "status": "accepted", "campaign_id": campaign_id,
-                "package_id": builder_run["package_id"], "review_report_id": report["report_id"],
-                "review_package_id": package_id, "reviewer_worker_id": reviewer_id,
-                "candidate_snapshot_id": (retention.get("candidate_snapshot") or {}).get(
-                    "candidate_snapshot_id"),
-                "mutation_manifest_sha256": retention.get("mutation_manifest_sha256"),
-                "allowed_scope_sha256": retention.get("allowed_scope_sha256"),
-                "candidate_retention_receipt_sha256": retention.get("record_sha256"),
-                "delivery_receipt_id": delivery["delivery_receipt_id"],
-                "verification_receipt_id": verification["verification_receipt_id"],
-                "creates_authority": False}
-            if (not isinstance(acceptance_receipt, dict)
-                    or acceptance_receipt.get("record_sha256") != _digest(
-                        {k:v for k,v in acceptance_receipt.items() if k != "record_sha256"})
-                    or any(acceptance_receipt.get(k) != v for k,v in expected.items())):
-                raise PermissionError("validated Reviewer-authored acceptance receipt is required")
-        if status == "pass" and all_satisfied:
-            try:
-                application = self.candidate_applier(package_id=record["builder_runs"][-1]["package_id"],
-                    campaign_id=campaign_id, review_report_id=report["report_id"],
-                    review_acceptance_receipt=acceptance_receipt)
-            except Exception as exc:
-                return self._update(record, event_kind="reviewed_candidate_apply_failed",
-                    status="failed_safe", needs_tanner={"urgency":"urgent_blocking_flow",
-                    "reason":"reviewed_candidate_apply_failed", "failure_code":type(exc).__name__,
-                    "decision_needed":"inspect retained candidate and apply failure evidence"})
-            return self._update(record, event_kind="campaign_succeeded", status="succeeded",
-                needs_tanner=None, application_evidence=application)
-        if status == "pass_with_caveats" and all_satisfied and not violated:
-            try:
-                application = self.candidate_applier(package_id=record["builder_runs"][-1]["package_id"],
-                    campaign_id=campaign_id, review_report_id=report["report_id"],
-                    review_acceptance_receipt=acceptance_receipt)
-            except Exception as exc:
-                return self._update(record, event_kind="reviewed_candidate_apply_failed",
-                    status="failed_safe", needs_tanner={"urgency":"urgent_blocking_flow",
-                    "reason":"reviewed_candidate_apply_failed", "failure_code":type(exc).__name__,
-                    "decision_needed":"inspect retained candidate and apply failure evidence"})
-            return self._update(record, event_kind="campaign_succeeded_with_nonblocking_caveats",
-                status="succeeded", needs_tanner=None, application_evidence=application)
+                                  "transport_binding": "verified_for_recorded_review"},
+            **({"status": "review_accepted_application_pending"} if accepted else {}))
+        if accepted:
+            return self._complete_pending_reviewed_application(record)
         if status == "blocked":
             return self._update(record, event_kind="reviewer_blocked", status="tanner_escalation",
                 needs_tanner={"urgency": "urgent_blocking_flow", "reason": "independent_reviewer_blocked",
@@ -1084,6 +1178,7 @@ class CodexDevelopmentCampaign:
             evidence_reference = require_id(item.get("evidence_reference"), "evidence_reference")
             defects.append({**item, "evidence_reference": evidence_reference})
         review = {"status": result["review_status"], "review_report_id": result["return_report_id"],
+            "invocation_id": result["invocation_id"], "recipient": result["recipient"],
             "delivery_receipt_id": result["delivery_receipt_id"],
             "verification_receipt_id": result["verification_receipt_id"],
             "acceptance_condition_ids_satisfied": result["acceptance_condition_ids_satisfied"],
@@ -1168,6 +1263,7 @@ class CodexDevelopmentCampaign:
                 evidence_reference = result["return_report_id"]
             defects.append({**item, "evidence_reference": evidence_reference})
         review = {"status": result["review_status"], "review_report_id": result["return_report_id"],
+            "invocation_id": result["invocation_id"], "recipient": result["recipient"],
             "delivery_receipt_id": result["delivery_receipt_id"],
             "verification_receipt_id": result["verification_receipt_id"],
             "acceptance_condition_ids_satisfied": result["acceptance_condition_ids_satisfied"],
@@ -1185,8 +1281,12 @@ class CodexDevelopmentCampaign:
     def run_to_terminal(self, campaign_id, *, reviewer_adapter=None):
         """Advance this fixed campaign through the promoted default reviewer."""
         record = self.store.load(campaign_id)
-        while record["status"] == "awaiting_independent_review":
-            record = self.run_wsl_review(campaign_id, adapter=reviewer_adapter)
+        while record["status"] in {"awaiting_independent_review",
+                                    "review_accepted_application_pending"}:
+            if record["status"] == "awaiting_independent_review":
+                record = self.run_wsl_review(campaign_id, adapter=reviewer_adapter)
+            else:
+                record = self._complete_pending_reviewed_application(record)
         return record
 
     def cancel(self, campaign_id, *, authenticated_rider):

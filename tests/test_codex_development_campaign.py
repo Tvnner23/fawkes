@@ -161,6 +161,9 @@ class CampaignFixture:
                        "content": "Exact defect and evidence from the independent reviewer."}],
             evidence_references=[])
         review = {"status": status, "review_report_id": returned["report_id"],
+            "invocation_id": f"fixture-review-{record['iteration']}",
+            "recipient": {"worker_id": REVIEWER["worker_id"], "role": REVIEWER["role"],
+                          "environment_id": "fixture-read-only"},
             "delivery_receipt_id": delivery["delivery_receipt_id"],
             "verification_receipt_id": verification["verification_receipt_id"],
             "acceptance_condition_ids_satisfied": list(satisfied),
@@ -173,9 +176,11 @@ class CampaignFixture:
                 "status":"accepted","campaign_id":campaign_id,
                 "package_id":record["builder_runs"][-1]["package_id"],
                 "review_package_id":package["package_id"],
+                "review_package_sha256":package["record_sha256"],
+                "source_report_id":package["source_report_id"],
                 "review_report_id":returned["report_id"],
                 "review_report_sha256":returned["record_sha256"],
-                "review_invocation_id":f"fixture-review-{record['iteration']}",
+                "review_invocation_id":review["invocation_id"],
                 "reviewer_worker_id":REVIEWER["worker_id"],"reviewer_role":REVIEWER["role"],
                 "recipient":{"worker_id":REVIEWER["worker_id"],"role":REVIEWER["role"],
                              "environment_id":"fixture-read-only"},
@@ -186,9 +191,11 @@ class CampaignFixture:
                 "acceptance_condition_ids_sha256":_digest(sorted(satisfied)),
                 "delivery_receipt_id":delivery["delivery_receipt_id"],
                 "verification_receipt_id":verification["verification_receipt_id"],
+                "verdict":status,
                 "creates_authority":False,"created_at":datetime.now(timezone.utc).isoformat()}
             receipt["record_sha256"]=_digest(receipt); review["review_acceptance_receipt"]=receipt
         return review
+
 
 
 class CodexDevelopmentCampaignTests(unittest.TestCase):
@@ -498,7 +505,7 @@ class CodexDevelopmentCampaignTests(unittest.TestCase):
         self.assertIn("repository_write", campaign.builder_modes)
         self.assertIn("read_only", campaign.builder_modes)
 
-    def test_correction_cycle_uses_exact_review_then_independent_pass_succeeds(self):
+    def test_correction_cycle_rejects_noncanonical_application_callback(self):
         record = self.fixture.campaign.create(self.fixture.payload(), authenticated_rider=True)
         self.assertEqual(record["status"], "awaiting_independent_review")
         defect = {"defect_id": "missing-test", "acceptance_condition_id": "tests-pass",
@@ -514,12 +521,12 @@ class CodexDevelopmentCampaignTests(unittest.TestCase):
         passed = self.fixture.review("campaign-one", "pass", satisfied=["tests-pass", "scope-held"])
         record = self.fixture.campaign.consume_review("campaign-one", passed,
             reviewer=REVIEWER, transport_verified=True)
-        self.assertEqual(record["status"], "succeeded")
+        self.assertEqual(record["status"], "failed_safe")
         self.assertFalse(record["automatic_promotion"])
         self.assertEqual(len(record["builder_runs"]), 2)
-        self.assertEqual(len(self.fixture.applications), 1)
+        self.assertEqual(self.fixture.applications, [])
 
-    def test_end_to_end_transaction_orders_retention_review_and_one_shot_apply(self):
+    def test_verdict_and_callback_dictionary_cannot_complete_campaign(self):
         record = self.fixture.campaign.create(self.fixture.payload("transaction-order"),
                                               authenticated_rider=True)
         run = record["builder_runs"][-1]
@@ -533,19 +540,138 @@ class CodexDevelopmentCampaignTests(unittest.TestCase):
                                      satisfied=["tests-pass", "scope-held"])
         terminal = self.fixture.campaign.consume_review("transaction-order", review,
             reviewer=REVIEWER, transport_verified=True)
-        self.assertEqual(terminal["status"], "succeeded")
-        self.assertEqual(len(self.fixture.applications), 1)
-        self.assertEqual(self.fixture.applications[0]["review_report_id"],
-                         terminal["reviews"][-1]["review_report_id"])
+        self.assertEqual(terminal["status"], "failed_safe")
+        self.assertEqual(self.fixture.applications, [])
         kinds = [item["kind"] for item in terminal["events"]]
         self.assertLess(kinds.index("builder_return_retained"),
                         kinds.index("independent_review_retained"))
         self.assertLess(kinds.index("independent_review_retained"),
-                        kinds.index("campaign_succeeded"))
+                        kinds.index("reviewed_candidate_apply_failed"))
         with self.assertRaisesRegex(RuntimeError, "not awaiting"):
             self.fixture.campaign.consume_review("transaction-order", review,
                 reviewer=REVIEWER, transport_verified=True)
-        self.assertEqual(len(self.fixture.applications), 1)
+        self.assertEqual(self.fixture.applications, [])
+
+    def test_validated_acceptance_receipt_is_durable_across_campaign_restart(self):
+        campaign_id = "durable-acceptance"
+        self.fixture.campaign.create(self.fixture.payload(campaign_id),
+                                     authenticated_rider=True)
+        review = self.fixture.review(campaign_id, "pass",
+                                     satisfied=["tests-pass", "scope-held"])
+        terminal = self.fixture.campaign.consume_review(campaign_id, review,
+            reviewer=REVIEWER, transport_verified=True)
+        retained = terminal["reviews"][-1]["review_acceptance_receipt"]
+        self.assertEqual(retained, review["review_acceptance_receipt"])
+        restarted = CodexDevelopmentCampaign("fawkes", root=Path(self.tmp.name) / "campaigns",
+            exchange=self.fixture.exchange, builder_runner=self.fixture.campaign.builder_runner,
+            builder_modes={"repository_write"},
+            candidate_applier=self.fixture.campaign.candidate_applier)
+        self.assertEqual(restarted.store.load(campaign_id)["reviews"][-1][
+            "review_acceptance_receipt"], retained)
+
+    def test_rehashed_identity_bearing_acceptance_fields_fail_before_application(self):
+        fields = ("review_invocation_id", "review_report_sha256", "reviewer_role",
+                  "recipient", "acceptance_condition_ids_sha256",
+                  "review_package_sha256", "source_report_id", "verdict")
+        for index, field in enumerate(fields):
+            with self.subTest(field=field):
+                campaign_id = f"rehashed-receipt-{index}"
+                self.fixture.campaign.create(self.fixture.payload(campaign_id),
+                                             authenticated_rider=True)
+                review = self.fixture.review(campaign_id, "pass",
+                    satisfied=["tests-pass", "scope-held"])
+                receipt = review["review_acceptance_receipt"]
+                receipt[field] = ({"worker_id": REVIEWER["worker_id"],
+                                   "role": REVIEWER["role"],
+                                   "environment_id": "neighbor-read-only"}
+                                  if field == "recipient" else f"neighbor-{field}")
+                receipt["record_sha256"] = _digest({key: value for key, value in
+                    receipt.items() if key != "record_sha256"})
+                before = len(self.fixture.applications)
+                with self.assertRaisesRegex(PermissionError, "acceptance receipt"):
+                    self.fixture.campaign.consume_review(campaign_id, review,
+                        reviewer=REVIEWER, transport_verified=True)
+                self.assertEqual(len(self.fixture.applications), before)
+                self.assertEqual(self.fixture.campaign.store.load(campaign_id)["reviews"], [])
+
+    def test_campaign_owned_terminal_reconciliation_uses_exact_canonical_adapter(self):
+        from tests.test_reviewed_application_caller_seams import (
+            ReviewedApplicationCallerSeamTests,
+        )
+        seam = ReviewedApplicationCallerSeamTests(
+            "test_completed_application_retrieval_is_idempotent")
+        seam.setUp(); self.addCleanup(seam.doCleanups)
+        adapter, applied, arguments = seam.completed()
+        directory = adapter.root / "write-candidate" / arguments["package_id"]
+        result = json.loads((directory / "result.json").read_text())
+        request = json.loads((directory / "request.json").read_text())
+        review_package = adapter.exchange._load("packages",
+            arguments["review_acceptance_receipt"]["review_package_id"])
+        retention_section = next(item for item in review_package["included_sections"]
+            if item["section_id"] == "candidate-retention-receipt")
+        retention = json.loads(retention_section["content"])
+        campaign_root = Path(self.tmp.name) / "canonical-reconciliation-campaigns"
+        campaign = CodexDevelopmentCampaign("fawkes", root=campaign_root,
+            exchange=adapter.exchange,
+            candidate_applier=adapter.apply_reviewed_candidate_once)
+        template = self.fixture.campaign.create(self.fixture.payload("reconcile-template"),
+                                                authenticated_rider=True)
+        record = {**template, "campaign_id": arguments["campaign_id"],
+            "status": "review_accepted_application_pending",
+            "allowed_scope": request["allowed_scope"],
+            "builder_runs": [{"package_id": arguments["package_id"],
+                "candidate_snapshot": result["candidate_snapshot"],
+                "candidate_retention_receipt": retention}],
+            "reviews": [{"status": "pass",
+                "review_report_id": arguments["review_report_id"],
+                "review_package_id": arguments["review_acceptance_receipt"][
+                    "review_package_id"],
+                "review_acceptance_receipt": arguments["review_acceptance_receipt"],
+                "reviewed_application_operation_id": applied["operation_id"]}],
+            "application_evidence": None, "state_revision": 8}
+        record.pop("record_sha256", None)
+        campaign.store.write(record)
+        restarted = CodexDevelopmentCampaign("fawkes", root=campaign_root,
+            exchange=adapter.exchange,
+            candidate_applier=adapter.apply_reviewed_candidate_once)
+        recovered = restarted.run_to_terminal(arguments["campaign_id"])
+        self.assertEqual(recovered["status"], "succeeded")
+        self.assertEqual(recovered["application_evidence"], applied)
+        first = restarted.reconcile_completed_application(arguments["campaign_id"])
+        second = restarted.reconcile_completed_application(arguments["campaign_id"])
+        self.assertEqual(first, applied)
+        self.assertEqual(second, applied)
+        self.assertEqual(applied["application_count"], 1)
+
+    def test_campaign_terminal_reconciliation_rejects_nonterminal_and_neighbor_receipt(self):
+        campaign_id = "nonterminal-reconciliation"
+        self.fixture.campaign.create(self.fixture.payload(campaign_id),
+                                     authenticated_rider=True)
+        with self.assertRaisesRegex(RuntimeError, "not terminally successful"):
+            self.fixture.campaign.reconcile_completed_application(campaign_id)
+        review = self.fixture.review(campaign_id, "pass",
+                                     satisfied=["tests-pass", "scope-held"])
+        terminal = self.fixture.campaign.consume_review(campaign_id, review,
+            reviewer=REVIEWER, transport_verified=True)
+        self.assertEqual(terminal["status"], "failed_safe")
+        forged = json.loads(json.dumps(terminal))
+        receipt = forged["reviews"][-1]["review_acceptance_receipt"]
+        receipt["candidate_snapshot_id"] = "candidate-snapshot-neighbor"
+        receipt["record_sha256"] = _digest(
+            {key: value for key, value in receipt.items() if key != "record_sha256"})
+        forged["status"] = "succeeded"
+        forged["application_evidence"] = {
+            "status": "applied_verified_after_review", "application_count": 1,
+            "operation_id": forged["reviews"][-1]["reviewed_application_operation_id"],
+            "review_report_id": forged["reviews"][-1]["review_report_id"],
+            "review_acceptance_receipt_sha256": receipt["record_sha256"],
+        }
+        forged["state_revision"] += 1
+        forged.pop("record_sha256", None)
+        self.fixture.campaign.store.write(forged,
+            expected_revision=terminal["state_revision"])
+        with self.assertRaisesRegex(PermissionError, "incomplete|neighboring"):
+            self.fixture.campaign.reconcile_completed_application(campaign_id)
 
     def test_failed_validation_never_reaches_review_or_application(self):
         payload = {**self.fixture.payload("validation-fails"),
