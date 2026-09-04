@@ -6,6 +6,8 @@ import os
 import subprocess
 import tempfile
 
+from src.runtime.durable_reviewed_application import unrelated_workspace_sha256
+
 
 def _digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"),
@@ -70,6 +72,25 @@ class GitCommitTransaction:
     def _index_identity(self):
         tree=self._run(["write-tree"],text=True).stdout.strip()
         return {"tree":tree}
+
+    def _neighboring_repository_state(self, paths):
+        value={"schema_version":1,"record_type":"reviewed_application_neighboring_repository_state",
+            "branch_ref":self._branch_ref(),"normal_index_node":self._index_identity(),
+            "unrelated_status_sha256":self._unrelated_status_sha256(paths),
+            "unrelated_workspace_sha256":unrelated_workspace_sha256(self.repository,paths),
+            "creates_authority":False}
+        value["record_sha256"]=_digest(value);return value
+
+    def _validate_neighboring_repository_state(self, projection, paths):
+        expected=projection.get("neighboring_repository_state")
+        if (not isinstance(expected,dict)
+                or expected.get("record_type")!="reviewed_application_neighboring_repository_state"
+                or expected.get("record_sha256")!=_digest(
+                    {key:value for key,value in expected.items() if key!="record_sha256"})):
+            raise PermissionError("receipt-owned neighboring repository state is malformed")
+        if self._neighboring_repository_state(paths)!=expected:
+            raise PermissionError("receipt-owned neighboring repository state drift")
+        return expected
 
     def _paths(self, scope):
         values=[]
@@ -181,6 +202,7 @@ class GitCommitTransaction:
         paths=self._paths(scope)
         if self._head()!=expected_parent_head:raise RuntimeError("Git parent HEAD changed")
         normal_index=self._index_identity()
+        neighboring_state=self._neighboring_repository_state(paths)
         descriptor,index_name=tempfile.mkstemp(prefix="reviewed-projection-index-",dir=self.state_root)
         os.close(descriptor);os.unlink(index_name);environment={**os.environ,"GIT_INDEX_FILE":index_name}
         try:
@@ -206,6 +228,7 @@ class GitCommitTransaction:
           "author_email":"fawkes-cleanup@localhost.invalid","author_date":parent_date,
           "committer_name":"Fawkes Cleanup","committer_email":"fawkes-cleanup@localhost.invalid",
           "committer_date":parent_date,"review_receipt_sha256":review_receipt_sha256,
+          "neighboring_repository_state":neighboring_state,
           "creates_authority":False}
         value["record_sha256"]=_digest(value);return value
 
@@ -234,6 +257,13 @@ class GitCommitTransaction:
             exact_diff_sha256=exact_diff_sha256,
             mutation_manifest_sha256=mutation_manifest_sha256,
             review_receipt_sha256=review_receipt_sha256,message=message)
+        neighboring=self._validate_neighboring_repository_state(projection,
+            self._paths(scope))
+        if (prepared.get("normal_index_node")!=neighboring["normal_index_node"]
+                or prepared.get("unrelated_status_sha256")!=
+                    neighboring["unrelated_status_sha256"]
+                or prepared.get("branch_ref")!=neighboring["branch_ref"]):
+            raise PermissionError("commit preparation escaped receipt-owned repository state")
         prepared={**prepared,"terminal_application_receipt_sha256":receipt["record_sha256"],
             "application_operation_id":receipt["operation_id"],
             "application_candidate_snapshot_id":binding["candidate_snapshot_id"],
@@ -254,6 +284,8 @@ class GitCommitTransaction:
         if prepared.get("reviewed_commit_projection_sha256")!=receipt[
                 "reviewed_commit_projection"]["record_sha256"]:
             raise PermissionError("reviewed commit projection binding mismatch")
+        self._validate_neighboring_repository_state(receipt["reviewed_commit_projection"],
+            self._paths(prepared["scope"]))
         return self.reconcile(prepared)
 
     def advance_reviewed_application(self, prepared, terminal_application_receipt):

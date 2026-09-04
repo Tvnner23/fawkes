@@ -17,7 +17,8 @@ class ReviewedApplicationCallerSeamTests(unittest.TestCase):
         subprocess.run(["git","init","-q"],cwd=self.fixture.workspace,check=True)
         subprocess.run(["git","config","user.name","Fixture"],cwd=self.fixture.workspace,check=True)
         subprocess.run(["git","config","user.email","fixture@invalid"],cwd=self.fixture.workspace,check=True)
-        subprocess.run(["git","add","src/allowed.py"],cwd=self.fixture.workspace,check=True)
+        (self.fixture.workspace/"neighbor.txt").write_text("neighbor baseline\n")
+        subprocess.run(["git","add","src/allowed.py","neighbor.txt"],cwd=self.fixture.workspace,check=True)
         subprocess.run(["git","commit","-qm","base"],cwd=self.fixture.workspace,check=True)
 
     def completed(self):
@@ -58,6 +59,12 @@ class ReviewedApplicationCallerSeamTests(unittest.TestCase):
         value=json.loads(path.read_text());value["application_count"]=2
         path.write_text(json.dumps(value))
         with self.assertRaises(PermissionError):
+            adapter.reconcile_reviewed_candidate_application(**arguments)
+
+    def test_terminal_reconciliation_rejects_neighboring_state_drift(self):
+        adapter, _applied, arguments = self.completed()
+        (self.fixture.workspace/"neighbor.txt").write_text("neighbor changed\n")
+        with self.assertRaisesRegex(PermissionError,"neighboring|projection drift"):
             adapter.reconcile_reviewed_candidate_application(**arguments)
 
 

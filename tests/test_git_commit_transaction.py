@@ -91,6 +91,32 @@ class GitCommitTransactionTests(unittest.TestCase):
         self.assertEqual(committed["status"],"committed")
         self.assertEqual(self.owner.advance_reviewed_application(prepared,receipt),committed)
         self.assertEqual(self.git('rev-list','--count',self.parent+'..HEAD'),'1')
+
+    def test_reviewed_commit_rejects_neighbor_drift_after_terminal_receipt(self):
+        receipt=self.application_receipt()
+        (self.repo/'other.py').write_text('changed after terminal receipt\n')
+        with self.assertRaisesRegex(PermissionError,'receipt-owned|projection drift'):
+            self.reviewed_prepared(receipt)
+
+    def test_reviewed_commit_rejects_untracked_mode_and_index_neighbor_drift(self):
+        for kind in ('untracked','mode','index'):
+            with self.subTest(kind=kind):
+                receipt=self.application_receipt()
+                if kind=='untracked':(self.repo/'new-neighbor.txt').write_text('new\n')
+                elif kind=='mode':(self.repo/'other.py').chmod(0o755)
+                else:subprocess.run(['git','add','other.py'],cwd=self.repo,check=True)
+                with self.assertRaisesRegex(PermissionError,'receipt-owned|projection drift'):
+                    self.reviewed_prepared(receipt)
+                if (self.repo/'new-neighbor.txt').exists():(self.repo/'new-neighbor.txt').unlink()
+                (self.repo/'other.py').chmod(0o644)
+                subprocess.run(['git','reset','-q','HEAD','--','other.py'],cwd=self.repo,check=True)
+
+    def test_reviewed_advance_rechecks_receipt_owned_neighbor_state(self):
+        receipt=self.application_receipt();prepared=self.reviewed_prepared(receipt)
+        (self.repo/'other.py').write_text('changed after commit preparation\n')
+        with self.assertRaisesRegex(PermissionError,'receipt-owned'):
+            self.owner.advance_reviewed_application(prepared,receipt)
+        self.assertEqual(self.parent,self.git('rev-parse','HEAD'))
     def test_reviewed_commit_rejects_neighboring_or_tampered_receipt(self):
         receipt=self.application_receipt();prepared=self.reviewed_prepared(receipt)
         neighbor=self.application_receipt(operation_id='neighbor')
