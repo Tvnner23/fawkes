@@ -25,6 +25,9 @@ from src.runtime.codex_worker_adapter import (
     _process_metadata, _sha256_bytes,
 )
 from src.runtime.disposable_verifier import candidate_manifest, materialize_candidate
+from src.runtime.durable_reviewed_application import (
+    DurableReviewedApplication, unrelated_workspace_sha256, write_durable_record,
+)
 from src.runtime.worker_exchange import WorkerExchange, _authority, _digest, body_free_references
 from src.runtime.evidence_eligibility import classify_reviewer_source_evidence
 
@@ -702,6 +705,13 @@ class CodexWriteBuilderAdapter(CodexExecWorkerAdapter):
             "acceptance_condition_ids_sha256": conditions_sha, "recovery_references": recovery,
             "recovery_references_sha256": recovery_sha, "preflight": preflight,
             "invocation_id": invocation_id, "created_at": _now(),
+            "expected_repository_head": ((lambda completed: completed.stdout.strip()
+                if completed.returncode == 0 else "workspace-snapshot:" +
+                candidate_manifest(self.workspace)["candidate_snapshot_id"])(subprocess.run(
+                    ["git", "rev-parse", "HEAD"], cwd=self.workspace, text=True,
+                    capture_output=True, check=False))),
+            "expected_unrelated_workspace_sha256": unrelated_workspace_sha256(
+                self.workspace, scopes),
             "candidate_qualified": WRITE_ADAPTER_QUALIFIED if _production_use else False,
             "adapter_promoted": WRITE_ADAPTER_PROMOTED if _production_use else False,
             "adapter_promotion_reference": (WRITE_PROMOTION_RECORD["promotion_id"]
@@ -966,6 +976,7 @@ class CodexWriteBuilderAdapter(CodexExecWorkerAdapter):
                                       review_accepted=None):
         """Apply one retained candidate only after the coordinator validates review."""
         package_id = require_id(package_id, "package_id")
+        builder_package = self.exchange._load("packages", package_id)
         campaign_id = require_id(campaign_id, "campaign_id")
         review_report_id = require_id(review_report_id, "review_report_id")
         receipt = review_acceptance_receipt
@@ -1092,27 +1103,59 @@ class CodexWriteBuilderAdapter(CodexExecWorkerAdapter):
         normalized = [{**change, "before": _content_state(change.get("before")),
                        "after": _content_state(change.get("after"))}
                       for change in _applyable_changes(changes)]
-        applied = _apply_validated_changes(authoritative_root=self.workspace,
-            candidate_root=candidate_root, base=base, changes=normalized,
-            replace=self.apply_replace, before_replace=self.before_apply_replace,
-            frozen_preimages=captured)
-        rollback_originals = applied.pop("_rollback_originals")
-        rollback_applied_states = applied.pop("_rollback_applied_states")
-        record = {**application, **applied, "status": "applied_verified_after_review",
-            "record_type": "codex_post_review_authoritative_application_receipt",
-            "review_report_id": review_report_id,
+        def transaction_node(value):
+            if value is None:
+                return {"type": "missing"}
+            if value.get("file_type") not in {None, "regular"} or "sha256" not in value:
+                raise PermissionError("reviewed application supports only regular-file transitions")
+            return {"type": "regular", "mode": value["mode"],
+                    "byte_length": value["byte_length"], "sha256": value["sha256"]}
+
+        path_records = []
+        for change in normalized:
+            frozen = captured.get(change["path"])
+            path_records.append({"path": change["path"],
+                "preimage": transaction_node(change.get("before")),
+                "postimage": transaction_node(change.get("after")),
+                "preimage_body": None if frozen is None else frozen.get("content"),
+                "postimage_body": None if change.get("after") is None else
+                    (candidate_root / change["path"]).read_bytes()})
+        operation_id = "reviewed-application-" + _digest({"package_id": package_id,
+            "campaign_id": campaign_id, "review_receipt": receipt["record_sha256"]})
+        binding = {"campaign_id": campaign_id, "task_scope_id": builder_package["task_scope_id"],
+            "worker_invocation_id": request["invocation_id"], "generation": request["iteration"],
+            "candidate_retention_receipt_sha256": retention_receipt["record_sha256"],
+            "candidate_snapshot_id": final_candidate["candidate_snapshot_id"],
+            "mutation_manifest_sha256": _digest(changes), "review_package_id": review_package_id,
+            "review_package_sha256": review_package["record_sha256"],
+            "review_acceptance_receipt_sha256": receipt["record_sha256"],
+            "review_acceptance_record_type": receipt["record_type"],
+            "reviewer_worker_id": reviewer_id,
+            "review_invocation_id": receipt["review_invocation_id"],
+            "authorized_scope_sha256": receipt["allowed_scope_sha256"],
+            "expected_repository_head": request["expected_repository_head"],
+            "expected_repository_status_sha256": request[
+                "expected_unrelated_workspace_sha256"]}
+        transaction = DurableReviewedApplication(self.workspace,
+            directory / "application-transaction", replace=self.apply_replace,
+            crash_hook=(lambda point, path=None: self.before_apply_replace(
+                -1 if point == "after_intent" else 0, path,
+                self.workspace / path if path else self.workspace)
+                if self.before_apply_replace is not None and point in {"after_intent", "before_path"}
+                else None))
+        transaction.prepare(operation_id=operation_id, binding=binding, paths=path_records,
+                            review_expires_at=receipt["expires_at"])
+        state = transaction.execute_or_resume(operation_id)
+        if state["state"] != "completed":
+            raise RuntimeError("reviewed application terminated " + state["state"])
+        terminal = transaction.terminal_receipt(operation_id)
+        record = {**application, **terminal, "review_report_id": review_report_id,
             "review_acceptance_receipt_sha256": receipt["record_sha256"],
             "candidate_snapshot_id": final_candidate["candidate_snapshot_id"],
             "candidate_record_sha256": final_candidate["record_sha256"],
             "mutation_manifest_sha256": _digest(changes), "completed_at": _now()}
-        record.pop("record_sha256", None)
-        record["record_sha256"] = _digest(record)
-        try:
-            application_path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
-        except Exception:
-            _rollback_applied_changes(self.workspace, rollback_originals,
-                                      rollback_applied_states)
-            raise
+        record.pop("record_sha256", None); record["record_sha256"] = _digest(record)
+        write_durable_record(application_path, record)
         return record
 
     def _write_failure(self, path, request, package, authority, reason, detail, changes,
