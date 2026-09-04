@@ -21,6 +21,8 @@ from src.runtime.codex_development_campaign import (
 from src.runtime.codex_development_handoff import CODEX_REPO_WORKER_REFERENCE
 from src.runtime.worker_exchange import WorkerExchange, _digest
 from src.runtime.windows_codex_reviewer import (
+    MAX_CHANGED_ARTIFACT_BYTES, MAX_REVIEW_PACKAGE_BYTES,
+    _read_exact_changed_artifact,
     canonical_review_evidence_reference_ids, exact_review_schema,
     validate_windows_structured_response,
 )
@@ -201,6 +203,52 @@ class WslFormalReviewerTests(unittest.TestCase):
             "candidate_snapshot_root": self.workspace, **changes}
         return WslCodexReviewAdapter(self.exchange, run_process=fake or FakeWslReviewer(),
             timeout_seconds=5).deliver_candidate_once(**kwargs)
+
+    def test_changed_artifact_capacity_is_lossless_bounded_and_digest_checked(self):
+        paths = []
+        sizes = (100_000, 100_000, 105_801)
+        total = 0
+        artifacts = []
+        for index, size in enumerate(sizes):
+            path = Path(self.tmp.name) / f"large-{index}.py"
+            body = (chr(97 + index) * size).encode("utf-8")
+            path.write_bytes(body); paths.append(path)
+            artifact, total = _read_exact_changed_artifact(
+                path=path, relative=f"src/large-{index}.py",
+                expected_sha256=hashlib.sha256(body).hexdigest(),
+                consumed_bytes=total)
+            artifacts.append(artifact)
+        self.assertEqual(total, 305_801)
+        self.assertLess(total, MAX_CHANGED_ARTIFACT_BYTES)
+        self.assertEqual(b"".join(item["content"].encode() for item in artifacts),
+                         b"".join(path.read_bytes() for path in paths))
+        self.assertEqual(sum(item["byte_length"] for item in artifacts), 305_801)
+
+        paths[-1].write_bytes(b"stale")
+        with self.assertRaisesRegex(ValueError, "stale or digest-mismatched"):
+            _read_exact_changed_artifact(
+                path=paths[-1], relative="src/large-2.py",
+                expected_sha256=artifacts[-1]["sha256"], consumed_bytes=200_000)
+
+        oversized = Path(self.tmp.name) / "oversized.py"
+        oversized.write_bytes(b"x" * (MAX_CHANGED_ARTIFACT_BYTES + 1))
+        with self.assertRaisesRegex(ValueError, "exceed"):
+            _read_exact_changed_artifact(
+                path=oversized, relative="src/oversized.py",
+                expected_sha256=hashlib.sha256(oversized.read_bytes()).hexdigest(),
+                consumed_bytes=0)
+
+    def test_exact_package_rejects_out_of_scope_and_overall_transport_remains_bounded(self):
+        changed = copy.deepcopy(self.campaign)
+        changed["allowed_scope"] = []
+        with self.assertRaises((PermissionError, ValueError)):
+            prepare_wsl_review_package(exchange=self.exchange, campaign_record=changed,
+                candidate_snapshot=self.provenance, workspace=self.workspace)
+
+        with patch("src.runtime.wsl_codex_reviewer.MAX_REVIEW_PACKAGE_BYTES", 1):
+            with self.assertRaisesRegex(ValueError, "transported"):
+                self.invoke()
+        self.assertEqual(MAX_REVIEW_PACKAGE_BYTES, 512_000)
 
     def test_identity_functional_role_and_zero_authority_are_distinct(self):
         self.assertEqual(WSL_REVIEWER_REFERENCE["functional_role"], FORMAL_REVIEW_ROLE)

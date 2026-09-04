@@ -72,6 +72,11 @@ WINDOWS_PROMOTION_RECORD = {
 }
 MAX_REVIEW_PACKAGE_BYTES = 512_000
 MAX_REVIEW_RESOLVED_PACKAGE_BYTES = 2_000_000
+# Changed source is already carried by the bounded, content-addressed package
+# transport below.  Keep an independent aggregate bound, but large enough for
+# dependency-coupled reviews whose exact UTF-8 postimages exceed the former
+# 256 KiB pre-transport ceiling.
+MAX_CHANGED_ARTIFACT_BYTES = 384_000
 WINDOWS_ENVIRONMENT_ID = "windows-codex-exec:tanner-windows:fawkes-exact-package"
 
 WINDOWS_CODEX_WORKER_REFERENCE = {
@@ -480,14 +485,27 @@ def _exact_builder_evidence(exchange, campaign_record, workspace):
             raise PermissionError("review evidence contains an unavailable or out-of-scope artifact")
         if path.is_symlink() or not path.is_file() or after.get("file_type") != "regular":
             raise ValueError("changed artifact is not an inspectable regular file")
-        data = path.read_bytes(); total += len(data)
-        if total > 256_000 or hashlib.sha256(data).hexdigest() != change["after"]["sha256"]:
-            raise ValueError("changed artifact bytes are stale or exceed the review evidence limit")
-        try: content = data.decode("utf-8")
-        except UnicodeDecodeError as exc: raise ValueError("changed artifact is not bounded UTF-8 source") from exc
-        artifacts.append({"path": relative, "sha256": change["after"]["sha256"],
-                          "byte_length": len(data), "content": content})
+        artifact, total = _read_exact_changed_artifact(
+            path=path, relative=relative, expected_sha256=change["after"]["sha256"],
+            consumed_bytes=total)
+        artifacts.append(artifact)
     return result, artifacts
+
+
+def _read_exact_changed_artifact(*, path, relative, expected_sha256, consumed_bytes):
+    """Read one complete changed UTF-8 body under the independent aggregate bound."""
+    data = Path(path).read_bytes()
+    total = consumed_bytes + len(data)
+    if total > MAX_CHANGED_ARTIFACT_BYTES:
+        raise ValueError("changed artifact bytes exceed the review evidence limit")
+    if hashlib.sha256(data).hexdigest() != expected_sha256:
+        raise ValueError("changed artifact bytes are stale or digest-mismatched")
+    try:
+        content = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError("changed artifact is not bounded UTF-8 source") from exc
+    return ({"path": relative, "sha256": expected_sha256,
+             "byte_length": len(data), "content": content}, total)
 
 
 def prepare_windows_review_package(*, exchange, campaign_record, candidate_snapshot, workspace=ROOT):
