@@ -29,7 +29,8 @@ from src.runtime.windows_codex_reviewer import (
 from src.runtime.wsl_codex_reviewer import (
     FORMAL_REVIEW_ROLE, WSL_ADAPTER_ID, WSL_ADAPTER_QUALIFIED, WSL_ADAPTER_PROMOTED, WSL_ENVIRONMENT_ID,
     WSL_QUALIFICATION_CONTRACT, WSL_REVIEWER_REFERENCE, WSL_REVIEWER_ROLE,
-    WSL_REVIEWER_WORKER_ID, WslCodexReviewAdapter, prepare_wsl_review_package,
+    WSL_REVIEWER_WORKER_ID, WslCodexReviewAdapter, _provider_review_projection,
+    _resolve_provider_review_projection, prepare_wsl_review_package,
 )
 
 
@@ -249,6 +250,67 @@ class WslFormalReviewerTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "transported"):
                 self.invoke()
         self.assertEqual(MAX_REVIEW_PACKAGE_BYTES, 512_000)
+
+    def test_provider_projection_deduplicates_exact_postimage_and_round_trips(self):
+        body = "z" * 600_000
+        digest = hashlib.sha256(body.encode()).hexdigest()
+        change = {"path":"src/large.py", "after_base64":__import__("base64").b64encode(
+            body.encode()).decode(), "text_diff":"+ exact body", "after_node_binding":{
+                "body_length":len(body), "body_sha256":digest}}
+        artifact = json.dumps({"path":"src/large.py", "sha256":digest,
+            "byte_length":len(body)},sort_keys=True,separators=(",", ":")) + (
+            "\n----- BEGIN EXACT UTF-8 ARTIFACT -----\n" + body +
+            "\n----- END EXACT UTF-8 ARTIFACT -----")
+        package = {"record_type":"worker_exchange_package", "included_sections":[
+            {"section_id":"exact-change-evidence", "content":json.dumps([change],
+                sort_keys=True,separators=(",", ":"))},
+            {"section_id":"changed-artifact-1", "content":artifact}]}
+        logical = (json.dumps(package,sort_keys=True,separators=(",", ":"))+"\n").encode()
+        projection = _provider_review_projection(logical)
+        self.assertLess(len(projection), len(logical))
+        binding = {"expected_canonical_sha256":hashlib.sha256(logical).hexdigest(),
+                   "expected_canonical_byte_length":len(logical)}
+        self.assertEqual(_resolve_provider_review_projection(projection, **binding), logical)
+        projected = json.loads(projection)
+        exact = json.loads(projected["package"]["included_sections"][0]["content"])[0]
+        self.assertNotIn("after_base64", exact)
+        self.assertEqual(exact["after_body_reference"]["sha256"], digest)
+
+        tampered = json.loads(projection); tampered["package"]["included_sections"][1]["content"] += "x"
+        tampered["record_sha256"] = _digest({k:v for k,v in tampered.items() if k!="record_sha256"})
+        with self.assertRaisesRegex(ValueError, "mismatch|malformed|truncated|trailing"):
+            _resolve_provider_review_projection((json.dumps(tampered,sort_keys=True,separators=(",", ":"))+"\n").encode(), **binding)
+        dangling = json.loads(projection)
+        exact = json.loads(dangling["package"]["included_sections"][0]["content"])
+        exact[0]["after_body_reference"]["section_id"] = "changed-artifact-neighbor"
+        dangling["package"]["included_sections"][0]["content"] = json.dumps(
+            exact,sort_keys=True,separators=(",", ":"))
+        dangling["record_sha256"] = _digest({k:v for k,v in dangling.items() if k!="record_sha256"})
+        with self.assertRaisesRegex(ValueError, "dangling"):
+            _resolve_provider_review_projection((json.dumps(dangling,sort_keys=True,separators=(",", ":"))+"\n").encode(), **binding)
+
+        substituted = json.loads(logical)
+        substituted["task_scope_id"] = "worker-exchange-scope-substituted"
+        substituted_bytes = (json.dumps(substituted,sort_keys=True,separators=(",", ":"))+"\n").encode()
+        internally_valid = _provider_review_projection(substituted_bytes)
+        with self.assertRaisesRegex(ValueError, "integrity mismatch"):
+            _resolve_provider_review_projection(internally_valid, **binding)
+        with self.assertRaisesRegex(ValueError, "integrity mismatch"):
+            _resolve_provider_review_projection(projection,
+                expected_canonical_sha256="0"*64,
+                expected_canonical_byte_length=len(logical))
+        with self.assertRaisesRegex(ValueError, "integrity mismatch"):
+            _resolve_provider_review_projection(projection,
+                expected_canonical_sha256=binding["expected_canonical_sha256"],
+                expected_canonical_byte_length=len(logical)+1)
+        with self.assertRaises((ValueError, json.JSONDecodeError)):
+            _resolve_provider_review_projection(projection[:-1], **binding)
+        with self.assertRaises((ValueError, json.JSONDecodeError)):
+            _resolve_provider_review_projection(projection+b"{}", **binding)
+        with self.assertRaisesRegex(ValueError, "independent canonical package binding"):
+            _resolve_provider_review_projection(projection,
+                expected_canonical_sha256=None,
+                expected_canonical_byte_length=len(logical))
 
     def test_identity_functional_role_and_zero_authority_are_distinct(self):
         self.assertEqual(WSL_REVIEWER_REFERENCE["functional_role"], FORMAL_REVIEW_ROLE)

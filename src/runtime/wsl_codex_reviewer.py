@@ -6,6 +6,7 @@ live-tree review is separate; this transport accepts only a frozen candidate.
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import base64
 import hashlib
 import json
 import os
@@ -18,7 +19,7 @@ from src.library.artifacts import require_id
 from src.runtime.codex_worker_adapter import _minimal_environment, _process_metadata
 from src.runtime.disposable_verifier import candidate_manifest
 from src.runtime.worker_exchange import WorkerExchange, _authority, _digest
-from src.runtime.codex_app_server import CodexAppServerTransport
+from src.runtime.codex_app_server import CodexAppServerError, CodexAppServerTransport
 from src.runtime.windows_codex_reviewer import (
     MAX_REVIEW_PACKAGE_BYTES, MAX_REVIEW_RESOLVED_PACKAGE_BYTES,
     WINDOWS_REVIEW_SCHEMA, _exact_builder_evidence,
@@ -38,6 +39,7 @@ WSL_ADAPTER_VERSION = "0.1"
 WSL_QUALIFICATION_CONTRACT_VERSION = "wsl-codex-exact-review-qualification-v0.1"
 WSL_ADAPTER_QUALIFIED = True
 WSL_ADAPTER_PROMOTED = True
+MAX_PROVIDER_REVIEW_EVIDENCE_BYTES = 950_000
 WSL_QUALIFIED_CANDIDATE_SOURCE_SHA256 = "87710367f7b2d8dcede102c00a747cccc07c11caa89ed2944f8d42ef660fb188"
 WSL_QUALIFIED_SNAPSHOT_ID = "candidate-snapshot-e24491b35e552d0847d0768641ef6526520b2dd89cca1ce24943eb77574c41db"
 WSL_FIXED_CONTRACT_SHA256 = "50a11c33bb53a2508abe4505fc18b3c352680243bada567fd4641c5cfb2e7d7f"
@@ -93,6 +95,127 @@ WSL_QUALIFICATION_CONTRACT = {
 
 def _now(): return datetime.now(timezone.utc).isoformat()
 def _sha(data): return hashlib.sha256(data).hexdigest()
+
+
+_ARTIFACT_BEGIN = "\n----- BEGIN EXACT UTF-8 ARTIFACT -----\n"
+_ARTIFACT_END = "\n----- END EXACT UTF-8 ARTIFACT -----"
+
+
+def _provider_review_projection(exported):
+    """Deduplicate exact postimages for provider presentation, losslessly."""
+    logical = bytes(exported)
+    if len(logical) <= MAX_PROVIDER_REVIEW_EVIDENCE_BYTES:
+        return logical
+    package = json.loads(logical.decode("utf-8"))
+    projected = json.loads(json.dumps(package))
+    sections = {item["section_id"]: item for item in projected["included_sections"]}
+    exact = sections.get("exact-change-evidence")
+    if not exact:
+        return logical
+    changes = json.loads(exact["content"])
+    artifacts = {}
+    for section_id, section in sections.items():
+        if not section_id.startswith("changed-artifact-"):
+            continue
+        content = section["content"]
+        if _ARTIFACT_BEGIN not in content or not content.endswith(_ARTIFACT_END):
+            raise ValueError("changed artifact presentation is malformed")
+        header, body = content.split(_ARTIFACT_BEGIN, 1)
+        body = body[:-len(_ARTIFACT_END)]
+        identity = json.loads(header)
+        encoded = body.encode("utf-8")
+        if (len(encoded) != identity.get("byte_length")
+                or _sha(encoded) != identity.get("sha256")):
+            raise ValueError("changed artifact presentation identity mismatch")
+        if identity["path"] in artifacts:
+            raise ValueError("changed artifact presentation is duplicated")
+        artifacts[identity["path"]] = (section_id, encoded)
+    for change in changes:
+        path = change.get("path")
+        section_id, body = artifacts.get(path, (None, None))
+        try:
+            embedded = base64.b64decode(change["after_base64"], validate=True)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("exact postimage body is unavailable") from exc
+        if section_id is None or embedded != body:
+            raise ValueError("exact postimage and changed artifact differ")
+        change["after_body_reference"] = {"encoding": "section-content-utf8-v1",
+            "section_id": section_id, "path": path, "byte_length": len(body),
+            "sha256": _sha(body)}
+        del change["after_base64"]
+    exact["content"] = json.dumps(changes, sort_keys=True, ensure_ascii=False,
+                                  separators=(",", ":"))
+    projection = {"schema_version": 1,
+        "record_type": "worker_exchange_provider_review_projection",
+        "canonical_package_sha256": _sha(logical),
+        "canonical_package_byte_length": len(logical),
+        "deduplication": "after-base64-to-exact-changed-artifact-v1",
+        "package": projected, "creates_authority": False}
+    projection["record_sha256"] = _digest(projection)
+    encoded = (json.dumps(projection, sort_keys=True, ensure_ascii=False,
+                          separators=(",", ":")) + "\n").encode("utf-8")
+    if _resolve_provider_review_projection(
+            encoded, expected_canonical_sha256=_sha(logical),
+            expected_canonical_byte_length=len(logical)) != logical:
+        raise ValueError("provider review projection is not lossless")
+    if len(encoded) > MAX_PROVIDER_REVIEW_EVIDENCE_BYTES:
+        raise ValueError("provider review projection exceeds byte limit")
+    return encoded
+
+
+def _resolve_provider_review_projection(data, *, expected_canonical_sha256,
+                                        expected_canonical_byte_length):
+    """Reconstruct and authenticate the exact canonical package from a projection."""
+    if (not isinstance(expected_canonical_sha256, str)
+            or len(expected_canonical_sha256) != 64
+            or not isinstance(expected_canonical_byte_length, int)
+            or expected_canonical_byte_length < 0):
+        raise ValueError("independent canonical package binding is required")
+    value = json.loads(bytes(data).decode("utf-8"))
+    if value.get("record_type") != "worker_exchange_provider_review_projection":
+        logical = bytes(data)
+        if (len(logical) != expected_canonical_byte_length
+                or _sha(logical) != expected_canonical_sha256):
+            raise ValueError("canonical package does not match its independent binding")
+        return logical
+    canonical_projection = (json.dumps(value, sort_keys=True, ensure_ascii=False,
+                                       separators=(",", ":")) + "\n").encode("utf-8")
+    if bytes(data) != canonical_projection:
+        raise ValueError("provider review projection is truncated or has trailing data")
+    if (value.get("schema_version") != 1 or value.get("creates_authority") is not False
+            or value.get("deduplication") != "after-base64-to-exact-changed-artifact-v1"
+            or value.get("canonical_package_sha256") != expected_canonical_sha256
+            or value.get("canonical_package_byte_length") != expected_canonical_byte_length
+            or value.get("record_sha256") != _digest(
+                {key: item for key, item in value.items() if key != "record_sha256"})):
+        raise ValueError("provider review projection integrity mismatch")
+    package = value.get("package")
+    included = package.get("included_sections", [])
+    sections = {item["section_id"]: item for item in included}
+    if len(sections) != len(included):
+        raise ValueError("provider review projection contains duplicated sections")
+    exact = sections.get("exact-change-evidence")
+    changes = json.loads(exact["content"])
+    for change in changes:
+        reference = change.pop("after_body_reference", None)
+        section = sections.get((reference or {}).get("section_id"))
+        if not section or reference.get("path") != change.get("path"):
+            raise ValueError("provider review projection reference is dangling")
+        content = section["content"]
+        if _ARTIFACT_BEGIN not in content or not content.endswith(_ARTIFACT_END):
+            raise ValueError("provider review projection artifact is malformed")
+        body = content.split(_ARTIFACT_BEGIN, 1)[1][:-len(_ARTIFACT_END)].encode("utf-8")
+        if (len(body) != reference.get("byte_length") or _sha(body) != reference.get("sha256")):
+            raise ValueError("provider review projection artifact mismatches its reference")
+        change["after_base64"] = base64.b64encode(body).decode("ascii")
+    exact["content"] = json.dumps(changes, sort_keys=True, ensure_ascii=False,
+                                  separators=(",", ":"))
+    logical = (json.dumps(package, sort_keys=True, ensure_ascii=False,
+                          separators=(",", ":")) + "\n").encode("utf-8")
+    if (len(logical) != expected_canonical_byte_length
+            or _sha(logical) != expected_canonical_sha256):
+        raise ValueError("provider review projection does not reconstruct canonical package")
+    return logical
 
 
 def prepare_wsl_review_package(*, exchange, campaign_record, candidate_snapshot, workspace=ROOT):
@@ -262,6 +385,7 @@ class WslCodexReviewAdapter:
             expected_task_scope_id=package["task_scope_id"], expected_recipient_id=recipient["worker_id"],
             expected_package_id=package_id, expected_source_report=source,
             expected_authorization_reference=grant["authorization_reference"])
+        provider_evidence = _provider_review_projection(exported)
         package_sha = _sha(exported); directory = self.root / package_id
         invocation_id = require_id(invocation_id or f"wsl-review-{uuid.uuid4()}", "invocation_id")
         if directory.exists(): raise RuntimeError("review request was already attempted; blind replay forbidden")
@@ -295,7 +419,7 @@ class WslCodexReviewAdapter:
                 "--ignore-user-config", "--strict-config", "--sandbox", "read-only", "--cd", str(snapshot_root),
                 "--output-schema", str(schema), "--output-last-message", str(output), "-"]
             try:
-                prompt = self._prompt(exported, package_sha, package, campaign_id,
+                prompt = self._prompt(provider_evidence, package_sha, package, campaign_id,
                                       builder_return_report_id, candidate_snapshot_id, invocation_id)
                 if self.app_server_transport is not None:
                     completed = self.app_server_transport.run(
@@ -306,6 +430,10 @@ class WslCodexReviewAdapter:
                 else:
                     completed = self.run_process(command, prompt=prompt,
                         environment=_minimal_environment(), timeout=self.timeout_seconds)
+            except CodexAppServerError as exc:
+                return self._failure(result_path, request, package, transport_authority,
+                                     "app_server_" + exc.category,
+                                     f"{exc.stage}:{exc.category}")
             except (KeyboardInterrupt, subprocess.TimeoutExpired, OSError) as exc:
                 return self._failure(result_path, request, package, transport_authority,
                                      "interrupted_timeout_or_transport_failure", type(exc).__name__)
