@@ -43,6 +43,17 @@ REVIEW_STATUSES = {
     "insufficient_evidence", "blocked",
 }
 TERMINAL_STATUSES = {"succeeded", "cancelled", "failed_safe", "tanner_escalation"}
+STEPWISE_ACTIVE_CAMPAIGN_STATUSES = frozenset({
+    "ready", "builder_in_progress", "awaiting_independent_review",
+    "reviewer_native_action_approved", "review_accepted_application_pending",
+    "reviewed_application_completed", "correction_pending",
+})
+STEPWISE_PAUSED_CAMPAIGN_STATUSES = frozenset({
+    "tanner_escalation", "ready_for_bounded_continuation",
+})
+STEPWISE_TERMINAL_CAMPAIGN_STATUSES = frozenset({
+    "succeeded", "cancelled", "failed_safe",
+})
 BUILDER_MODES = {"read_only", "repository_write"}
 WINDOWS_REVIEWER_ROLE = "windows_software_architecture_review"
 WINDOWS_REVIEWER_WORKER_ID = "windows-codex-software-review"
@@ -114,6 +125,59 @@ CAMPAIGN_ACCEPTANCE_CONTRACT = {
 
 def _now():
     return datetime.now(timezone.utc).isoformat()
+
+
+def stepwise_campaign_status_disposition(status):
+    """Classify one established campaign status without inventing an outcome."""
+    if status in STEPWISE_ACTIVE_CAMPAIGN_STATUSES:
+        return "active"
+    if status in STEPWISE_PAUSED_CAMPAIGN_STATUSES:
+        return "paused"
+    if status in STEPWISE_TERMINAL_CAMPAIGN_STATUSES:
+        return "terminal"
+    raise PermissionError("canonical stepwise campaign status is unknown")
+
+
+def stepwise_campaign_budget_limits(record):
+    """Return the immutable limits authenticated by a canonical campaign budget."""
+    if not isinstance(record, dict) or record.get("stepwise_v01") is not True:
+        raise PermissionError("a canonical stepwise campaign is required")
+    budget = record.get("execution_budget_v01")
+    maximum_keys = (
+        "maximum_duration_seconds", "maximum_worker_turns",
+        "maximum_reviewer_turns", "maximum_provider_turns",
+        "maximum_cost_units", "maximum_correction_cycles",
+        "maximum_iterations",
+    )
+    if (not isinstance(budget, dict)
+            or any(type(budget.get(key)) is not int or budget[key] <= 0
+                   for key in maximum_keys)
+            or budget.get("contract") !=
+                "conservative-provider-reservation-failed-safe-v0.1"):
+        raise PermissionError("canonical stepwise campaign budget is malformed")
+    immutable = {key: budget.get(key) for key in maximum_keys}
+    immutable.update({
+        "created_at": budget.get("created_at"),
+        "expires_at": budget.get("expires_at"),
+        "contract": budget.get("contract"),
+    })
+    try:
+        created = datetime.fromisoformat(immutable["created_at"])
+        expires = datetime.fromisoformat(immutable["expires_at"])
+    except (TypeError, ValueError) as exc:
+        raise PermissionError("canonical stepwise campaign budget time is malformed") from exc
+    if (created.tzinfo is None or expires.tzinfo is None
+            or expires - created != timedelta(
+                seconds=budget["maximum_duration_seconds"])
+            or budget.get("budget_sha256") != _digest(immutable)):
+        raise PermissionError("canonical stepwise campaign budget binding is invalid")
+    return {
+        "seconds": budget["maximum_duration_seconds"],
+        "provider_turns": budget["maximum_provider_turns"],
+        "correction_cycles": budget["maximum_correction_cycles"],
+        "cost_units": budget["maximum_cost_units"],
+        "iterations": budget["maximum_iterations"],
+    }
 
 
 def _lock(path):
@@ -664,6 +728,18 @@ class CodexDevelopmentCampaign:
                             "decision_needed":"inspect exact Git transaction evidence"},
                         creates_authority=False, creates_continuing_authority=False)
             else:
+                budget = record.get("execution_budget_v01") or {}
+                if (record.get("stepwise_v01")
+                        and datetime.now(timezone.utc) >=
+                            datetime.fromisoformat(budget["expires_at"])):
+                    return self._update(record,
+                        event_kind="campaign_expired_before_git",
+                        status="failed_safe", git_commit_evidence=None,
+                        needs_tanner={"urgency":"urgent_blocking_flow",
+                            "reason":"campaign_duration_expired",
+                            "decision_needed":"create a new exact request"},
+                        creates_authority=False,
+                        creates_continuing_authority=False)
                 prepared = owner.prepare_reviewed_application(
                     terminal_application_receipt=application,
                     operation_id=application["operation_id"],
@@ -2063,6 +2139,20 @@ class CodexDevelopmentCampaign:
             ambiguous = self._provider_ambiguity(record)
             if ambiguous is not None:
                 return ambiguous
+            if record.get("status") == "builder_in_progress":
+                # The durable builder state is written before the downstream
+                # handoff creates its exact provider reservation. A restart in
+                # that narrow window proves no canonical result and authorizes
+                # no retry; close safely instead of stalling the state machine.
+                return self._update(record,
+                    event_kind="provider_reservation_missing_after_restart",
+                    event_detail={"provider_contact_proven": False},
+                    status="failed_safe", needs_tanner={
+                        "urgency":"urgent_blocking_flow",
+                        "reason":"ambiguous_provider_completion",
+                        "provider_contact_proven":False,
+                        "decision_needed":"cancel, inspect body-free evidence, or create a new exact request"},
+                    creates_authority=False, creates_continuing_authority=False)
             budget = record["execution_budget_v01"]
             expired = datetime.now(timezone.utc) >= datetime.fromisoformat(budget["expires_at"])
             if record["status"] in {"ready", "correction_pending"}:
@@ -2122,10 +2212,7 @@ class CodexDevelopmentCampaign:
         record = self.store.load(campaign_id)
         remaining_steps = ((record["execution_budget_v01"]["maximum_iterations"] * 4) + 4
                            if record.get("stepwise_v01") else (MAX_ITERATIONS * 4) + 4)
-        while record["status"] in {"ready", "awaiting_independent_review",
-                                    "reviewer_native_action_approved",
-                                    "review_accepted_application_pending",
-                                    "reviewed_application_completed", "correction_pending"}:
+        while record["status"] in STEPWISE_ACTIVE_CAMPAIGN_STATUSES:
             if remaining_steps <= 0:
                 return self._update(record, event_kind="stepwise_progress_exhausted",
                     status="failed_safe", needs_tanner={"urgency":"urgent_blocking_flow",
@@ -2134,9 +2221,7 @@ class CodexDevelopmentCampaign:
             prior_revision = record["state_revision"]
             record = self.advance_once(campaign_id, reviewer_adapter=reviewer_adapter)
             remaining_steps -= 1
-            if (record["status"] in {"ready", "awaiting_independent_review",
-                    "review_accepted_application_pending", "reviewed_application_completed",
-                    "correction_pending"}
+            if (record["status"] in STEPWISE_ACTIVE_CAMPAIGN_STATUSES
                     and record["state_revision"] <= prior_revision):
                 return self._update(record, event_kind="stepwise_progress_stalled",
                     status="failed_safe", needs_tanner={"urgency":"urgent_blocking_flow",

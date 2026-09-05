@@ -7,6 +7,7 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from src.runtime.codex_development_campaign import (
@@ -16,6 +17,8 @@ from src.runtime.codex_development_campaign import (
     ROOT,
     CodexDevelopmentCampaign,
     _cleanup_python_cache,
+    stepwise_campaign_budget_limits,
+    stepwise_campaign_status_disposition,
 )
 from src.runtime.codex_development_handoff import run_codex_development_handoff
 from src.runtime.phase0_integrity import SCOPED_ROOTS
@@ -1421,6 +1424,33 @@ class StepwiseCampaignV01Tests(unittest.TestCase):
             "maximum_cost_units": 6, "maximum_correction_cycles": 2,
             "maximum_iterations": 3}}
 
+    def test_canonical_stepwise_status_and_budget_projection_is_exact(self):
+        record = self.fixture.campaign.create(
+            self.payload("stepwise-contract-projection"),
+            authenticated_rider=True, stepwise=True)
+        self.assertEqual(stepwise_campaign_budget_limits(record), {
+            "seconds": 3600, "provider_turns": 6,
+            "correction_cycles": 2, "cost_units": 6, "iterations": 3,
+        })
+        for status in (
+                "ready", "builder_in_progress", "awaiting_independent_review",
+                "reviewer_native_action_approved",
+                "review_accepted_application_pending",
+                "reviewed_application_completed", "correction_pending"):
+            self.assertEqual(stepwise_campaign_status_disposition(status), "active")
+        for status in ("tanner_escalation", "ready_for_bounded_continuation"):
+            self.assertEqual(stepwise_campaign_status_disposition(status), "paused")
+        for status in ("succeeded", "cancelled", "failed_safe"):
+            self.assertEqual(stepwise_campaign_status_disposition(status), "terminal")
+        for status in ("denied", "expired", "accepted", None):
+            with self.subTest(status=status), self.assertRaises(PermissionError):
+                stepwise_campaign_status_disposition(status)
+
+        tampered = json.loads(json.dumps(record))
+        tampered["execution_budget_v01"]["maximum_provider_turns"] += 1
+        with self.assertRaisesRegex(PermissionError, "budget binding"):
+            stepwise_campaign_budget_limits(tampered)
+
     def test_accepted_review_checkpoints_once_without_fallthrough(self):
         campaign=self.fixture.campaign
         created=campaign.create(self.payload("stepwise-accepted"),
@@ -1443,6 +1473,54 @@ class StepwiseCampaignV01Tests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,"Git transaction state root"):
             campaign.create(self.payload("stepwise-no-git-root"),
                 authenticated_rider=True,stepwise=True)
+
+    def test_expired_git_stage_reconciles_first_but_never_starts_new_cas(self):
+        campaign = self.fixture.campaign
+        record = campaign.create(self.payload("stepwise-expired-git"),
+            authenticated_rider=True, stepwise=True)
+        budget = dict(record["execution_budget_v01"])
+        budget["expires_at"] = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+        application = {
+            "status": "applied_verified_after_review", "application_count": 1,
+            "operation_id": "application-exact", "applied_paths": [],
+            "review_acceptance_receipt_sha256": "a" * 64,
+            "binding": {"expected_repository_head": "b" * 40,
+                        "mutation_manifest_sha256": "c" * 64},
+            "reviewed_commit_projection": {
+                "expected_tree": "d" * 40, "expected_diff_sha256": "e" * 64,
+                "message": "Exact reviewed fixture"},
+        }
+        record = campaign._update(record, event_kind="fixture_application_complete",
+            status="reviewed_application_completed", execution_budget_v01=budget,
+            application_evidence=application,
+            reviews=[{"status": "pass", "reviewed_application_operation_id":
+                      "application-exact"}])
+        counts = {"reconcile": 0, "prepare": 0, "advance": 0}
+
+        class Owner:
+            def __init__(self, *args):
+                pass
+
+            def reconcile_campaign_reviewed_application(self, **kwargs):
+                counts["reconcile"] += 1
+                raise FileNotFoundError
+
+            def prepare_reviewed_application(self, **kwargs):
+                counts["prepare"] += 1
+                return kwargs
+
+            def advance_campaign_reviewed_application(self, *args, **kwargs):
+                counts["advance"] += 1
+                return {"status": "committed"}
+
+        with patch.object(campaign, "_canonical_application_adapter",
+                          return_value=SimpleNamespace(workspace=Path(self.tmp.name))), \
+                patch("src.runtime.git_commit_transaction.GitCommitTransaction", Owner):
+            result = campaign._complete_pending_reviewed_git_locked(record, object())
+        self.assertEqual(result["status"], "failed_safe")
+        self.assertEqual(result["needs_tanner"]["reason"], "campaign_duration_expired")
+        self.assertEqual(counts, {"reconcile": 1, "prepare": 0, "advance": 0})
+        self.assertFalse(result["creates_continuing_authority"])
 
     def _reserved(self, campaign_id="stepwise-ambiguous"):
         campaign = self.fixture.campaign
@@ -1477,6 +1555,24 @@ class StepwiseCampaignV01Tests(unittest.TestCase):
         self.assertEqual(budget["consumed_cost_units"], 1)
         self.assertEqual(len(self.fixture.builder_payloads), 0)
         self.assertEqual(campaign.advance_once("stepwise-ambiguous")["status"], "failed_safe")
+
+    def test_restart_before_provider_reservation_closes_failed_safe_without_retry(self):
+        campaign = self.fixture.campaign
+        record = campaign.create(self.payload("stepwise-before-reservation"),
+            authenticated_rider=True, stepwise=True)
+        record = campaign._update(record, event_kind="builder_invocation_started",
+            status="builder_in_progress", iteration=1,
+            active_builder_task_scope_id="stepwise-before-reservation-builder-1")
+        result = campaign.advance_once(record["campaign_id"])
+        self.assertEqual(result["status"], "failed_safe")
+        self.assertEqual(result["needs_tanner"]["reason"], "ambiguous_provider_completion")
+        self.assertFalse(result["needs_tanner"]["provider_contact_proven"])
+        self.assertIsNone(result["execution_budget_v01"]["provider_action"])
+        self.assertEqual(result["execution_budget_v01"]["consumed_provider_turns"], 0)
+        self.assertEqual(len(self.fixture.builder_payloads), 0)
+        replay = campaign.advance_once(record["campaign_id"])
+        self.assertEqual(replay["record_sha256"], result["record_sha256"])
+        self.assertEqual(len(self.fixture.builder_payloads), 0)
 
     def test_stepwise_configured_iteration_limit_blocks_next_worker(self):
         payload=self.fixture.payload("iteration-budget-v01")
