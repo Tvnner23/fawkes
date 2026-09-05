@@ -746,32 +746,203 @@ class CodexDevelopmentCampaign:
                                "blocked action remains unperformed."),
             can_request_again=True, work_lost=False)
         attention_id = paused["needs_tanner"]["attention_id"]
-        result = self.attention_store.wait_for_decision(
-            attention_id, timeout_seconds=timeout_seconds, process_alive=process_alive,
-            reminder_handler=lambda _event: retain_needs_tanner_notification(
-                self.store.load(approval["campaign_id"])))
+        try:
+            result = self.attention_store.wait_for_decision(
+                attention_id, timeout_seconds=timeout_seconds, process_alive=process_alive,
+                reminder_handler=lambda _event: retain_needs_tanner_notification(
+                    self.store.load(approval["campaign_id"])))
+        except (PermissionError, TimeoutError):
+            current = self.store.load(approval["campaign_id"])
+            if ((current.get("needs_tanner") or {}).get("attention_id") == attention_id
+                    and current.get("status") == "tanner_escalation"):
+                self._update(current, event_kind="tanner_attention_failed_safe",
+                    event_detail={"attention_id": attention_id,
+                                  "invocation_id": approval["invocation_id"]},
+                    status="failed_safe", needs_tanner={
+                        "reason": "attention_unavailable_or_expired",
+                        "attention_id": attention_id,
+                        "invocation_id": approval["invocation_id"],
+                        "decision_needed": "create a new exact request",
+                    }, creates_authority=False,
+                    creates_continuing_authority=False)
+            raise
         decision = result["decision"]
+        if (decision.get("choice") == "approve_once"
+                and approval["protocol"].get(
+                    "approval_binding_kind") == "independent_review_provider"):
+            # DevelopmentAttentionStore.decide wakes its waiter after the exact
+            # decision is durable.  Do not return that decision to the paused
+            # process until the campaign has published the matching live-action
+            # state under its own serialization boundary.
+            with self.store.protected(approval["campaign_id"]):
+                current = self.store.load(approval["campaign_id"])
+                active = current.get("active_review_native_action") or {}
+                if (current.get("status") != "reviewer_native_action_approved"
+                        or active.get("attention_id") != attention_id
+                        or active.get("decision_id") != decision.get("decision_id")
+                        or active.get("invocation_id") != approval["invocation_id"]
+                        or active.get("review_package_id") !=
+                            approval["protocol"].get("review_package_id")):
+                    raise PermissionError(
+                        "Reviewer native-action publication is stale or mismatched")
+        is_review_action = (approval["protocol"].get(
+            "approval_binding_kind") == "independent_review_provider")
+
+        def close_failed_review_action(reason):
+            if not is_review_action:
+                return
+            try:
+                lifecycle = self.attention_store.lifecycle(attention_id)
+                retained = lifecycle.get("decision") or {}
+                if retained.get("consumed") is not True:
+                    self.attention_store.consume_approve_once(
+                        decision["decision_id"], attention_id=attention_id,
+                        invocation_id=approval["invocation_id"],
+                        protocol_binding_sha256=result["event"].get(
+                            "protocol_binding_sha256"),
+                        approved_action_sha256=approval["protocol"].get(
+                            "approved_action_sha256"),
+                        expected_binding=self.attention_store._authority_binding(
+                            result["event"]))
+                self.attention_store.finish_live_action(
+                    decision["decision_id"], status="failed")
+            except (PermissionError, RuntimeError, TimeoutError):
+                # An already invalid or expired decision cannot authorize an
+                # action.  The campaign must still close failed-safe below.
+                pass
+            self._fail_review_native_action(
+                approval["campaign_id"], attention_id,
+                decision["decision_id"], approval["invocation_id"],
+                reason=reason)
+
         def claim(continuation_id=None):
-            return self.attention_store.consume_approve_once(
-                decision["decision_id"], attention_id=attention_id,
-                invocation_id=approval["invocation_id"],
-                protocol_binding_sha256=result["event"].get("protocol_binding_sha256"),
-                approved_action_sha256=approval["protocol"]["approved_action_sha256"],
-                continuation_id=continuation_id)
+            try:
+                return self.attention_store.consume_approve_once(
+                    decision["decision_id"], attention_id=attention_id,
+                    invocation_id=approval["invocation_id"],
+                    protocol_binding_sha256=result["event"].get("protocol_binding_sha256"),
+                    approved_action_sha256=approval["protocol"]["approved_action_sha256"],
+                    continuation_id=continuation_id)
+            except (PermissionError, RuntimeError, TimeoutError):
+                retained = (self.attention_store.lifecycle(attention_id).get(
+                    "decision") or {})
+                # A rejected duplicate claim is only replay evidence.  The
+                # already-claimed original action retains responsibility for
+                # reporting its own exact terminal result.
+                if retained.get("consumed") is not True:
+                    close_failed_review_action(
+                        "reviewer_native_action_claim_failed")
+                raise
         def reserve(continuation_id):
-            return self.attention_store.reserve_detached_continuation(
-                decision["decision_id"], attention_id=attention_id,
-                invocation_id=approval["invocation_id"],
-                protocol_binding_sha256=result["event"].get("protocol_binding_sha256"),
-                continuation_id=continuation_id)
+            try:
+                return self.attention_store.reserve_detached_continuation(
+                    decision["decision_id"], attention_id=attention_id,
+                    invocation_id=approval["invocation_id"],
+                    protocol_binding_sha256=result["event"].get("protocol_binding_sha256"),
+                    continuation_id=continuation_id)
+            except (PermissionError, RuntimeError, TimeoutError):
+                close_failed_review_action("reviewer_native_action_transport_lost")
+                raise
         def finish(continuation_id, status):
-            return self.attention_store.finish_detached_continuation(
+            completed = self.attention_store.finish_detached_continuation(
                 decision["decision_id"], continuation_id, status=status)
+            if approval["protocol"].get(
+                    "approval_binding_kind") == "independent_review_provider":
+                self._finish_review_native_action(
+                    approval["campaign_id"], attention_id,
+                    decision["decision_id"], approval["invocation_id"],
+                    action_status="completed" if status == "completed" else "failed")
+            return completed
         def complete(status):
-            return self.attention_store.finish_live_action(decision["decision_id"], status=status)
+            completed = self.attention_store.finish_live_action(
+                decision["decision_id"], status=status)
+            if approval["protocol"].get(
+                    "approval_binding_kind") == "independent_review_provider":
+                self._finish_review_native_action(
+                    approval["campaign_id"], attention_id,
+                    decision["decision_id"], approval["invocation_id"],
+                    action_status=status)
+            return completed
         return {"choice": decision["choice"], "attention_id": attention_id,
                 "decision_id": decision["decision_id"], "claim": claim,
                 "reserve": reserve, "finish": finish, "complete": complete}
+
+    def _finish_review_native_action(self, campaign_id, attention_id, decision_id,
+                                     invocation_id, *, action_status):
+        """Close one live Reviewer action and restore its exact provider state."""
+        if action_status not in {"completed", "failed"}:
+            raise ValueError("invalid Reviewer native-action status")
+        with self.store.protected(campaign_id):
+            current = self.store.load(campaign_id)
+            active = current.get("active_review_native_action") or {}
+            lifecycle = self.attention_store.lifecycle(attention_id)
+            decision = lifecycle.get("decision") or {}
+            expected_lifecycle = "completed" if action_status == "completed" else "failed_safe"
+            prior_completion = next((item for item in reversed(current.get("events", []))
+                if item.get("kind") == "reviewer_native_action_completed"
+                and item.get("detail", {}).get("attention_id") == attention_id
+                and item.get("detail", {}).get("decision_id") == decision_id
+                and item.get("detail", {}).get("invocation_id") == invocation_id
+                and item.get("detail", {}).get("action_status") == action_status), None)
+            if (current.get("status") == "awaiting_independent_review"
+                    and not active and prior_completion is not None
+                    and decision.get("decision_id") == decision_id
+                    and decision.get("invocation_id") == invocation_id
+                    and decision.get("consumed") is True
+                    and decision.get("lifecycle_state") == expected_lifecycle):
+                return current
+            if (current.get("status") != "reviewer_native_action_approved"
+                    or active.get("attention_id") != attention_id
+                    or active.get("decision_id") != decision_id
+                    or active.get("invocation_id") != invocation_id
+                    or active.get("resume_status") != "awaiting_independent_review"
+                    or decision.get("decision_id") != decision_id
+                    or decision.get("invocation_id") != invocation_id
+                    or decision.get("consumed") is not True
+                    or decision.get("lifecycle_state") != expected_lifecycle):
+                raise PermissionError(
+                    "Reviewer native-action completion is stale or mismatched")
+            return self._update(current,
+                event_kind="reviewer_native_action_completed",
+                event_detail={"attention_id": attention_id,
+                              "decision_id": decision_id,
+                              "invocation_id": invocation_id,
+                              "action_status": action_status},
+                status="awaiting_independent_review",
+                active_review_native_action=None,
+                creates_authority=False,
+                creates_continuing_authority=False)
+
+    def _fail_review_native_action(self, campaign_id, attention_id, decision_id,
+                                   invocation_id, *, reason):
+        """Close an unresumable Reviewer action without retry or authority."""
+        with self.store.protected(campaign_id):
+            current = self.store.load(campaign_id)
+            active = current.get("active_review_native_action") or {}
+            if current.get("status") == "failed_safe":
+                return current
+            if (current.get("status") != "reviewer_native_action_approved"
+                    or active.get("attention_id") != attention_id
+                    or active.get("decision_id") != decision_id
+                    or active.get("invocation_id") != invocation_id):
+                raise PermissionError(
+                    "Reviewer native-action failure is stale or mismatched")
+            return self._update(current,
+                event_kind="reviewer_native_action_failed_safe",
+                event_detail={"attention_id": attention_id,
+                              "decision_id": decision_id,
+                              "invocation_id": invocation_id,
+                              "reason": reason},
+                status="failed_safe",
+                active_review_native_action=None,
+                needs_tanner={
+                    "reason": reason,
+                    "attention_id": attention_id,
+                    "invocation_id": invocation_id,
+                    "decision_needed": "inspect evidence or create a new exact request",
+                },
+                creates_authority=False,
+                creates_continuing_authority=False)
 
     @staticmethod
     def _validated_worker_attention_binding(record, attention, transport_result):
@@ -996,6 +1167,10 @@ class CodexDevelopmentCampaign:
                  "expiration_effect": event["expiration_effect"],
                  "can_request_again": event["can_request_again"], "work_lost": event["work_lost"],
                  "worker_id": worker["worker_id"], "requested_authority": event["requested_authority"]}
+        if binding.get("approval_binding_kind") == "independent_review_provider":
+            needs["resume_status"] = record["status"]
+            needs["reviewer_invocation_id"] = binding["reviewer_invocation_id"]
+            needs["review_package_id"] = binding["review_package_id"]
         return self._update(record, event_kind="tanner_attention_required",
             event_detail={"attention_id": event["attention_id"], "invocation_id": invocation_id,
                           "worker_id": worker["worker_id"], "kind": kind},
@@ -1004,21 +1179,189 @@ class CodexDevelopmentCampaign:
 
     def decide_attention(self, campaign_id, attention_id, choice, *, authenticated_rider,
                          expected_identity=None):
-        record = self.store.load(campaign_id)
-        if (record.get("needs_tanner") or {}).get("attention_id") != attention_id:
-            raise PermissionError("attention decision is not bound to this campaign state")
-        result = self.attention_store.decide(
-            attention_id, choice, authenticated_rider=authenticated_rider,
-            expected_identity=expected_identity)
-        if choice == "cancel_campaign":
-            return {"campaign": self.cancel(campaign_id, authenticated_rider=True), **result}
-        # Approval is retained as one consumable grant. It does not automatically
-        # resume an ephemeral process or broaden the campaign scope.
-        updated = self._update(record, event_kind=f"tanner_attention_{choice}",
-            event_detail={"attention_id": attention_id, "decision_id": result["decision"]["decision_id"]},
-            status="ready_for_bounded_continuation" if choice == "approve_once" else "failed_safe",
-            needs_tanner=None)
-        return {"campaign": updated, **result}
+        # Keep the campaign lock from exact decision persistence through state
+        # publication.  The Attention waiter may wake, but cannot return an
+        # approval to its paused action until this publication is visible.
+        with self.store.protected(campaign_id):
+            record = self.store.load(campaign_id)
+            needs = record.get("needs_tanner") or {}
+            if needs.get("attention_id") != attention_id:
+                raise PermissionError("attention decision is not bound to this campaign state")
+            result = self.attention_store.decide(
+                attention_id, choice, authenticated_rider=authenticated_rider,
+                expected_identity=expected_identity)
+            if choice == "cancel_campaign":
+                if record["status"] == "succeeded":
+                    raise RuntimeError("completed campaign cannot be cancelled")
+                updated = self._update(record,
+                    event_kind="rider_cancelled_campaign", status="cancelled",
+                    cancelled=True, needs_tanner=None,
+                    active_builder_task_scope_id=None,
+                    active_review_native_action=None,
+                    creates_authority=False,
+                    creates_continuing_authority=False)
+                return {"campaign": updated, **result}
+            # Approval is retained as one consumable grant. It does not
+            # automatically resume a process or broaden campaign scope.
+            review_action = (choice == "approve_once"
+                and needs.get("resume_status") == "awaiting_independent_review"
+                and isinstance(result.get("event"), dict)
+                and (result["event"].get("protocol_binding") or {}).get(
+                    "approval_binding_kind") == "independent_review_provider")
+            active_review_action = ({
+                "attention_id": attention_id,
+                "decision_id": result["decision"]["decision_id"],
+                "invocation_id": needs.get("reviewer_invocation_id"),
+                "review_package_id": needs.get("review_package_id"),
+                "resume_status": needs.get("resume_status"),
+                "creates_authority": False,
+                "creates_continuing_authority": False,
+            } if review_action else None)
+            review_bound = ((result.get("event", {}).get("protocol_binding") or {}).get(
+                "approval_binding_kind") == "independent_review_provider")
+            try:
+                updated = self._update(record, event_kind=f"tanner_attention_{choice}",
+                    event_detail={"attention_id": attention_id,
+                                  "decision_id": result["decision"]["decision_id"]},
+                    status=("reviewer_native_action_approved" if review_action else
+                            "ready_for_bounded_continuation" if choice == "approve_once" else
+                            "failed_safe"),
+                    needs_tanner=None,
+                    active_review_native_action=active_review_action,
+                    creates_authority=False,
+                    creates_continuing_authority=False)
+            except Exception:
+                if review_bound:
+                    self.attention_store.fail_unpublished_review_decision(
+                        result["decision"]["decision_id"], attention_id=attention_id,
+                        campaign_id=campaign_id,
+                        reason="campaign_decision_publication_failed")
+                    current = self.store.load(campaign_id)
+                    if current.get("status") == "tanner_escalation":
+                        try:
+                            self._update(current,
+                                event_kind="attention_decision_publication_failed_safe",
+                                event_detail={"attention_id": attention_id,
+                                    "decision_id": result["decision"]["decision_id"]},
+                                status="failed_safe", active_review_native_action=None,
+                                needs_tanner={"reason":
+                                    "attention_decision_publication_interrupted",
+                                    "attention_id": attention_id,
+                                    "invocation_id": result["event"]["invocation_id"],
+                                    "decision_needed":
+                                        "inspect evidence or create a new exact request"},
+                                creates_authority=False,
+                                creates_continuing_authority=False)
+                        except Exception:
+                            pass
+                raise
+            if review_bound:
+                result = {**result, "decision":
+                    self.attention_store.publish_review_decision(
+                        result["decision"]["decision_id"], attention_id=attention_id,
+                        campaign_id=campaign_id,
+                        campaign_record_sha256=updated["record_sha256"],
+                        campaign_state_revision=updated["state_revision"])}
+            return {"campaign": updated, **result}
+
+    def reconcile_attention_decision(self, campaign_id):
+        """Reconcile one exact pending or decided Reviewer Attention lifecycle."""
+        with self.store.protected(campaign_id):
+            record = self.store.load(campaign_id)
+            needs = record.get("needs_tanner") or {}
+            attention_id = needs.get("attention_id")
+            if record.get("status") != "tanner_escalation" or not attention_id:
+                return record
+            lifecycle = self.attention_store.lifecycle(attention_id)
+            event = lifecycle["event"]
+            decision = lifecycle.get("decision") or {}
+            if not decision:
+                binding = event.get("protocol_binding") or {}
+                if binding.get("approval_binding_kind") != "independent_review_provider":
+                    return record
+                if (needs.get("resume_status") != "awaiting_independent_review"
+                        or needs.get("reviewer_invocation_id") !=
+                            event.get("invocation_id")
+                        or needs.get("review_package_id") !=
+                            binding.get("review_package_id")):
+                    raise PermissionError(
+                        "pending Reviewer Attention campaign lineage is mismatched")
+                self._validated_review_attention_binding(
+                    {**record, "status": needs["resume_status"]}, binding,
+                    event.get("reviewer_identity") or {}, event["invocation_id"])
+                if event.get("state") == "needs_tanner" and event.get("actionable"):
+                    return record
+                if event.get("state") == "needs_tanner":
+                    event = self.attention_store.fail_unavailable_pending_review(
+                        attention_id, campaign_id=campaign_id,
+                        invocation_id=event["invocation_id"])
+                if event.get("state") not in {"expired", "failed_safe"}:
+                    raise PermissionError(
+                        "pending Reviewer Attention state is not reconcilable")
+                reason = ("attention_unavailable_or_expired"
+                          if event.get("state") == "expired" else
+                          "reviewer_native_action_transport_lost")
+                return self._update(record,
+                    event_kind="reviewer_attention_reconciled_failed_safe",
+                    event_detail={"attention_id": attention_id,
+                                  "invocation_id": event["invocation_id"],
+                                  "attention_state": event["state"]},
+                    status="failed_safe", active_review_native_action=None,
+                    needs_tanner={"reason": reason,
+                        "attention_id": attention_id,
+                        "invocation_id": event["invocation_id"],
+                        "decision_needed":
+                            "inspect evidence or create a new exact request"},
+                    creates_authority=False,
+                    creates_continuing_authority=False)
+            publication = decision.get("campaign_publication") or {}
+            if (event.get("campaign_id") != campaign_id
+                    or decision.get("campaign_id") != campaign_id
+                    or decision.get("attention_id") != attention_id
+                    or publication.get("state") not in {"pending", "failed_safe"}):
+                raise PermissionError(
+                    "interrupted Attention decision publication is mismatched")
+            if publication.get("state") == "pending":
+                self.attention_store.fail_unpublished_review_decision(
+                    decision["decision_id"], attention_id=attention_id,
+                    campaign_id=campaign_id,
+                    reason="campaign_decision_publication_interrupted")
+            return self._update(record,
+                event_kind="attention_decision_publication_reconciled_failed_safe",
+                event_detail={"attention_id": attention_id,
+                              "decision_id": decision["decision_id"]},
+                status="failed_safe", active_review_native_action=None,
+                needs_tanner={"reason": "attention_decision_publication_interrupted",
+                    "attention_id": attention_id,
+                    "invocation_id": event["invocation_id"],
+                    "decision_needed": "inspect evidence or create a new exact request"},
+                creates_authority=False, creates_continuing_authority=False)
+
+    def reconcile_review_native_action(self, campaign_id):
+        """Project an exact terminal Reviewer action into canonical campaign state."""
+        with self.store.protected(campaign_id):
+            record = self.store.load(campaign_id)
+            if record.get("status") != "reviewer_native_action_approved":
+                return record
+            active = record.get("active_review_native_action") or {}
+            attention_id = active.get("attention_id")
+            if not attention_id:
+                raise PermissionError("active Reviewer action lineage is unavailable")
+            lifecycle = self.attention_store.lifecycle(attention_id)
+            decision = lifecycle.get("decision") or {}
+            if (decision.get("decision_id") != active.get("decision_id")
+                    or decision.get("invocation_id") != active.get("invocation_id")):
+                raise PermissionError("active Reviewer action lineage is mismatched")
+            state = decision.get("lifecycle_state")
+            if state not in {"completed", "failed_safe"}:
+                return self._fail_review_native_action(
+                    campaign_id, attention_id, active["decision_id"],
+                    active["invocation_id"],
+                    reason="reviewer_native_action_completion_ambiguous")
+            return self._finish_review_native_action(
+                campaign_id, attention_id, active["decision_id"],
+                active["invocation_id"],
+                action_status="completed" if state == "completed" else "failed")
 
     def resume_reserved_continuation(self, campaign_id, attention_id, decision_id,
                                      continuation_id, *, recovery_runner):
@@ -1037,12 +1380,37 @@ class CodexDevelopmentCampaign:
         record = self.store.load(campaign_id)
         event = self.attention_store.get(attention_id)
         expected = self.attention_store._authority_binding(event)
+        decision = self.attention_store.lifecycle(attention_id).get("decision") or {}
+        continuation = decision.get("continuation") or {}
+        review_action = ((event.get("protocol_binding") or {}).get(
+            "approval_binding_kind") == "independent_review_provider")
+        if (review_action and record.get("status") in {
+                "reviewer_native_action_approved", "awaiting_independent_review"}):
+            active = record.get("active_review_native_action") or {}
+            action_status = ("completed" if continuation.get("state") == "completed"
+                             else "failed" if continuation.get("state") == "failed"
+                             else None)
+            if (event.get("campaign_id") != campaign_id
+                    or decision.get("decision_id") != decision_id
+                    or decision.get("invocation_id") != event.get("invocation_id")
+                    or continuation.get("continuation_id") != continuation_id
+                    or continuation.get("authority_binding") != expected
+                    or action_status is None
+                    or (record.get("status") == "reviewer_native_action_approved"
+                        and (active.get("attention_id") != attention_id
+                             or active.get("decision_id") != decision_id
+                             or active.get("invocation_id") != event.get("invocation_id")))):
+                raise PermissionError(
+                    "terminal Reviewer continuation is stale or mismatched")
+            updated = self._finish_review_native_action(
+                campaign_id, attention_id, decision_id, event["invocation_id"],
+                action_status=action_status)
+            return {"campaign": updated, "decision": decision,
+                    "consumption": decision}
         if (event.get("campaign_id") != campaign_id
                 or record.get("status") != "ready_for_bounded_continuation"
                 or not callable(recovery_runner)):
             raise PermissionError("campaign is not eligible for bounded recovery")
-        decision = self.attention_store.lifecycle(attention_id).get("decision") or {}
-        continuation = decision.get("continuation") or {}
         if (decision.get("decision_id") != decision_id
                 or continuation.get("continuation_id") != continuation_id
                 or continuation.get("state") not in {
@@ -1686,6 +2054,11 @@ class CodexDevelopmentCampaign:
     def advance_once(self, campaign_id, *, reviewer_adapter=None):
         """Perform at most one canonical transition or external action."""
         record = self.store.load(campaign_id)
+        if (record.get("status") == "tanner_escalation"
+                and (record.get("needs_tanner") or {}).get("attention_id")):
+            return self.reconcile_attention_decision(campaign_id)
+        if record.get("status") == "reviewer_native_action_approved":
+            return self.reconcile_review_native_action(campaign_id)
         if record.get("stepwise_v01"):
             ambiguous = self._provider_ambiguity(record)
             if ambiguous is not None:
@@ -1750,6 +2123,7 @@ class CodexDevelopmentCampaign:
         remaining_steps = ((record["execution_budget_v01"]["maximum_iterations"] * 4) + 4
                            if record.get("stepwise_v01") else (MAX_ITERATIONS * 4) + 4)
         while record["status"] in {"ready", "awaiting_independent_review",
+                                    "reviewer_native_action_approved",
                                     "review_accepted_application_pending",
                                     "reviewed_application_completed", "correction_pending"}:
             if remaining_steps <= 0:

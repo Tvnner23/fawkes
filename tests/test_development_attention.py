@@ -28,15 +28,15 @@ class DevelopmentAttentionTests(unittest.TestCase):
     def tearDown(self):
         self.temporary.cleanup()
 
-    def create(self):
-        return self.store.create(campaign_id="synthetic-attention-campaign",
-            invocation_id="synthetic-worker-1", worker=self.worker,
+    def create(self, suffix=""):
+        return self.store.create(campaign_id="synthetic-attention-campaign" + suffix,
+            invocation_id="synthetic-worker-1" + suffix, worker=self.worker,
             kind="native_codex_approval_required", blocked_action="touch harmless.txt",
             why_required="workspace write requires exact approval",
             requested_authority="write harmless.txt once", resources=["harmless.txt"],
             reversible=True, provider_code="tool.approval_required",
             protocol_binding={"method": "item/commandExecution/requestApproval",
-                "process_id": 4242, "item_id": "item-synthetic",
+                "process_id": 4242, "item_id": "item-synthetic" + suffix,
                 "approved_action_sha256": "f" * 64, "rider_id": "tanner",
                 "recipient_sha256": "r" * 64, "candidate_snapshot_id": "candidate-synthetic",
                 "candidate_record_sha256": "c" * 64, "mutation_digest_sha256": "m" * 64,
@@ -341,19 +341,26 @@ class DevelopmentAttentionTests(unittest.TestCase):
         decision = self.store.decide(event["attention_id"], "approve_once",
             authenticated_rider=True,
             expected_identity=self.store._authority_binding(event))["decision"]
-        event_path = self.store.events / f"{event['attention_id']}.json"
-        expired = json.loads(event_path.read_text(encoding="utf-8"))
-        expired["expires_at"] = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+        decision_path = self.store.decisions / f"{decision['decision_id']}.json"
+        expired_decision = json.loads(decision_path.read_text(encoding="utf-8"))
+        expired_decision["claim_expires_at"] = (
+            datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
         from src.runtime.development_attention import _digest
-        expired.pop("record_sha256", None); expired["record_sha256"] = _digest(expired)
-        event_path.write_text(json.dumps(expired), encoding="utf-8")
+        expired_decision.pop("record_sha256", None)
+        expired_decision["record_sha256"] = _digest(expired_decision)
+        decision_path.write_text(json.dumps(expired_decision), encoding="utf-8")
         with self.assertRaises(PermissionError):
             self.store.consume_approve_once(decision["decision_id"],
                 attention_id=event["attention_id"], invocation_id="synthetic-worker-1")
+        expired = self.store.lifecycle(event["attention_id"])
+        self.assertEqual(expired["decision"]["lifecycle_state"], "expired_unconsumed")
+        self.assertFalse(expired["decision"]["creates_authority"])
+        self.assertFalse(expired["decision"]["creates_continuing_authority"])
 
-        expired["expires_at"] = None
-        expired.pop("record_sha256", None); expired["record_sha256"] = _digest(expired)
-        event_path.write_text(json.dumps(expired), encoding="utf-8")
+        event = self.create("-split")
+        decision = self.store.decide(event["attention_id"], "approve_once",
+            authenticated_rider=True,
+            expected_identity=self.store._authority_binding(event))["decision"]
         real_write = __import__("src.runtime.development_attention", fromlist=["_write_json_atomic"])._write_json_atomic
         calls = {"count": 0}
         def fail_second_write(path, value):
@@ -365,10 +372,51 @@ class DevelopmentAttentionTests(unittest.TestCase):
                         side_effect=fail_second_write):
             with self.assertRaises(OSError):
                 self.store.consume_approve_once(decision["decision_id"],
-                    attention_id=event["attention_id"], invocation_id="synthetic-worker-1")
+                    attention_id=event["attention_id"],
+                    invocation_id="synthetic-worker-1-split")
         recovered = self.store.lifecycle(event["attention_id"])
         self.assertTrue(recovered["decision"]["consumed"])
         self.assertEqual(recovered["event"]["approval_outcome"], "consumed")
+
+    def test_approved_action_claim_window_is_separate_from_human_deadline(self):
+        event = self.store.create(
+            campaign_id="claim-window-campaign",
+            invocation_id="claim-window-invocation", worker=self.worker,
+            kind="native_codex_approval_required", blocked_action="touch harmless.txt",
+            why_required="workspace write requires exact approval",
+            requested_authority="write harmless.txt once", resources=["harmless.txt"],
+            reversible=True, provider_code="tool.approval_required",
+            expires_in_seconds=1, expiration_reason="human decision deadline",
+            expiration_effect="action remains unperformed", can_request_again=True,
+            work_lost=False,
+            protocol_binding={"method": "item/commandExecution/requestApproval",
+                "process_id": 4242, "item_id": "claim-window-item",
+                "approved_action_sha256": "f" * 64, "rider_id": "tanner",
+                "recipient_sha256": "r" * 64,
+                "candidate_snapshot_id": "candidate-synthetic",
+                "candidate_record_sha256": "c" * 64,
+                "mutation_digest_sha256": "m" * 64,
+                "authorized_scope_sha256": "s" * 64})
+        decision = self.store.decide(event["attention_id"], "approve_once",
+            authenticated_rider=True,
+            expected_identity=self.store._authority_binding(event))["decision"]
+        after_human_deadline = datetime.fromisoformat(
+            decision["decided_at"]) + timedelta(seconds=2)
+
+        class LaterDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return (after_human_deadline if tz is not None
+                        else after_human_deadline.replace(tzinfo=None))
+
+        with mock.patch("src.runtime.development_attention.datetime", LaterDateTime):
+            consumed = self.store.consume_approve_once(
+                decision["decision_id"], attention_id=event["attention_id"],
+                invocation_id="claim-window-invocation")
+        self.assertTrue(consumed["consumed"])
+        self.assertGreater(datetime.fromisoformat(decision["claim_expires_at"]),
+                           datetime.fromisoformat(decision["decided_at"]))
+        self.assertFalse(consumed["creates_continuing_authority"])
 
     def test_deny_and_cancel_are_exact_choices(self):
         event = self.create()

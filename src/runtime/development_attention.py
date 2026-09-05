@@ -25,6 +25,7 @@ SUPPORTED_RECOVERY_METHODS = {"item/commandExecution/requestApproval", "execComm
 ATTENTION_BASE_URL_ENV = "FAWKES_ATTENTION_BASE_URL"
 REMOTE_AUTHENTICATED_ENV = "FAWKES_ATTENTION_REMOTE_AUTHENTICATED"
 CONSUMER_LEASE_SECONDS = 5
+APPROVE_ONCE_CLAIM_SECONDS = 60
 _DECISION_CONDITION = threading.Condition()
 _SECRET = re.compile(r"(?i)(authorization|token|api[_ -]?key|webhook|password|secret)\s*[:=]\s*\S+")
 
@@ -352,6 +353,16 @@ class DevelopmentAttentionStore:
                qualification_instruction=None):
         binding = dict(protocol_binding or {})
         binding_sha = _digest(binding) if binding else None
+        reviewer_identity = None
+        if binding.get("approval_binding_kind") == "independent_review_provider":
+            reviewer_identity = {key: worker.get(key) for key in
+                ("worker_id", "role", "environment_id")}
+            if (any(not isinstance(value, str) or not value
+                    for value in reviewer_identity.values())
+                    or _digest(reviewer_identity) !=
+                        binding.get("reviewer_identity_sha256")):
+                raise PermissionError(
+                    "Reviewer Attention identity is incomplete or mismatched")
         logical = {"campaign_id": campaign_id, "invocation_id": invocation_id,
                    "worker_id": worker["worker_id"], "kind": kind,
                    "blocked_action": sanitize_action(blocked_action),
@@ -417,6 +428,8 @@ class DevelopmentAttentionStore:
             "detail_url": canonical_detail,
             "decision_id": None, "acknowledged": False,
             "creates_authority": False, "creates_continuing_authority": False}
+        if reviewer_identity is not None:
+            event["reviewer_identity"] = reviewer_identity
         # The UI receives this server-owned digest as an external anchor for
         # the exact authority tuple it displayed. It is not itself authority.
         event["authority_binding_sha256"] = _digest(self._authority_binding(event))
@@ -534,6 +547,11 @@ class DevelopmentAttentionStore:
             if not actionable:
                 raise AttentionConsumerUnavailable(
                     "exact action is no longer live or durably resumable")
+            decided_at = _now()
+            claim_expires_at = (datetime.fromisoformat(decided_at)
+                + timedelta(seconds=APPROVE_ONCE_CLAIM_SECONDS)).isoformat()
+            review_bound = (canonical.get("approval_binding_kind") ==
+                            "independent_review_provider")
             decision = {"schema_version": 1, "record_type": "development_attention_decision",
             "decision_id": f"attention-decision-{uuid.uuid4()}", "attention_id": attention_id,
             "campaign_id": event["campaign_id"], "invocation_id": event["invocation_id"],
@@ -541,11 +559,14 @@ class DevelopmentAttentionStore:
                 event["blocked_action"].encode()).hexdigest(),
             "protocol_binding_sha256": event.get("protocol_binding_sha256"),
             "one_time": choice == "approve_once", "consumed": False,
-            "creates_authority": choice == "approve_once",
+            "creates_authority": choice == "approve_once" and not review_bound,
             "lifecycle_state": ("recorded_pending_consumption" if choice == "approve_once"
                                 else "completed"),
             "creates_continuing_authority": False, "decided_by": "authenticated_tanner",
-            "decided_at": _now()}
+            "decided_at": decided_at,
+            "claim_expires_at": claim_expires_at if choice == "approve_once" else None,
+            "campaign_publication": ({"state": "pending", "creates_authority": False,
+                "creates_continuing_authority": False} if review_bound else None)}
             decision["authority_binding"] = self._authority_binding(event)
             decision["authority_binding_sha256"] = _digest(decision["authority_binding"])
             decision["record_sha256"] = _digest(decision)
@@ -568,6 +589,84 @@ class DevelopmentAttentionStore:
             _DECISION_CONDITION.notify_all()
         return {"event": event, "decision": decision}
 
+    def publish_review_decision(self, decision_id, *, attention_id, campaign_id,
+                                campaign_record_sha256, campaign_state_revision):
+        """Bind a review decision to its exact durable campaign projection."""
+        path = self.decisions / f"{decision_id}.json"
+        with _decision_lock(path):
+            decision = json.loads(path.read_text(encoding="utf-8"))
+            event = self._read_event(attention_id)
+            publication = decision.get("campaign_publication") or {}
+            expected = {"state": "published", "campaign_id": campaign_id,
+                "campaign_record_sha256": campaign_record_sha256,
+                "campaign_state_revision": campaign_state_revision,
+                "creates_authority": decision.get("choice") == "approve_once",
+                "creates_continuing_authority": False}
+            if publication.get("state") == "published":
+                if publication != expected:
+                    raise PermissionError(
+                        "review decision belongs to another campaign publication")
+                return decision
+            if (publication.get("state") != "pending"
+                    or decision.get("decision_id") != decision_id
+                    or decision.get("attention_id") != attention_id
+                    or decision.get("campaign_id") != campaign_id
+                    or event.get("campaign_id") != campaign_id
+                    or (event.get("protocol_binding") or {}).get(
+                        "approval_binding_kind") != "independent_review_provider"
+                    or not isinstance(campaign_record_sha256, str)
+                    or len(campaign_record_sha256) != 64
+                    or type(campaign_state_revision) is not int
+                    or campaign_state_revision <= 0):
+                raise PermissionError(
+                    "review decision campaign publication is missing or mismatched")
+            decision = {**decision, "campaign_publication": expected,
+                        "creates_authority": decision.get("choice") == "approve_once"}
+            decision.pop("record_sha256", None)
+            decision["record_sha256"] = _digest(decision)
+            _write_json_atomic(path, decision)
+            return decision
+
+    def fail_unpublished_review_decision(self, decision_id, *, attention_id,
+                                         campaign_id, reason):
+        """Close a review decision that never reached exact campaign publication."""
+        path = self.decisions / f"{decision_id}.json"
+        with _decision_lock(path):
+            decision = json.loads(path.read_text(encoding="utf-8"))
+            event = self._read_event(attention_id)
+            publication = decision.get("campaign_publication") or {}
+            if (decision.get("decision_id") != decision_id
+                    or decision.get("attention_id") != attention_id
+                    or decision.get("campaign_id") != campaign_id
+                    or event.get("campaign_id") != campaign_id
+                    or (event.get("protocol_binding") or {}).get(
+                        "approval_binding_kind") != "independent_review_provider"):
+                raise PermissionError("unpublished review decision lineage is mismatched")
+            if publication.get("state") == "published":
+                raise PermissionError("published review decision cannot be revoked as unpublished")
+            if publication.get("state") == "failed_safe":
+                return decision
+            if publication.get("state") != "pending":
+                raise PermissionError("review decision publication state is invalid")
+            failed_at = _now()
+            publication = {"state": "failed_safe", "reason": sanitize_action(reason),
+                "failed_at": failed_at, "creates_authority": False,
+                "creates_continuing_authority": False}
+            decision = {**decision, "campaign_publication": publication,
+                        "lifecycle_state": "failed_safe", "creates_authority": False,
+                        "creates_continuing_authority": False, "finished_at": failed_at}
+            decision.pop("record_sha256", None)
+            decision["record_sha256"] = _digest(decision)
+            event = {**event, "state": "failed_safe",
+                     "approval_outcome": "campaign_publication_failed_safe",
+                     "creates_authority": False}
+            event.pop("record_sha256", None)
+            event["record_sha256"] = _digest(event)
+            self._write_transaction("fail-publication-" + decision_id, [
+                (path, decision),
+                (self.events / f"{attention_id}.json", event)])
+            return decision
+
     def mark_process_detached(self, attention_id):
         path = self.events / f"{attention_id}.json"
         with _decision_lock(path):
@@ -579,6 +678,48 @@ class DevelopmentAttentionStore:
                      "consumer_state": "durably_resumable" if resumable else "unavailable",
                      "process_detached_at": _now()}
             event.pop("record_sha256", None); event["record_sha256"] = _digest(event)
+            _write_json_atomic(path, event)
+            return event
+
+    def fail_unavailable_pending_review(self, attention_id, *, campaign_id,
+                                        invocation_id):
+        """Close one decision-free Reviewer request whose consumer is unavailable.
+
+        This is restart reconciliation only. It creates no decision and cannot
+        turn an unavailable transport into approval or resumable authority.
+        """
+        path = self.events / f"{attention_id}.json"
+        with _decision_lock(path):
+            event = json.loads(path.read_text(encoding="utf-8"))
+            if event.get("record_sha256") != _digest(
+                    {key: value for key, value in event.items()
+                     if key != "record_sha256"}):
+                raise PermissionError("attention event integrity is invalid")
+            binding = event.get("protocol_binding") or {}
+            if (event.get("attention_id") != attention_id
+                    or event.get("campaign_id") != campaign_id
+                    or event.get("invocation_id") != invocation_id
+                    or binding.get("approval_binding_kind") !=
+                        "independent_review_provider"
+                    or event.get("decision_id") is not None):
+                raise PermissionError(
+                    "pending Reviewer Attention lineage is mismatched")
+            if event.get("state") == "failed_safe":
+                return event
+            if event.get("state") != "needs_tanner":
+                raise RuntimeError(
+                    "only a pending Reviewer Attention request can fail safe")
+            _effective, actionable, reason = self._effective_consumer(event)
+            if actionable:
+                return event
+            event = {**event, "state": "failed_safe",
+                "approval_outcome": "unavailable_without_decision",
+                "consumer_state": "stopped",
+                "consumer_unavailable_reason": reason,
+                "failed_safe_at": _now(), "creates_authority": False,
+                "creates_continuing_authority": False}
+            event.pop("record_sha256", None)
+            event["record_sha256"] = _digest(event)
             _write_json_atomic(path, event)
             return event
 
@@ -632,10 +773,34 @@ class DevelopmentAttentionStore:
             event = self._read_event(attention_id)
             binding = event.get("protocol_binding") or {}
             canonical = self._authority_binding(event)
+            claim_expires_at = decision.get("claim_expires_at") or event.get("expires_at")
+            claim_expired = bool(claim_expires_at and
+                datetime.fromisoformat(claim_expires_at) <= datetime.now(timezone.utc))
+            review_publication = decision.get("campaign_publication")
+            review_unpublished = (canonical.get("approval_binding_kind") ==
+                "independent_review_provider" and (not isinstance(review_publication, dict)
+                or review_publication.get("state") != "published"
+                or review_publication.get("campaign_id") != event.get("campaign_id")))
+            if (claim_expired and decision.get("choice") == "approve_once"
+                    and not decision.get("consumed")):
+                expired_at = _now()
+                decision = {**decision, "lifecycle_state": "expired_unconsumed",
+                            "claim_expired_at": expired_at,
+                            "creates_authority": False,
+                            "creates_continuing_authority": False}
+                decision.pop("record_sha256", None)
+                decision["record_sha256"] = _digest(decision)
+                event = {**event, "state": "expired",
+                         "approval_outcome": "expired_unconsumed",
+                         "expired_at": expired_at, "creates_authority": False}
+                event.pop("record_sha256", None)
+                event["record_sha256"] = _digest(event)
+                self._write_transaction("expire-claim-" + decision_id, [
+                    (path, decision),
+                    (self.events / f"{attention_id}.json", event)])
             if (decision["choice"] != "approve_once" or decision["attention_id"] != attention_id
                     or decision["invocation_id"] != invocation_id or decision["consumed"]
-                    or (event.get("expires_at") and
-                        datetime.fromisoformat(event["expires_at"]) <= datetime.now(timezone.utc))
+                    or claim_expired or review_unpublished
                     or (protocol_binding_sha256 is not None and
                         decision.get("protocol_binding_sha256") != protocol_binding_sha256)
                     or decision.get("authority_binding") != canonical
@@ -668,6 +833,31 @@ class DevelopmentAttentionStore:
             decision = json.loads(path.read_text(encoding="utf-8"))
             event = self._read_event(attention_id)
             canonical = self._authority_binding(event)
+            claim_expires_at = decision.get("claim_expires_at") or event.get("expires_at")
+            claim_expired = bool(claim_expires_at and
+                datetime.fromisoformat(claim_expires_at) <= datetime.now(timezone.utc))
+            review_publication = decision.get("campaign_publication")
+            review_unpublished = (canonical.get("approval_binding_kind") ==
+                "independent_review_provider" and (not isinstance(review_publication, dict)
+                or review_publication.get("state") != "published"
+                or review_publication.get("campaign_id") != event.get("campaign_id")))
+            if (claim_expired and decision.get("choice") == "approve_once"
+                    and not decision.get("consumed")):
+                expired_at = _now()
+                decision = {**decision, "lifecycle_state": "expired_unconsumed",
+                            "claim_expired_at": expired_at,
+                            "creates_authority": False,
+                            "creates_continuing_authority": False}
+                decision.pop("record_sha256", None)
+                decision["record_sha256"] = _digest(decision)
+                event = {**event, "state": "expired",
+                         "approval_outcome": "expired_unconsumed",
+                         "expired_at": expired_at, "creates_authority": False}
+                event.pop("record_sha256", None)
+                event["record_sha256"] = _digest(event)
+                self._write_transaction("expire-claim-" + decision_id, [
+                    (path, decision),
+                    (self.events / f"{attention_id}.json", event)])
             if (decision.get("choice") != "approve_once" or decision.get("consumed")
                     or decision.get("attention_id") != attention_id
                     or decision.get("invocation_id") != invocation_id
@@ -676,8 +866,7 @@ class DevelopmentAttentionStore:
                     or (expected_binding is not None and expected_binding != canonical)
                     or not self._complete_recovery_evidence(event)
                     or event.get("state") != "approved_once"
-                    or (event.get("expires_at") and
-                        datetime.fromisoformat(event["expires_at"]) <= datetime.now(timezone.utc))
+                    or claim_expired or review_unpublished
                     or decision.get("continuation") is not None):
                 raise PermissionError("detached continuation grant is stale, mismatched, or replayed")
             decision["continuation"] = {"continuation_id": continuation_id, "state": "reserved",
@@ -743,9 +932,19 @@ class DevelopmentAttentionStore:
             continuation = decision.get("continuation") or {}
             event = self._read_event(decision["attention_id"])
             if (continuation.get("continuation_id") != continuation_id
-                    or continuation.get("state") not in {"reserved", "outcome_recorded"}
                     or not decision.get("consumed")
                     or continuation.get("authority_binding") != self._authority_binding(event)):
+                raise PermissionError("continuation identity mismatch")
+            if continuation.get("state") in {"completed", "failed"}:
+                expected_lifecycle = ("completed" if continuation["state"] == "completed"
+                                      else "failed_safe")
+                if (continuation["state"] != status
+                        or decision.get("lifecycle_state") != expected_lifecycle
+                        or event.get("approval_outcome") != expected_lifecycle):
+                    raise PermissionError(
+                        "terminal continuation does not match the requested outcome")
+                return decision
+            if continuation.get("state") not in {"reserved", "outcome_recorded"}:
                 raise PermissionError("continuation identity mismatch")
             if (continuation.get("state") == "outcome_recorded"
                     and continuation.get("outcome_status") != status):

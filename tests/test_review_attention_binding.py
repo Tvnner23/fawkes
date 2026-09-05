@@ -330,8 +330,19 @@ class ReviewAttentionBindingTests(unittest.TestCase):
             approved["attention_id"], "approve_once", authenticated_rider=True,
             expected_identity=self.store._authority_binding(approved))
         decision = approved_result["decision"]
-        self.assertTrue(decision["creates_authority"])
+        self.assertFalse(decision["creates_authority"])
         self.assertFalse(decision["creates_continuing_authority"])
+        self.assertEqual(decision["campaign_publication"]["state"], "pending")
+        with self.assertRaises(PermissionError):
+            self.store.consume_approve_once(
+                decision["decision_id"], attention_id=approved["attention_id"],
+                invocation_id=approved["invocation_id"],
+                expected_binding=self.store._authority_binding(approved))
+        decision = self.store.publish_review_decision(
+            decision["decision_id"], attention_id=approved["attention_id"],
+            campaign_id=approved["campaign_id"],
+            campaign_record_sha256="a" * 64, campaign_state_revision=2)
+        self.assertTrue(decision["creates_authority"])
         consumed = self.store.consume_approve_once(
             decision["decision_id"], attention_id=approved["attention_id"],
             invocation_id=approved["invocation_id"],

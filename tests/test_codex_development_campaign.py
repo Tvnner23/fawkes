@@ -22,6 +22,8 @@ from src.runtime.phase0_integrity import SCOPED_ROOTS
 from src.runtime.worker_exchange import WorkerExchange, _digest
 from src.runtime.development_attention import DevelopmentAttentionStore
 from src.runtime.disposable_verifier import candidate_manifest
+from src.runtime.codex_app_server import typed_approval
+from src.runtime.wsl_codex_reviewer import _review_attention_binding
 
 
 BUILDER_ID = "codex-repository-wsl-fawkes"
@@ -200,6 +202,506 @@ class CampaignFixture:
 
 
 class CodexDevelopmentCampaignTests(unittest.TestCase):
+    def _review_native_approval_fixture(self, campaign_id):
+        campaign = self.fixture.campaign
+        campaign.attention_store = DevelopmentAttentionStore(
+            Path(self.tmp.name) / f"{campaign_id}-attention")
+        record = campaign.create(self.fixture.payload(campaign_id),
+                                 authenticated_rider=True)
+        retention = record["builder_runs"][-1]["candidate_retention_receipt"]
+        sender = {"worker_id": "fawkes-development", "role": "coordination",
+                  "identity_status": "verified", "charter_version": "1.0"}
+        task = f"{campaign_id}-review-1"
+        report = self.fixture.exchange.create_report(
+            task_scope_id=task, sender=sender,
+            authority=authority("fawkes", task, sender["worker_id"]),
+            sections=[
+                {"section_id": "review-target", "title": "Review target",
+                 "content": "Review the exact retained candidate."},
+                {"section_id": "candidate-snapshot", "title": "Candidate snapshot",
+                 "content": json.dumps(retention["candidate_snapshot"],
+                                       sort_keys=True)},
+                {"section_id": "candidate-retention-receipt",
+                 "title": "Candidate retention receipt",
+                 "content": json.dumps(retention, sort_keys=True)},
+            ], claims=[])
+        package_authority = authority(
+            "fawkes", task, sender["worker_id"], REVIEWER["worker_id"])
+        package = self.fixture.exchange.compose_package(
+            report_id=report["report_id"], recipient=REVIEWER,
+            authority=package_authority, included_section_ids=[
+                "review-target", "candidate-snapshot",
+                "candidate-retention-receipt"])
+        record = campaign._update(record, event_kind="review_requested_fixture",
+            review_requests=[{"iteration": record["iteration"],
+                              "package_id": package["package_id"]}])
+        transport = {
+            "candidate_record_sha256": retention["candidate_snapshot"]["record_sha256"],
+            "mutation_manifest_sha256": retention["mutation_manifest_sha256"],
+            "exact_change_evidence_sha256": retention["exact_change_evidence_sha256"],
+            "allowed_scope_sha256": retention["allowed_scope_sha256"],
+            "candidate_retention_receipt_sha256": retention["record_sha256"],
+        }
+        reviewer = {"worker_id": REVIEWER["worker_id"], "role": REVIEWER["role"],
+                    "environment_id": "fixture-review-read-only"}
+        return campaign, record, package, transport, reviewer
+
+    @staticmethod
+    def _typed_review_approval(campaign_id, package, transport, reviewer,
+                               invocation_id, item_id):
+        binding = _review_attention_binding(
+            package=package, transport_authority=transport,
+            campaign_id=campaign_id,
+            candidate_snapshot_id=transport["candidate_snapshot_id"],
+            reviewer=reviewer, reviewer_invocation_id=invocation_id)
+        return typed_approval(
+            "item/commandExecution/requestApproval",
+            {"threadId": "thread-review", "turnId": "turn-review",
+             "itemId": item_id, "command": f"read-only {item_id}",
+             "cwd": "/disposable", "reason": "bounded review evidence",
+             "availableDecisions": ["accept", "decline", "cancel"]},
+            campaign_id=campaign_id, invocation_id=invocation_id,
+            worker=reviewer, process_id=os.getpid(),
+            active_thread_id="thread-review", active_turn_id="turn-review",
+            approval_binding=binding, reviewer_invocation_id=invocation_id)
+
+    def _wait_for_attention(self, campaign, *, excluding=()):
+        excluded = set(excluding)
+        for _ in range(200):
+            events = [item for item in campaign.attention_store.list(pending_only=True)
+                      if item["attention_id"] not in excluded]
+            if events:
+                return events[0]
+            threading.Event().wait(0.01)
+        self.fail("canonical Reviewer Attention event was not retained")
+
+    def test_reviewer_can_request_two_separately_bound_native_actions_in_one_turn(self):
+        campaign_id = "review-native-multiaction"
+        campaign, _record, package, transport, reviewer = (
+            self._review_native_approval_fixture(campaign_id))
+        retention = campaign.store.load(campaign_id)["builder_runs"][-1][
+            "candidate_retention_receipt"]
+        transport["candidate_snapshot_id"] = retention["candidate_snapshot"][
+            "candidate_snapshot_id"]
+        invocation = "review-native-invocation"
+        first = self._typed_review_approval(
+            campaign_id, package, transport, reviewer, invocation, "item-one")
+        first_result, first_failure = {}, []
+        thread = threading.Thread(target=lambda: self._capture_approval_result(
+            campaign, first, first_result, first_failure))
+        thread.start()
+        first_event = self._wait_for_attention(campaign)
+        decided = campaign.decide_attention(
+            campaign_id, first_event["attention_id"], "approve_once",
+            authenticated_rider=True,
+            expected_identity=campaign.attention_store._authority_binding(first_event))
+        thread.join(2)
+        self.assertEqual(first_failure, [])
+        self.assertEqual(decided["campaign"]["status"],
+                         "reviewer_native_action_approved")
+        first_result["value"]["claim"]()
+        with self.assertRaises(PermissionError):
+            first_result["value"]["claim"]()
+        first_result["value"]["complete"]("failed")
+        self.assertEqual(campaign.store.load(campaign_id)["status"],
+                         "awaiting_independent_review")
+
+        second = self._typed_review_approval(
+            campaign_id, package, transport, reviewer, invocation, "item-two")
+        second_result, second_failure = {}, []
+        thread = threading.Thread(target=lambda: self._capture_approval_result(
+            campaign, second, second_result, second_failure))
+        thread.start()
+        second_event = self._wait_for_attention(
+            campaign, excluding={first_event["attention_id"]})
+        campaign.decide_attention(
+            campaign_id, second_event["attention_id"], "deny",
+            authenticated_rider=True,
+            expected_identity=campaign.attention_store._authority_binding(second_event))
+        thread.join(2)
+        self.assertEqual(second_failure, [])
+        self.assertEqual(second_result["value"]["choice"], "deny")
+        self.assertEqual(campaign.store.load(campaign_id)["status"], "failed_safe")
+
+    def test_reviewer_action_cannot_resume_before_campaign_publication(self):
+        campaign_id = "review-native-publication-race"
+        campaign, _record, package, transport, reviewer = (
+            self._review_native_approval_fixture(campaign_id))
+        retention = campaign.store.load(campaign_id)["builder_runs"][-1][
+            "candidate_retention_receipt"]
+        transport["candidate_snapshot_id"] = retention["candidate_snapshot"][
+            "candidate_snapshot_id"]
+        invocation = "review-publication-race-invocation"
+        approval = self._typed_review_approval(
+            campaign_id, package, transport, reviewer, invocation, "race-item")
+        action_completed = threading.Event()
+        action_failures = []
+
+        def paused_action():
+            try:
+                decision = campaign._handle_typed_approval(
+                    approval, timeout_seconds=2, process_alive=lambda: True)
+                decision["claim"]()
+                decision["complete"]("completed")
+                action_completed.set()
+            except BaseException as exc:
+                action_failures.append(exc)
+
+        waiter = threading.Thread(target=paused_action)
+        waiter.start()
+        event = self._wait_for_attention(campaign)
+        publication_entered = threading.Event()
+        release_publication = threading.Event()
+        original_update = campaign._update
+
+        def blocked_publication(record, **changes):
+            if changes.get("event_kind") == "tanner_attention_approve_once":
+                publication_entered.set()
+                if not release_publication.wait(2):
+                    raise TimeoutError("test publication barrier timed out")
+            return original_update(record, **changes)
+
+        decision_failures = []
+        def decide():
+            try:
+                campaign.decide_attention(
+                    campaign_id, event["attention_id"], "approve_once",
+                    authenticated_rider=True,
+                    expected_identity=campaign.attention_store._authority_binding(event))
+            except BaseException as exc:
+                decision_failures.append(exc)
+
+        with patch.object(campaign, "_update", side_effect=blocked_publication):
+            decider = threading.Thread(target=decide)
+            decider.start()
+            self.assertTrue(publication_entered.wait(2))
+            self.assertFalse(action_completed.is_set())
+            self.assertEqual(action_failures, [])
+            release_publication.set()
+            decider.join(2)
+            waiter.join(2)
+
+        self.assertEqual(decision_failures, [])
+        self.assertEqual(action_failures, [])
+        self.assertTrue(action_completed.is_set())
+        terminal = campaign.store.load(campaign_id)
+        self.assertEqual(terminal["status"], "awaiting_independent_review")
+        self.assertIsNone(terminal.get("active_review_native_action"))
+        self.assertFalse(terminal["creates_continuing_authority"])
+
+    def test_review_decision_interrupted_before_campaign_publication_closes_failed_safe(self):
+        campaign_id = "review-native-decision-publication-crash"
+        campaign, _record, package, transport, reviewer = (
+            self._review_native_approval_fixture(campaign_id))
+        retention = campaign.store.load(campaign_id)["builder_runs"][-1][
+            "candidate_retention_receipt"]
+        transport["candidate_snapshot_id"] = retention["candidate_snapshot"][
+            "candidate_snapshot_id"]
+        invocation = "review-publication-crash-invocation"
+        approval = self._typed_review_approval(
+            campaign_id, package, transport, reviewer, invocation,
+            "publication-crash-item")
+        result, failures = {}, []
+        waiter = threading.Thread(target=lambda: self._capture_approval_result(
+            campaign, approval, result, failures))
+        waiter.start()
+        event = self._wait_for_attention(campaign)
+        original_update = campaign._update
+
+        def interrupt_publication(record, **changes):
+            if changes.get("event_kind") == "tanner_attention_approve_once":
+                raise SystemExit("process interrupted before campaign publication")
+            return original_update(record, **changes)
+
+        with patch.object(campaign, "_update", side_effect=interrupt_publication):
+            with self.assertRaisesRegex(SystemExit, "before campaign publication"):
+                campaign.decide_attention(
+                    campaign_id, event["attention_id"], "approve_once",
+                    authenticated_rider=True,
+                    expected_identity=campaign.attention_store._authority_binding(event))
+        lifecycle = campaign.attention_store.lifecycle(event["attention_id"])
+        self.assertEqual(lifecycle["decision"]["campaign_publication"]["state"],
+                         "pending")
+        self.assertFalse(lifecycle["decision"]["creates_authority"])
+        reconciled = campaign.reconcile_attention_decision(campaign_id)
+        waiter.join(2)
+        self.assertEqual(reconciled["status"], "failed_safe")
+        self.assertEqual(reconciled["needs_tanner"]["reason"],
+                         "attention_decision_publication_interrupted")
+        lifecycle = campaign.attention_store.lifecycle(event["attention_id"])
+        self.assertEqual(lifecycle["decision"]["campaign_publication"]["state"],
+                         "failed_safe")
+        self.assertFalse(lifecycle["decision"]["creates_authority"])
+        self.assertFalse(reconciled["creates_continuing_authority"])
+
+    def test_terminal_live_reviewer_action_reconciles_after_campaign_checkpoint_crash(self):
+        campaign_id = "review-native-live-checkpoint-crash"
+        campaign, _record, package, transport, reviewer = (
+            self._review_native_approval_fixture(campaign_id))
+        retention = campaign.store.load(campaign_id)["builder_runs"][-1][
+            "candidate_retention_receipt"]
+        transport["candidate_snapshot_id"] = retention["candidate_snapshot"][
+            "candidate_snapshot_id"]
+        invocation = "review-live-checkpoint-invocation"
+        approval = self._typed_review_approval(
+            campaign_id, package, transport, reviewer, invocation,
+            "live-checkpoint-item")
+        result, failures = {}, []
+        waiter = threading.Thread(target=lambda: self._capture_approval_result(
+            campaign, approval, result, failures))
+        waiter.start()
+        event = self._wait_for_attention(campaign)
+        campaign.decide_attention(
+            campaign_id, event["attention_id"], "approve_once",
+            authenticated_rider=True,
+            expected_identity=campaign.attention_store._authority_binding(event))
+        waiter.join(2)
+        self.assertEqual(failures, [])
+        result["value"]["claim"]()
+        with patch.object(campaign, "_finish_review_native_action",
+                          side_effect=RuntimeError("crash after live terminal write")):
+            with self.assertRaisesRegex(RuntimeError, "after live terminal"):
+                result["value"]["complete"]("completed")
+
+        retained = campaign.store.load(campaign_id)
+        self.assertEqual(retained["status"], "reviewer_native_action_approved")
+        self.assertEqual(campaign.attention_store.lifecycle(
+            event["attention_id"])["decision"]["lifecycle_state"], "completed")
+        reconciled = campaign.advance_once(campaign_id)
+        self.assertEqual(reconciled["status"], "awaiting_independent_review")
+        self.assertIsNone(reconciled.get("active_review_native_action"))
+        self.assertFalse(reconciled["creates_continuing_authority"])
+
+    def test_detached_reviewer_action_restores_campaign_after_transport_loss(self):
+        campaign_id = "review-native-detached-closure"
+        campaign, _record, package, transport, reviewer = (
+            self._review_native_approval_fixture(campaign_id))
+        retention = campaign.store.load(campaign_id)["builder_runs"][-1][
+            "candidate_retention_receipt"]
+        transport["candidate_snapshot_id"] = retention["candidate_snapshot"][
+            "candidate_snapshot_id"]
+        invocation = "review-detached-invocation"
+        approval = self._typed_review_approval(
+            campaign_id, package, transport, reviewer, invocation,
+            "detached-item")
+        result, failures = {}, []
+        waiter = threading.Thread(target=lambda: self._capture_approval_result(
+            campaign, approval, result, failures))
+        waiter.start()
+        event = self._wait_for_attention(campaign)
+        campaign.decide_attention(
+            campaign_id, event["attention_id"], "approve_once",
+            authenticated_rider=True,
+            expected_identity=campaign.attention_store._authority_binding(event))
+        waiter.join(2)
+        self.assertEqual(failures, [])
+        continuation_id = "review-detached-continuation"
+        with patch.object(campaign.attention_store,
+                          "_complete_recovery_evidence", return_value=True):
+            result["value"]["reserve"](continuation_id)
+            result["value"]["claim"](continuation_id)
+            finished = result["value"]["finish"](continuation_id, "failed")
+
+        terminal = campaign.store.load(campaign_id)
+        self.assertEqual(terminal["status"], "awaiting_independent_review")
+        self.assertIsNone(terminal.get("active_review_native_action"))
+        lifecycle = campaign.attention_store.lifecycle(event["attention_id"])
+        self.assertEqual(lifecycle["decision"]["lifecycle_state"], "failed_safe")
+        self.assertFalse(terminal["creates_authority"])
+        self.assertFalse(terminal["creates_continuing_authority"])
+        self.assertEqual(
+            result["value"]["finish"](continuation_id, "failed"), finished)
+
+    def test_terminal_detached_reviewer_action_reconciles_after_campaign_checkpoint_crash(self):
+        campaign_id = "review-native-detached-checkpoint-crash"
+        campaign, _record, package, transport, reviewer = (
+            self._review_native_approval_fixture(campaign_id))
+        retention = campaign.store.load(campaign_id)["builder_runs"][-1][
+            "candidate_retention_receipt"]
+        transport["candidate_snapshot_id"] = retention["candidate_snapshot"][
+            "candidate_snapshot_id"]
+        invocation = "review-detached-checkpoint-invocation"
+        approval = self._typed_review_approval(
+            campaign_id, package, transport, reviewer, invocation,
+            "detached-checkpoint-item")
+        result, failures = {}, []
+        waiter = threading.Thread(target=lambda: self._capture_approval_result(
+            campaign, approval, result, failures))
+        waiter.start()
+        event = self._wait_for_attention(campaign)
+        campaign.decide_attention(
+            campaign_id, event["attention_id"], "approve_once",
+            authenticated_rider=True,
+            expected_identity=campaign.attention_store._authority_binding(event))
+        waiter.join(2)
+        self.assertEqual(failures, [])
+        continuation_id = "review-detached-checkpoint-continuation"
+        with patch.object(campaign.attention_store,
+                          "_complete_recovery_evidence", return_value=True):
+            result["value"]["reserve"](continuation_id)
+            result["value"]["claim"](continuation_id)
+            with patch.object(campaign, "_finish_review_native_action",
+                              side_effect=RuntimeError("crash after Attention terminal write")):
+                with self.assertRaisesRegex(RuntimeError, "crash after Attention"):
+                    result["value"]["finish"](continuation_id, "failed")
+
+            retained = campaign.store.load(campaign_id)
+            self.assertEqual(retained["status"], "reviewer_native_action_approved")
+            self.assertEqual(campaign.attention_store.lifecycle(
+                event["attention_id"])["decision"]["lifecycle_state"], "failed_safe")
+            recovery_calls = []
+            recovered = campaign.resume_reserved_continuation(
+                campaign_id, event["attention_id"],
+                result["value"]["decision_id"], continuation_id,
+                recovery_runner=lambda *args, **kwargs: recovery_calls.append(
+                    (args, kwargs)))
+
+        self.assertEqual(recovery_calls, [])
+        self.assertEqual(recovered["campaign"]["status"],
+                         "awaiting_independent_review")
+        self.assertIsNone(recovered["campaign"].get("active_review_native_action"))
+        self.assertFalse(recovered["campaign"]["creates_continuing_authority"])
+
+    def test_unresumable_reviewer_transport_loss_closes_failed_safe(self):
+        campaign_id = "review-native-unresumable-loss"
+        campaign, _record, package, transport, reviewer = (
+            self._review_native_approval_fixture(campaign_id))
+        retention = campaign.store.load(campaign_id)["builder_runs"][-1][
+            "candidate_retention_receipt"]
+        transport["candidate_snapshot_id"] = retention["candidate_snapshot"][
+            "candidate_snapshot_id"]
+        invocation = "review-unresumable-invocation"
+        approval = self._typed_review_approval(
+            campaign_id, package, transport, reviewer, invocation, "lost-item")
+        result, failures = {}, []
+        waiter = threading.Thread(target=lambda: self._capture_approval_result(
+            campaign, approval, result, failures))
+        waiter.start()
+        event = self._wait_for_attention(campaign)
+        campaign.decide_attention(
+            campaign_id, event["attention_id"], "approve_once",
+            authenticated_rider=True,
+            expected_identity=campaign.attention_store._authority_binding(event))
+        waiter.join(2)
+        self.assertEqual(failures, [])
+
+        with self.assertRaises(PermissionError):
+            result["value"]["reserve"]("unavailable-continuation")
+        terminal = campaign.store.load(campaign_id)
+        self.assertEqual(terminal["status"], "failed_safe")
+        self.assertEqual(terminal["needs_tanner"]["reason"],
+                         "reviewer_native_action_transport_lost")
+        lifecycle = campaign.attention_store.lifecycle(event["attention_id"])
+        self.assertTrue(lifecycle["decision"]["consumed"])
+        self.assertEqual(lifecycle["decision"]["lifecycle_state"], "failed_safe")
+        self.assertFalse(terminal["creates_authority"])
+        self.assertFalse(terminal["creates_continuing_authority"])
+
+    @staticmethod
+    def _capture_approval_result(campaign, approval, result, failures,
+                                 timeout_seconds=2):
+        try:
+            result["value"] = campaign._handle_typed_approval(
+                approval, timeout_seconds=timeout_seconds,
+                process_alive=lambda: True)
+        except BaseException as exc:
+            failures.append(exc)
+
+    def test_reviewer_attention_expiry_closes_campaign_failed_safe(self):
+        campaign_id = "review-native-expiry"
+        campaign, _record, package, transport, reviewer = (
+            self._review_native_approval_fixture(campaign_id))
+        retention = campaign.store.load(campaign_id)["builder_runs"][-1][
+            "candidate_retention_receipt"]
+        transport["candidate_snapshot_id"] = retention["candidate_snapshot"][
+            "candidate_snapshot_id"]
+        approval = self._typed_review_approval(
+            campaign_id, package, transport, reviewer,
+            "review-expiry-invocation", "expiry-item")
+        result, failures = {}, []
+        thread = threading.Thread(target=lambda: self._capture_approval_result(
+            campaign, approval, result, failures, timeout_seconds=0.05))
+        thread.start(); thread.join(2)
+        self.assertEqual(len(failures), 1)
+        self.assertIsInstance(failures[0], TimeoutError)
+        terminal = campaign.store.load(campaign_id)
+        self.assertEqual(terminal["status"], "failed_safe")
+        self.assertFalse(terminal["creates_authority"])
+        self.assertFalse(terminal["creates_continuing_authority"])
+
+    def test_restart_reconciles_decision_free_expired_reviewer_attention(self):
+        campaign_id = "review-native-expired-restart"
+        campaign, _record, package, transport, reviewer = (
+            self._review_native_approval_fixture(campaign_id))
+        retention = campaign.store.load(campaign_id)["builder_runs"][-1][
+            "candidate_retention_receipt"]
+        transport["candidate_snapshot_id"] = retention["candidate_snapshot"][
+            "candidate_snapshot_id"]
+        approval = self._typed_review_approval(
+            campaign_id, package, transport, reviewer,
+            "review-expired-restart-invocation", "expired-restart-item")
+        paused = campaign.require_tanner(
+            campaign_id, invocation_id=approval["invocation_id"],
+            worker=approval["worker"], kind=approval["kind"],
+            blocked_action=approval["blocked_action"],
+            why_required=approval["why_required"],
+            requested_authority=approval["requested_authority"],
+            resources=approval["resources"], reversible=approval["reversible"],
+            provider_code=approval["provider_code"],
+            protocol_binding=approval["protocol"], expires_in_seconds=3600,
+            expiration_reason="bounded review expired",
+            expiration_effect="protected action remains unperformed",
+            can_request_again=True, work_lost=False)
+        attention_id = paused["needs_tanner"]["attention_id"]
+        path = campaign.attention_store.events / f"{attention_id}.json"
+        event = json.loads(path.read_text(encoding="utf-8"))
+        event["expires_at"] = (datetime.now(timezone.utc)
+            - timedelta(seconds=1)).isoformat()
+        event.pop("record_sha256", None); event["record_sha256"] = _digest(event)
+        path.write_text(json.dumps(event), encoding="utf-8")
+
+        terminal = campaign.advance_once(campaign_id)
+        self.assertEqual(terminal["status"], "failed_safe")
+        self.assertEqual(terminal["needs_tanner"]["reason"],
+                         "attention_unavailable_or_expired")
+        self.assertFalse(terminal["creates_authority"])
+        self.assertFalse(terminal["creates_continuing_authority"])
+
+    def test_restart_reconciles_decision_free_unavailable_reviewer_wait(self):
+        campaign_id = "review-native-unavailable-restart"
+        campaign, _record, package, transport, reviewer = (
+            self._review_native_approval_fixture(campaign_id))
+        retention = campaign.store.load(campaign_id)["builder_runs"][-1][
+            "candidate_retention_receipt"]
+        transport["candidate_snapshot_id"] = retention["candidate_snapshot"][
+            "candidate_snapshot_id"]
+        approval = self._typed_review_approval(
+            campaign_id, package, transport, reviewer,
+            "review-unavailable-restart-invocation", "unavailable-restart-item")
+        paused = campaign.require_tanner(
+            campaign_id, invocation_id=approval["invocation_id"],
+            worker=approval["worker"], kind=approval["kind"],
+            blocked_action=approval["blocked_action"],
+            why_required=approval["why_required"],
+            requested_authority=approval["requested_authority"],
+            resources=approval["resources"], reversible=approval["reversible"],
+            provider_code=approval["provider_code"],
+            protocol_binding=approval["protocol"], expires_in_seconds=3600,
+            expiration_reason="bounded review transport lost",
+            expiration_effect="protected action remains unperformed",
+            can_request_again=True, work_lost=False)
+        attention_id = paused["needs_tanner"]["attention_id"]
+        with patch.object(campaign.attention_store,
+                          "_complete_recovery_evidence", return_value=False):
+            campaign.attention_store.mark_process_detached(attention_id)
+
+        terminal = campaign.advance_once(campaign_id)
+        self.assertEqual(terminal["status"], "failed_safe")
+        self.assertEqual(terminal["needs_tanner"]["reason"],
+                         "reviewer_native_action_transport_lost")
+        self.assertFalse(terminal["creates_authority"])
+        self.assertFalse(terminal["creates_continuing_authority"])
+
     def test_campaign_validation_uses_shared_external_environment_without_secrets(self):
         external = Path(self.tmp.name) / "external-state"
         external.mkdir()
