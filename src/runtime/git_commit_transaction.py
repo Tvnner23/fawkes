@@ -242,6 +242,19 @@ class GitCommitTransaction:
           "creates_authority":False}
         value["record_sha256"]=_digest(value);return value
 
+    def _validate_reviewed_workspace(self, receipt, prepared):
+        """Recompute the complete reviewed tree from current in-scope postimages."""
+        projection=receipt["reviewed_commit_projection"]
+        observed=self.reviewed_application_projection(
+            operation_id=prepared["operation_id"],
+            expected_parent_head=prepared["expected_parent_head"],
+            scope=prepared["scope"],
+            review_receipt_sha256=prepared["review_receipt_sha256"])
+        if observed!=projection:
+            raise PermissionError(
+                "reviewed commit projection drift: in-scope postimage or repository binding")
+        return observed
+
     def prepare_reviewed_application(self, *, terminal_application_receipt,
             operation_id, expected_parent_head, reviewed_tree_sha256, scope,
             exact_diff_sha256, mutation_manifest_sha256, review_receipt_sha256, message):
@@ -258,10 +271,10 @@ class GitCommitTransaction:
                 or projection.get("expected_diff_sha256")!=exact_diff_sha256
                 or projection.get("message")!=message):
             raise PermissionError("reviewed application does not bind the exact commit")
-        observed=self.reviewed_application_projection(operation_id=operation_id,
-            expected_parent_head=expected_parent_head,scope=scope,
-            review_receipt_sha256=review_receipt_sha256)
-        if observed!=projection:raise PermissionError("reviewed commit projection drift")
+        prepared_binding={"operation_id":operation_id,
+            "expected_parent_head":expected_parent_head,"scope":list(self._paths(scope)),
+            "review_receipt_sha256":review_receipt_sha256}
+        self._validate_reviewed_workspace(receipt,prepared_binding)
         prepared=self.prepare(operation_id=operation_id,expected_parent_head=expected_parent_head,
             reviewed_tree_sha256=reviewed_tree_sha256,scope=scope,
             exact_diff_sha256=exact_diff_sha256,
@@ -392,6 +405,12 @@ class GitCommitTransaction:
                     "creates_continuing_authority":False}
                 intent["status"]="cas_invocation_started"
                 intent["record_sha256"]=_digest(intent);write_durable_record(intent_path,intent)
+                # The worktree can change after application reconciliation and
+                # commit-object preparation. Recompute the complete reviewed
+                # projection while both canonical locks are held. Any content,
+                # mode, type, deletion, scope, index, or neighboring drift
+                # closes before the final clock sample and CAS.
+                self._validate_reviewed_workspace(receipt,prepared)
                 # Re-read the canonical campaign after every potentially lengthy
                 # preparation/validation step.  The authoritative clock sample
                 # below is deliberately adjacent to CAS while both the campaign

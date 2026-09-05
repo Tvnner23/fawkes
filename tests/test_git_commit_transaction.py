@@ -1,6 +1,7 @@
-import hashlib, json, subprocess, tempfile, unittest
+import hashlib, json, os, subprocess, tempfile, unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from src.runtime.git_commit_transaction import GitCommitTransaction
 from src.runtime.codex_development_campaign import (
@@ -294,6 +295,54 @@ class GitCommitTransactionTests(unittest.TestCase):
         with self.assertRaisesRegex(PermissionError,'receipt-owned|campaign-owned synchronous route'):
             self.owner.advance_reviewed_application(prepared,receipt)
         self.assertEqual(self.parent,self.git('rev-parse','HEAD'))
+
+    def test_protected_cas_revalidates_complete_in_scope_postimage_after_intent(self):
+        mutations=(
+          ("content",lambda path:path.write_text("post-preparation drift\n")),
+          ("delete",lambda path:path.unlink()),
+          ("mode",lambda path:path.chmod(0o755)),
+          ("symlink",lambda path:(path.unlink(),os.symlink("other.py",path))),
+        )
+        for index,(kind,mutate) in enumerate(mutations):
+            with self.subTest(kind=kind):
+                if index:
+                    self.tearDown();self.setUp()
+                receipt=self.application_receipt();prepared=self.reviewed_prepared(receipt)
+                campaign=self.campaign_record(receipt);calls={"cas":0,"mutated":False}
+                original_run=self.owner._run
+                def count_cas(args,**kwargs):
+                    if args and args[0]=="update-ref":calls["cas"]+=1
+                    return original_run(args,**kwargs)
+                self.owner._run=count_cas
+                from src.runtime import git_commit_transaction as transaction_module
+                original_write=transaction_module.write_durable_record
+                def mutation_barrier(path,value,**kwargs):
+                    original_write(path,value,**kwargs)
+                    if (not calls["mutated"]
+                            and value.get("record_type")=="reviewed_git_cas_intent_v01"
+                            and value.get("status")=="cas_invocation_started"):
+                        calls["mutated"]=True;mutate(self.repo/"a.py")
+                with patch.object(transaction_module,"write_durable_record",mutation_barrier), \
+                        self.assertRaisesRegex(PermissionError,"in-scope postimage"):
+                    self.owner.advance_campaign_reviewed_application(
+                        prepared,receipt,**self.protected(campaign))
+                self.assertTrue(calls["mutated"])
+                self.assertEqual(calls["cas"],0)
+                self.assertEqual(self.parent,self.git("rev-parse","HEAD"))
+
+    def test_valid_protected_cas_revalidation_still_advances_exactly_once(self):
+        receipt=self.application_receipt();prepared=self.reviewed_prepared(receipt)
+        campaign=self.campaign_record(receipt);calls=[];original=self.owner._run
+        def count_cas(args,**kwargs):
+            if args and args[0]=="update-ref":calls.append(tuple(args))
+            return original(args,**kwargs)
+        self.owner._run=count_cas
+        committed=self.owner.advance_campaign_reviewed_application(
+            prepared,receipt,**self.protected(campaign))
+        self.assertEqual(committed["status"],"committed")
+        self.assertEqual(len(calls),1)
+        self.assertEqual(prepared["prepared_commit"],self.git("rev-parse","HEAD"))
+        self.assertFalse(committed["creates_continuing_authority"])
     def test_reviewed_commit_rejects_neighboring_or_tampered_receipt(self):
         receipt=self.application_receipt();prepared=self.reviewed_prepared(receipt)
         neighbor=self.application_receipt(operation_id='neighbor')
