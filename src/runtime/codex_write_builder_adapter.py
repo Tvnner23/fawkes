@@ -1265,6 +1265,16 @@ class CodexWriteBuilderAdapter(CodexExecWorkerAdapter):
                 raise PermissionError("authoritative postimage drift after application")
         return application
 
+    def retain_git_commit_eligibility(self, *, terminal_application_receipt,
+            campaign_record, commit_operation_id):
+        """v0.1 forbids durable pending Git authority."""
+        raise PermissionError("durable Git eligibility is prohibited by the v0.1 closure contract")
+
+    @staticmethod
+    def resolve_git_commit_eligibility(terminal_application_receipt):
+        """v0.1 has no restart-exercisable Git eligibility."""
+        raise PermissionError("durable Git eligibility is prohibited by the v0.1 closure contract")
+
     def _write_failure(self, path, request, package, authority, reason, detail, changes,
                        process_metadata=None, cache_cleanup=None, application_evidence=None):
         try:

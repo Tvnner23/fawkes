@@ -105,9 +105,10 @@ class CampaignFixture:
         def apply_candidate(**kwargs):
             self.applications.append(kwargs)
             return {"status":"applied_verified_after_review", "applied_paths":[], **kwargs}
+        runtime=root/"runtime";runtime.mkdir()
         self.campaign = CodexDevelopmentCampaign(self.instance_id, root=root / "campaigns",
             exchange=self.exchange, builder_runner=builder, builder_modes={"repository_write"},
-            candidate_applier=apply_candidate)
+            candidate_applier=apply_candidate,runtime_state_root=runtime)
 
     def payload(self, campaign_id="campaign-one"):
         return {"instance_id": self.instance_id, "campaign_id": campaign_id,
@@ -776,6 +777,25 @@ class CodexDevelopmentCampaignTests(unittest.TestCase):
         self.assertEqual(restarted.presentation("cancel-test")["status"], "cancelled")
         self.assertEqual(calls, [])
 
+    def test_cancel_waits_for_canonical_protected_operation_boundary(self):
+        self.fixture.campaign.create(self.fixture.payload("cancel-linearized"),
+                                     authenticated_rider=True)
+        entered=threading.Event();release=threading.Event();cancelled=threading.Event()
+        def protected_stage():
+            with self.fixture.campaign.store.protected("cancel-linearized"):
+                entered.set();release.wait(2)
+        def cancel_stage():
+            self.fixture.campaign.cancel("cancel-linearized",authenticated_rider=True)
+            cancelled.set()
+        holder=threading.Thread(target=protected_stage);holder.start();self.assertTrue(entered.wait(2))
+        waiter=threading.Thread(target=cancel_stage);waiter.start()
+        self.assertFalse(cancelled.wait(0.05));release.set()
+        holder.join(2);waiter.join(2);self.assertFalse(holder.is_alive());self.assertFalse(waiter.is_alive())
+        self.assertTrue(cancelled.is_set())
+        terminal=self.fixture.campaign.store.load("cancel-linearized")
+        self.assertEqual("cancelled",terminal["status"])
+        self.assertFalse(terminal["creates_continuing_authority"])
+
     def test_authority_scope_recovery_and_integrity_are_required(self):
         payload = self.fixture.payload("guard-test")
         with self.assertRaises(PermissionError):
@@ -885,6 +905,149 @@ class CodexDevelopmentCampaignTests(unittest.TestCase):
         self.assertEqual(record["needs_tanner"]["reason"],
                          "insufficient_evidence_not_correctable_in_scope")
         self.assertEqual(len(self.fixture.builder_payloads), 1)
+
+
+class StepwiseCampaignV01Tests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
+        self.fixture = CampaignFixture(Path(self.tmp.name))
+
+    def payload(self, campaign_id):
+        return {**self.fixture.payload(campaign_id), "execution_budget_v01": {
+            "maximum_duration_seconds": 3600, "maximum_worker_turns": 2,
+            "maximum_reviewer_turns": 4, "maximum_provider_turns": 6,
+            "maximum_cost_units": 6, "maximum_correction_cycles": 2,
+            "maximum_iterations": 3}}
+
+    def test_accepted_review_checkpoints_once_without_fallthrough(self):
+        campaign=self.fixture.campaign
+        created=campaign.create(self.payload("stepwise-accepted"),
+            authenticated_rider=True)
+        awaiting=campaign._update(created,event_kind="fixture_stepwise_boundary",
+            stepwise_v01=True)
+        self.assertEqual("awaiting_independent_review",awaiting["status"])
+        review=self.fixture.review(created["campaign_id"],"pass",
+            satisfied=["tests-pass","scope-held"])
+        accepted=campaign.consume_review(created["campaign_id"],review,
+            reviewer=REVIEWER,transport_verified=True)
+        self.assertEqual("review_accepted_application_pending",accepted["status"])
+        self.assertIsNone(accepted.get("application_evidence"))
+        self.assertEqual([],self.fixture.applications)
+
+    def test_stepwise_creation_requires_explicit_external_git_state_root(self):
+        campaign=CodexDevelopmentCampaign("fawkes",root=Path(self.tmp.name)/"no-runtime",
+            exchange=self.fixture.exchange,builder_runner=lambda payload: payload,
+            builder_modes={"repository_write"})
+        with self.assertRaisesRegex(ValueError,"Git transaction state root"):
+            campaign.create(self.payload("stepwise-no-git-root"),
+                authenticated_rider=True,stepwise=True)
+
+    def _reserved(self, campaign_id="stepwise-ambiguous"):
+        campaign = self.fixture.campaign
+        record = campaign.create(self.payload(campaign_id), authenticated_rider=True,
+                                 stepwise=True)
+        scope = f"{campaign_id}-builder-1"
+        record = campaign._update(record, event_kind="builder_invocation_started",
+            status="builder_in_progress", iteration=1,
+            active_builder_task_scope_id=scope)
+        sender = {"worker_id":"fawkes-development", "role":"coordination",
+            "identity_status":"verified", "charter_version":"1.0"}
+        report = self.fixture.exchange.create_report(task_scope_id=scope, sender=sender,
+            authority=authority("fawkes", scope, sender["worker_id"]),
+            sections=[{"section_id":"approved-task", "title":"Task", "content":"Bounded."}])
+        package = self.fixture.exchange.compose_package(report_id=report["report_id"],
+            recipient={"worker_id":BUILDER_ID,"role":"repository_implementation",
+                "identity_status":"verified","charter_version":"1.0"},
+            authority=authority("fawkes", scope, sender["worker_id"], BUILDER_ID),
+            included_section_ids=["approved-task"])
+        campaign.reserve_worker_provider_action(campaign_id=campaign_id,
+            task_scope_id=scope, package_id=package["package_id"],
+            package_sha256=package["record_sha256"], invocation_id=scope+"-appserver")
+        return campaign
+
+    def test_ambiguous_provider_completion_consumes_reservation_without_retry(self):
+        campaign = self._reserved()
+        result = campaign.advance_once("stepwise-ambiguous")
+        self.assertEqual(result["status"], "failed_safe")
+        self.assertEqual(result["needs_tanner"]["reason"], "ambiguous_provider_completion")
+        budget = result["execution_budget_v01"]
+        self.assertEqual(budget["consumed_provider_turns"], 1)
+        self.assertEqual(budget["consumed_cost_units"], 1)
+        self.assertEqual(len(self.fixture.builder_payloads), 0)
+        self.assertEqual(campaign.advance_once("stepwise-ambiguous")["status"], "failed_safe")
+
+    def test_stepwise_configured_iteration_limit_blocks_next_worker(self):
+        payload=self.fixture.payload("iteration-budget-v01")
+        payload["stepwise_v01"]=True
+        payload["execution_budget_v01"]={"maximum_duration_seconds":3600,
+            "maximum_worker_turns":3,"maximum_reviewer_turns":4,
+            "maximum_provider_turns":7,"maximum_cost_units":7,
+            "maximum_correction_cycles":2,"maximum_iterations":1}
+        record=self.fixture.campaign.create(payload,authenticated_rider=True,stepwise=True)
+        record=self.fixture.campaign.store.load(record["campaign_id"])
+        record=self.fixture.campaign._update(record,event_kind="fixture_iteration_limit",
+            iteration=1,status="correction_pending",
+            pending_correction={"task":"bounded correction"})
+        before=len(record["builder_runs"])
+        terminal=self.fixture.campaign.advance_once(record["campaign_id"])
+        self.assertEqual(terminal["status"],"failed_safe")
+        self.assertEqual(terminal["needs_tanner"]["reason"],"maximum_iterations_reached")
+        self.assertEqual(len(terminal["builder_runs"]),before)
+
+    def test_run_to_terminal_stalls_fail_closed_through_advance_once(self):
+        payload=self.fixture.payload("stepwise-stall-v01")
+        payload["stepwise_v01"]=True
+        payload["execution_budget_v01"]={"maximum_duration_seconds":3600,
+            "maximum_worker_turns":3,"maximum_reviewer_turns":4,
+            "maximum_provider_turns":7,"maximum_cost_units":7,
+            "maximum_correction_cycles":2,"maximum_iterations":1}
+        record=self.fixture.campaign.create(payload,authenticated_rider=True,stepwise=True)
+        self.fixture.campaign.advance_once=lambda *args,**kwargs: record
+        terminal=self.fixture.campaign.run_to_terminal(record["campaign_id"])
+        self.assertEqual(terminal["status"],"failed_safe")
+        self.assertEqual(terminal["needs_tanner"]["reason"],"stepwise_progress_stalled")
+
+    def test_every_provider_budget_exhaustion_is_durable_and_unreserved(self):
+        cases=(("maximum_worker_turns","worker",1,1),
+               ("maximum_reviewer_turns","reviewer",2,2),
+               ("maximum_provider_turns","worker",1,1),
+               ("maximum_cost_units","worker",1,1))
+        for index,(limit,kind,turns,cost) in enumerate(cases):
+            with self.subTest(limit=limit):
+                payload=self.fixture.payload(f"exhaust-{index}")
+                payload["execution_budget_v01"]={"maximum_duration_seconds":3600,
+                    "maximum_worker_turns":2,"maximum_reviewer_turns":4,
+                    "maximum_provider_turns":6,"maximum_cost_units":6,
+                    "maximum_correction_cycles":2,"maximum_iterations":3}
+                record=self.fixture.campaign.create(payload,authenticated_rider=True,stepwise=True)
+                budget=dict(record["execution_budget_v01"])
+                consumed={"maximum_worker_turns":"consumed_worker_turns",
+                    "maximum_reviewer_turns":"consumed_reviewer_turns",
+                    "maximum_provider_turns":"consumed_provider_turns",
+                    "maximum_cost_units":"consumed_cost_units"}[limit]
+                budget[consumed]=budget[limit]
+                record=self.fixture.campaign._update(record,event_kind="fixture_budget_used",
+                    execution_budget_v01=budget)
+                with self.assertRaisesRegex(RuntimeError,limit):
+                    self.fixture.campaign._reserve_provider(record,operation_type=kind,
+                        package_id="package-test",package_sha256="0"*64,
+                        invocation_id="invocation-test",task_scope_id="scope-test",
+                        turns=turns,cost=cost)
+                failed=self.fixture.campaign.store.load(record["campaign_id"])
+                self.assertEqual(failed["status"],"failed_safe")
+                self.assertEqual(failed["needs_tanner"]["exhausted_limit"],limit)
+                self.assertIsNone(failed["execution_budget_v01"]["provider_action"])
+
+    def test_reservation_rejects_neighboring_package_and_is_durable(self):
+        campaign = self._reserved("stepwise-bound")
+        record = campaign.store.load("stepwise-bound")
+        action = record["execution_budget_v01"]["provider_action"]
+        self.assertEqual(action["status"], "provider_action_reserved")
+        self.assertEqual(action["scope_sha256"], _digest(record["allowed_scope"]))
+        with self.assertRaises((KeyError, PermissionError)):
+            campaign.reserve_worker_provider_action(campaign_id="stepwise-bound",
+                task_scope_id=action["task_scope_id"], package_id="neighbor-package",
+                package_sha256="0"*64, invocation_id="neighbor")
 
 
 class CodexDevelopmentCampaignHTTPTests(unittest.TestCase):

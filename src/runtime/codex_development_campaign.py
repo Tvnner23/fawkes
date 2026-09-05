@@ -4,8 +4,10 @@ This is durable coordination state over Development and Worker Exchange. It is
 not a scheduler, worker registry, authority source, or general orchestrator.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+from contextlib import contextmanager
 from pathlib import Path
+import fcntl
 import hashlib
 import json
 import os
@@ -57,6 +59,33 @@ DEFAULT_REVIEWER_BINDING_ASSURANCE = {
 }
 _LOCKS = {}
 _LOCKS_GUARD = threading.Lock()
+_PROTECTED_LOCAL = threading.local()
+_PROTECTED_GIT_GUARD_SECRET = object()
+
+
+class _ProtectedGitGuard:
+    """Ephemeral proof that the campaign serialization boundary is held."""
+    __slots__ = ("campaign_id", "record_sha256", "state_revision", "operation_id",
+                 "_handle", "_thread", "_active")
+
+    def __init__(self, secret, *, campaign_id, record_sha256, state_revision,
+                 operation_id, handle):
+        if secret is not _PROTECTED_GIT_GUARD_SECRET:
+            raise PermissionError("canonical campaign protection is required")
+        self.campaign_id=campaign_id;self.record_sha256=record_sha256
+        self.state_revision=state_revision;self.operation_id=operation_id
+        self._handle=handle;self._thread=threading.get_ident();self._active=True
+
+    def validate(self, *, campaign_id, record_sha256, state_revision, operation_id):
+        if (not self._active or self._handle.closed
+                or self._thread!=threading.get_ident()
+                or self.campaign_id!=campaign_id
+                or self.record_sha256!=record_sha256
+                or self.state_revision!=state_revision
+                or self.operation_id!=operation_id):
+            raise PermissionError("canonical campaign protection is stale or mismatched")
+
+    def close(self): self._active=False
 
 CAMPAIGN_ACCEPTANCE_CONTRACT = {
     "contract_version": CAMPAIGN_CONTRACT_VERSION,
@@ -219,6 +248,29 @@ class DevelopmentCampaignStore:
     def path(self, campaign_id):
         return self.root / f"{require_id(campaign_id, 'campaign_id')}.json"
 
+    def protection_path(self, campaign_id):
+        return self.root / ".protected" / f"{require_id(campaign_id, 'campaign_id')}.lock"
+
+    @contextmanager
+    def protected(self, campaign_id):
+        """Process-safe serialization for protected Git and terminal cancellation."""
+        path=self.protection_path(campaign_id);path.parent.mkdir(parents=True,exist_ok=True)
+        key=str(path.resolve());held=getattr(_PROTECTED_LOCAL,"held",{})
+        if key in held:
+            handle,count=held[key];held[key]=(handle,count+1)
+            try: yield handle
+            finally:
+                handle,count=held[key];held[key]=(handle,count-1)
+            return
+        with _lock(path):
+            with path.open("a+b") as handle:
+                fcntl.flock(handle.fileno(),fcntl.LOCK_EX)
+                held=dict(held);held[key]=(handle,1);_PROTECTED_LOCAL.held=held
+                try: yield handle
+                finally:
+                    held.pop(key,None);_PROTECTED_LOCAL.held=held
+                    fcntl.flock(handle.fileno(),fcntl.LOCK_UN)
+
     def list(self):
         if not self.root.exists():
             return []
@@ -251,7 +303,7 @@ class DevelopmentCampaignStore:
 
     def write(self, record, *, expected_revision=None):
         path = self.path(record["campaign_id"])
-        with _lock(path):
+        with self.protected(record["campaign_id"]), _lock(path):
             current = self.load(record["campaign_id"]) if path.exists() else None
             if current is not None and expected_revision is None:
                 raise RuntimeError("Development campaign identity already exists")
@@ -264,8 +316,15 @@ class DevelopmentCampaignStore:
             self._validate(value, instance_id=self.instance_id)
             path.parent.mkdir(parents=True, exist_ok=True)
             temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-            temporary.write_text(json.dumps(value, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+            with temporary.open("w", encoding="utf-8") as stream:
+                stream.write(json.dumps(value, indent=2, ensure_ascii=False) + "\n")
+                stream.flush(); os.fsync(stream.fileno())
             temporary.replace(path)
+            directory = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
             return value
 
 
@@ -285,6 +344,8 @@ class CodexDevelopmentCampaign:
         self.builder_modes = set(builder_modes or {"read_only", "repository_write"})
         self.attention_store = attention_store or DevelopmentAttentionStore()
         self.runtime_state_root = _runtime_state_root(runtime_state_root, workspace=ROOT)
+        self.git_transaction_state_root = (self.runtime_state_root / "campaign-git-transactions"
+                                           if self.runtime_state_root is not None else None)
         self.worker_timeout_seconds = int(worker_timeout_seconds)
         if self.worker_timeout_seconds <= 0:
             raise ValueError("worker timeout must be positive")
@@ -296,7 +357,162 @@ class CodexDevelopmentCampaign:
             authenticated_rider=True, exchange=self.exchange,
             approval_handler=self._handle_typed_approval,
             worker_timeout_seconds=self.worker_timeout_seconds,
-            runtime_state_root=self.runtime_state_root)
+            runtime_state_root=self.runtime_state_root,
+            provider_reservation_owner=self if payload.get("stepwise_v01") else None)
+
+    @staticmethod
+    def _budget_from_payload(payload, created):
+        supplied = payload.get("execution_budget_v01")
+        if supplied is None:
+            return None
+        keys = {"maximum_duration_seconds", "maximum_worker_turns",
+                "maximum_reviewer_turns", "maximum_provider_turns",
+                "maximum_cost_units", "maximum_correction_cycles",
+                "maximum_iterations"}
+        if set(supplied) != keys or any(type(supplied[k]) is not int or supplied[k] <= 0
+                                        for k in keys):
+            raise ValueError("an exact positive v0.1 execution budget is required")
+        if supplied["maximum_correction_cycles"] > 2:
+            raise ValueError("v0.1 correction budget exceeds the canonical bound")
+        if supplied["maximum_iterations"] > MAX_ITERATIONS:
+            raise ValueError("v0.1 iteration budget exceeds the campaign bound")
+        expires = datetime.fromisoformat(created) + timedelta(
+            seconds=supplied["maximum_duration_seconds"])
+        immutable = {**supplied, "created_at": created, "expires_at": expires.isoformat(),
+            "contract": "conservative-provider-reservation-failed-safe-v0.1"}
+        value = {**immutable,
+                 "consumed_worker_turns": 0, "consumed_reviewer_turns": 0,
+                 "consumed_provider_turns": 0, "consumed_cost_units": 0,
+                 "consumed_correction_cycles": 0, "provider_action": None,
+                 "provider_actions": []}
+        value["budget_sha256"] = _digest(immutable)
+        return value
+
+    def _provider_ambiguity(self, record):
+        budget = dict(record["execution_budget_v01"])
+        action = budget.get("provider_action")
+        if not isinstance(action, dict) or action.get("status") not in {
+                "provider_action_reserved", "provider_action_in_flight"}:
+            return None
+        kind = action["operation_type"]
+        budget["consumed_provider_turns"] += action["maximum_reserved_provider_turns"]
+        budget["consumed_cost_units"] += action["maximum_reserved_cost_units"]
+        budget["consumed_" + kind + "_turns"] += action["maximum_reserved_provider_turns"]
+        budget["provider_action"] = {**action, "status": "ambiguous_provider_completion",
+                                     "closed_at": _now()}
+        return self._update(record, event_kind="ambiguous_provider_completion",
+            event_detail={"operation_id": action["operation_id"], "operation_type": kind},
+            status="failed_safe", execution_budget_v01=budget,
+            needs_tanner={"urgency": "urgent_blocking_flow",
+                "reason": "ambiguous_provider_completion",
+                "decision_needed": "cancel, inspect body-free evidence, or create a new exact request"})
+
+    def _reserve_provider(self, record, *, operation_type, package_id, package_sha256,
+                          invocation_id, task_scope_id, turns, cost):
+        budget = dict(record.get("execution_budget_v01") or {})
+        if not budget:
+            raise PermissionError("stepwise provider action requires a durable campaign budget")
+        if budget.get("provider_action") is not None:
+            raise RuntimeError("a provider action is already reserved")
+        now = datetime.now(timezone.utc)
+        exhausted = None
+        if now >= datetime.fromisoformat(budget["expires_at"]):
+            exhausted = "maximum_duration_seconds"
+        elif (budget["consumed_" + operation_type + "_turns"] + turns >
+                budget["maximum_" + operation_type + "_turns"]):
+            exhausted = "maximum_" + operation_type + "_turns"
+        elif budget["consumed_provider_turns"] + turns > budget["maximum_provider_turns"]:
+            exhausted = "maximum_provider_turns"
+        elif budget["consumed_cost_units"] + cost > budget["maximum_cost_units"]:
+            exhausted = "maximum_cost_units"
+        if exhausted is not None:
+            self._update(record, event_kind="provider_budget_exhausted",
+                event_detail={"exhausted_limit":exhausted,"requested_turns":turns,
+                    "requested_cost_units":cost}, status="failed_safe",
+                needs_tanner={"urgency":"urgent_blocking_flow",
+                    "reason":"provider_budget_exhausted","exhausted_limit":exhausted,
+                    "decision_needed":"create a new exact request"})
+            raise RuntimeError("campaign provider budget is exhausted: " + exhausted)
+        action = {"operation_id": "provider-action-" + _digest({
+                "campaign_id": record["campaign_id"], "package_id": package_id,
+                "invocation_id": invocation_id, "operation_type": operation_type,
+                "iteration": record["iteration"], "budget_sha256": budget["budget_sha256"]}),
+            "campaign_id": record["campaign_id"], "task_scope_id": task_scope_id,
+            "package_id": package_id, "package_sha256": package_sha256,
+            "scope_sha256": _digest(record["allowed_scope"]),
+            "invocation_id": invocation_id, "operation_type": operation_type,
+            "maximum_reserved_provider_turns": turns,
+            "maximum_reserved_cost_units": cost, "iteration": record["iteration"],
+            "correction_cycle": max(0, record["iteration"] - 1),
+            "started_at": _now(), "expires_at": budget["expires_at"],
+            "budget_sha256": budget["budget_sha256"],
+            "status": "provider_action_reserved"}
+        action["record_sha256"] = _digest(action)
+        budget["provider_action"] = action
+        return self._update(record, event_kind="provider_action_reserved",
+            event_detail={"operation_id": action["operation_id"], "operation_type": operation_type},
+            execution_budget_v01=budget)
+
+    def reserve_worker_provider_action(self, *, campaign_id, task_scope_id, package_id,
+                                       package_sha256, invocation_id):
+        record = self.store.load(campaign_id)
+        package = self.exchange._load("packages", require_id(package_id, "package_id"))
+        if record.get("status") != "builder_in_progress" or task_scope_id != record.get(
+                "active_builder_task_scope_id") or package.get("task_scope_id") != task_scope_id or package.get(
+                "record_sha256") != package_sha256:
+            raise PermissionError("Worker reservation is not eligible")
+        return self._reserve_provider(record, operation_type="worker", package_id=package_id,
+            package_sha256=package_sha256, invocation_id=invocation_id,
+            task_scope_id=task_scope_id, turns=1, cost=1)
+
+    def _consume_provider_reservation(self, campaign_id, result_identity=None):
+        record = self.store.load(campaign_id); budget = dict(record["execution_budget_v01"])
+        action = budget.get("provider_action") or {}
+        if action.get("status") != "provider_action_reserved":
+            raise PermissionError("exact provider reservation is unavailable")
+        kind = action["operation_type"]
+        budget["consumed_provider_turns"] += action["maximum_reserved_provider_turns"]
+        budget["consumed_cost_units"] += action["maximum_reserved_cost_units"]
+        budget["consumed_" + kind + "_turns"] += action["maximum_reserved_provider_turns"]
+        completed = {**action, "status": "provider_result_checkpointed",
+            "result_identity": result_identity, "closed_at": _now()}
+        budget["provider_actions"] = [*budget.get("provider_actions", []), completed]
+        budget["provider_action"] = None
+        return self._update(record, event_kind="provider_result_checkpointed",
+            event_detail={"operation_id": action["operation_id"]}, execution_budget_v01=budget)
+
+    def _close_failed_provider_reservation(self, campaign_id, *, failure_code,
+                                           completion_class="ambiguous_provider_completion"):
+        """Conservatively consume and close one failed provider reservation."""
+        record = self.store.load(campaign_id)
+        budget = dict(record.get("execution_budget_v01") or {})
+        action = budget.get("provider_action")
+        if not isinstance(action, dict) or action.get("status") not in {
+                "provider_action_reserved", "provider_action_in_flight"}:
+            raise PermissionError("exact provider reservation is unavailable for failure closure")
+        kind = action["operation_type"]
+        reserved_turns = action["maximum_reserved_provider_turns"]
+        reserved_cost = action["maximum_reserved_cost_units"]
+        budget["consumed_provider_turns"] += reserved_turns
+        budget["consumed_cost_units"] += reserved_cost
+        budget["consumed_" + kind + "_turns"] += reserved_turns
+        closed = {**action, "status": completion_class, "failure_code": failure_code,
+            "closed_at": _now(), "reserved_turns_consumed": reserved_turns,
+            "reserved_cost_units_consumed": reserved_cost,
+            "automatic_retry_permitted": False}
+        closed["record_sha256"] = _digest(
+            {key: value for key, value in closed.items() if key != "record_sha256"})
+        budget["provider_actions"] = [*budget.get("provider_actions", []), closed]
+        budget["provider_action"] = None
+        return self._update(record, event_kind="provider_reservation_failed_closed",
+            event_detail={"operation_id": action["operation_id"],
+                "operation_type": kind, "failure_code": failure_code,
+                "completion_class": completion_class},
+            status="failed_safe", execution_budget_v01=budget,
+            needs_tanner={"urgency": "urgent_blocking_flow",
+                "reason": "ambiguous_provider_completion",
+                "failure_code": failure_code,
+                "decision_needed": "cancel, inspect body-free evidence, or create a new exact request"})
 
     def _apply_reviewed_builder_candidate(self, *, package_id, campaign_id,
                                           review_report_id, review_acceptance_receipt):
@@ -402,10 +618,116 @@ class CodexDevelopmentCampaign:
                 status="failed_safe", needs_tanner={"urgency":"urgent_blocking_flow",
                 "reason":"reviewed_candidate_apply_failed", "failure_code":type(exc).__name__,
                 "decision_needed":"inspect retained candidate and apply failure evidence"})
+        if record.get("stepwise_v01"):
+            return self._update(record, event_kind="reviewed_application_completed",
+                status="reviewed_application_completed", needs_tanner=None,
+                application_evidence=application, git_commit_evidence=None,
+                creates_authority=False, creates_continuing_authority=False)
         event = ("campaign_succeeded_with_nonblocking_caveats"
                  if review["status"] == "pass_with_caveats" else "campaign_succeeded")
         return self._update(record, event_kind=event, status="succeeded",
-            needs_tanner=None, application_evidence=application)
+            needs_tanner=None, application_evidence=application,
+            git_commit_evidence=None,creates_authority=False,
+            creates_continuing_authority=False)
+
+    def _complete_pending_reviewed_git_locked(self, record, guard):
+        """Perform or observe the sole reviewed Git stage after application checkpointing."""
+        if record.get("status") != "reviewed_application_completed":
+            raise RuntimeError("campaign has no completed reviewed application")
+        application = record.get("application_evidence")
+        review = (record.get("reviews") or [])[-1]
+        if (not isinstance(application, dict)
+                or application.get("status") != "applied_verified_after_review"
+                or application.get("application_count") != 1
+                or application.get("operation_id") != review.get("reviewed_application_operation_id")):
+            raise PermissionError("exact terminal reviewed application is required")
+        try:
+            from src.runtime.git_commit_transaction import GitCommitTransaction
+            adapter = self._canonical_application_adapter()
+            projection = application["reviewed_commit_projection"]
+            if self.git_transaction_state_root is None:
+                raise RuntimeError("canonical Git transaction state root is unavailable")
+            owner = GitCommitTransaction(adapter.workspace, self.git_transaction_state_root)
+            try:
+                committed = owner.reconcile_campaign_reviewed_application(
+                    operation_id=application["operation_id"],
+                    terminal_application_receipt=application,
+                    campaign_store=self.store, campaign_protection=guard)
+            except FileNotFoundError:
+                committed = None
+            if committed is not None:
+                if committed.get("status") != "committed":
+                    return self._update(record, event_kind="reviewed_git_failed_safe",
+                        status="failed_safe", git_commit_evidence=committed,
+                        needs_tanner={"urgency":"urgent_blocking_flow",
+                            "reason":committed.get("reason", "reviewed_git_failed_safe"),
+                            "decision_needed":"inspect exact Git transaction evidence"},
+                        creates_authority=False, creates_continuing_authority=False)
+            else:
+                prepared = owner.prepare_reviewed_application(
+                    terminal_application_receipt=application,
+                    operation_id=application["operation_id"],
+                    expected_parent_head=application["binding"]["expected_repository_head"],
+                    reviewed_tree_sha256=projection["expected_tree"],
+                    scope=application["applied_paths"],
+                    exact_diff_sha256=projection["expected_diff_sha256"],
+                    mutation_manifest_sha256=application["binding"]["mutation_manifest_sha256"],
+                    review_receipt_sha256=application["review_acceptance_receipt_sha256"],
+                    message=projection["message"])
+                committed = owner.advance_campaign_reviewed_application(
+                    prepared, application, campaign_store=self.store,
+                    campaign_protection=guard)
+            if committed.get("status") != "committed":
+                return self._update(record, event_kind="reviewed_git_failed_safe",
+                    status="failed_safe", git_commit_evidence=committed,
+                    needs_tanner={"urgency":"urgent_blocking_flow",
+                        "reason":committed.get("reason", "reviewed_git_failed_safe"),
+                        "decision_needed":"inspect exact Git transaction evidence"},
+                    creates_authority=False, creates_continuing_authority=False)
+        except Exception as exc:
+            # A CAS may have completed before the transport surfaced an
+            # exception.  While campaign protection is still held, observation
+            # of the canonical intent is the only permissible recovery action.
+            try:
+                recovered = owner.reconcile_campaign_reviewed_application(
+                    operation_id=application["operation_id"],
+                    terminal_application_receipt=application,
+                    campaign_store=self.store, campaign_protection=guard)
+            except Exception:
+                recovered = None
+            if recovered is not None and recovered.get("status") == "committed":
+                committed = recovered
+            else:
+                return self._update(record, event_kind="reviewed_git_failed_safe",
+                    status="failed_safe", git_commit_evidence=recovered,
+                    needs_tanner={"urgency":"urgent_blocking_flow",
+                    "reason":((recovered or {}).get("reason") or "reviewed_git_failed_safe"),
+                    "failure_code":type(exc).__name__,
+                    "decision_needed":"inspect exact Git transaction evidence"},
+                    creates_authority=False, creates_continuing_authority=False)
+        event = ("campaign_succeeded_with_nonblocking_caveats"
+                 if review["status"] == "pass_with_caveats" else "campaign_succeeded")
+        return self._update(record, event_kind=event, status="succeeded",
+            needs_tanner=None, git_commit_evidence=committed,
+            creates_authority=False, creates_continuing_authority=False)
+
+    def _complete_pending_reviewed_git(self, record):
+        """Linearize the reviewed Git stage against cancellation and terminal mutation."""
+        with self.store.protected(record["campaign_id"]) as handle:
+            current=self.store.load(record["campaign_id"])
+            if (current.get("record_sha256")!=record.get("record_sha256")
+                    or current.get("state_revision")!=record.get("state_revision")
+                    or current.get("status")!="reviewed_application_completed"
+                    or current.get("cancelled")):
+                raise PermissionError("campaign changed before protected Git stage")
+            operation_id=current["application_evidence"]["operation_id"]
+            guard=_ProtectedGitGuard(_PROTECTED_GIT_GUARD_SECRET,
+                campaign_id=current["campaign_id"],record_sha256=current["record_sha256"],
+                state_revision=current["state_revision"],operation_id=operation_id,handle=handle)
+            try:
+                return self._complete_pending_reviewed_git_locked(current,guard)
+            finally:
+                guard.close()
 
     def _handle_typed_approval(self, approval, *, timeout_seconds, process_alive=None):
         """Project one exact typed request into the accepted Rider boundary."""
@@ -551,7 +873,7 @@ class CodexDevelopmentCampaign:
             )
         return retained
 
-    def create(self, payload, *, authenticated_rider):
+    def create(self, payload, *, authenticated_rider, stepwise=False):
         if authenticated_rider is not True:
             raise PermissionError("authenticated rider authority is required")
         if not isinstance(payload, dict) or payload.get("explicitly_authorized") is not True:
@@ -582,6 +904,13 @@ class CodexDevelopmentCampaign:
         validation_policy, validation_declaration = _validation_contract(
             payload, validation_commands, campaign_id=campaign_id, allowed_scope=allowed_scope)
         created = _now()
+        budget = self._budget_from_payload(payload, created)
+        if stepwise and budget is None:
+            raise ValueError("stepwise campaign requires execution_budget_v01")
+        if stepwise and self.git_transaction_state_root is None:
+            raise ValueError("stepwise campaign requires an exact external Git transaction state root")
+        if stepwise:
+            self.git_transaction_state_root.mkdir(parents=True, exist_ok=True, mode=0o700)
         record = {
             "schema_version": CAMPAIGN_SCHEMA_VERSION,
             "record_type": "codex_development_campaign",
@@ -623,11 +952,13 @@ class CodexDevelopmentCampaign:
             "creates_authority": False,
             "state_revision": 1,
             "created_at": created,
+            "stepwise_v01": bool(stepwise),
+            "execution_budget_v01": budget,
             "updated_at": created,
             "events": [self._event("campaign_created", {"authorization_reference": authorization_reference})],
         }
         record = self.store.write(record)
-        return self._start_builder(record, correction=None)
+        return record if stepwise else self._start_builder(record, correction=None)
 
     def require_tanner(self, campaign_id, *, invocation_id, worker, kind,
                        blocked_action, why_required, requested_authority,
@@ -839,13 +1170,24 @@ class CodexDevelopmentCampaign:
             "recovery_references": record["recovery_references"],
             "execution_mode": record["objective_mode"], "campaign_id": record["campaign_id"],
             "iteration": next_iteration, "allowed_scope": record["allowed_scope"],
-            "acceptance_condition_ids": record["acceptance_condition_ids"]}
+            "acceptance_condition_ids": record["acceptance_condition_ids"],
+            "stepwise_v01": bool(record.get("stepwise_v01"))}
         try:
             result = self.builder_runner(payload)
         except Exception as exc:
             result = {"presentation": {"status": "failed", "failure": {
                 "code": type(exc).__name__, "detail": str(exc)}, "return_report_id": None},
                 "transport_result": {"status": "failed"}}
+        if record.get("stepwise_v01"):
+            current = self.store.load(record["campaign_id"])
+            if current["status"] == "failed_safe":
+                return current
+            checkpointed = self._consume_provider_reservation(record["campaign_id"], {
+                "package_id": result.get("package_id") if isinstance(result, dict) else None,
+                "source_report_id": result.get("source_report_id") if isinstance(result, dict) else None,
+                "return_report_id": ((result.get("presentation") or {}).get("return_report_id")
+                                     if isinstance(result, dict) else None)})
+            record = checkpointed
         cache_after = _cleanup_python_cache(record["allowed_scope"])
         current = self.store.load(record["campaign_id"])
         presentation = result.get("presentation") if isinstance(result, dict) else None
@@ -1140,8 +1482,10 @@ class CodexDevelopmentCampaign:
             reviewer_requirement={**record["reviewer_requirement"], "worker_id": reviewer_id,
                                   "transport_binding": "verified_for_recorded_review"},
             **({"status": "review_accepted_application_pending"} if accepted else {}))
-        if accepted:
+        if accepted and not record.get("stepwise_v01"):
             return self._complete_pending_reviewed_application(record)
+        if accepted:
+            return record
         if status == "blocked":
             return self._update(record, event_kind="reviewer_blocked", status="tanner_escalation",
                 needs_tanner={"urgency": "urgent_blocking_flow", "reason": "independent_reviewer_blocked",
@@ -1155,6 +1499,9 @@ class CodexDevelopmentCampaign:
                 status="tanner_escalation", needs_tanner={"urgency": "urgent_blocking_flow",
                 "reason": "review_requires_correction_without_scoped_defects",
                 "decision_needed": "request a scoped review or stop campaign"})
+        if record.get("stepwise_v01"):
+            return self._update(record, event_kind="correction_transition_pending",
+                status="correction_pending", pending_correction=review_record)
         return self._start_builder(record, correction=review_record)
 
     def run_wsl_review(self, campaign_id, *, adapter=None):
@@ -1184,6 +1531,13 @@ class CodexDevelopmentCampaign:
             if existing is None:
                 record = self._update(record, event_kind="logical_review_request_prepared",
                     event_detail=logical, review_requests=[*record.get("review_requests", []), logical])
+            if record.get("stepwise_v01"):
+                record = self._reserve_provider(self.store.load(campaign_id),
+                    operation_type="reviewer", package_id=prepared["package_id"],
+                    package_sha256=self.exchange._load("packages", prepared["package_id"])["record_sha256"],
+                    invocation_id=f"{campaign_id}-review-{record['iteration']}",
+                    task_scope_id=self.exchange._load("packages", prepared["package_id"])["task_scope_id"],
+                    turns=2, cost=2)
             adapter = adapter or WslCodexReviewAdapter(self.exchange)
             builder_return_id = record["builder_runs"][-1]["return_report_id"]
             try:
@@ -1194,17 +1548,24 @@ class CodexDevelopmentCampaign:
                     candidate_snapshot_id=snapshot.provenance["candidate_snapshot_id"],
                     candidate_snapshot_root=snapshot.root,
                     approval_handler=self._handle_typed_approval)
+                snapshot.verify_source_unchanged()
             except Exception as exc:
-                current = self.store.load(campaign_id)
+                current = (self._close_failed_provider_reservation(campaign_id,
+                    failure_code=type(exc).__name__) if record.get("stepwise_v01")
+                    else self.store.load(campaign_id))
                 attempt = {"iteration": record["iteration"], "package_id": prepared["package_id"],
-                    "invocation_id": None, "status": "transport_exception", "consumed": False,
-                    "actual_process_invocation": False, "failure_code": type(exc).__name__, "created_at": _now()}
+                    "invocation_id": None, "status": "transport_exception",
+                    "consumed": bool(record.get("stepwise_v01")),
+                    "actual_process_invocation": None, "failure_code": type(exc).__name__, "created_at": _now()}
                 return self._update(current, event_kind="wsl_review_transport_exception",
                     event_detail={"failure_code": type(exc).__name__}, status="failed_safe",
                     review_transport_attempts=[*current.get("review_transport_attempts", []), attempt],
                     needs_tanner={"urgency": "urgent_blocking_flow", "reason": "wsl_review_transport_failed",
                                   "decision_needed": "inspect exact failure evidence or stop campaign"})
-            snapshot.verify_source_unchanged()
+        if record.get("stepwise_v01"):
+            record = self._consume_provider_reservation(campaign_id, {
+                "package_id": prepared["package_id"], "invocation_id": result.get("invocation_id"),
+                "return_report_id": result.get("return_report_id")})
         current = self.store.load(campaign_id)
         attempt = {"iteration": record["iteration"], "package_id": prepared["package_id"],
             "invocation_id": result.get("invocation_id"), "status": result.get("status"), "consumed": False,
@@ -1322,27 +1683,105 @@ class CodexDevelopmentCampaign:
         return self._update(consumed, event_kind="windows_review_attempt_consumed",
                             review_transport_attempts=attempts)
 
-    def run_to_terminal(self, campaign_id, *, reviewer_adapter=None):
-        """Advance this fixed campaign through the promoted default reviewer."""
+    def advance_once(self, campaign_id, *, reviewer_adapter=None):
+        """Perform at most one canonical transition or external action."""
         record = self.store.load(campaign_id)
-        while record["status"] in {"awaiting_independent_review",
-                                    "review_accepted_application_pending"}:
+        if record.get("stepwise_v01"):
+            ambiguous = self._provider_ambiguity(record)
+            if ambiguous is not None:
+                return ambiguous
+            budget = record["execution_budget_v01"]
+            expired = datetime.now(timezone.utc) >= datetime.fromisoformat(budget["expires_at"])
+            if record["status"] in {"ready", "correction_pending"}:
+                if expired:
+                    return self._update(record, event_kind="campaign_duration_expired",
+                        status="failed_safe", needs_tanner={"urgency":"urgent_blocking_flow",
+                        "reason":"campaign_duration_expired", "decision_needed":"create a new exact request"})
+                if (record["status"] == "correction_pending"
+                        and budget["consumed_correction_cycles"] >=
+                            budget["maximum_correction_cycles"]):
+                    return self._update(record, event_kind="correction_budget_exhausted",
+                        status="failed_safe", needs_tanner={"urgency":"urgent_blocking_flow",
+                        "reason":"correction_budget_exhausted", "decision_needed":"create a new exact request"})
+                if record["iteration"] >= budget["maximum_iterations"]:
+                    return self._update(record, event_kind="iteration_budget_exhausted",
+                        status="failed_safe", needs_tanner={"urgency":"urgent_blocking_flow",
+                        "reason":"maximum_iterations_reached", "decision_needed":"create a new exact request"})
+                correction = record.get("pending_correction") if record["status"] == "correction_pending" else None
+                if correction:
+                    revised = dict(budget); revised["consumed_correction_cycles"] += 1
+                    record = self._update(record, event_kind="correction_budget_consumed",
+                        execution_budget_v01=revised); budget = revised
+                return self._start_builder(record, correction)
             if record["status"] == "awaiting_independent_review":
-                record = self.run_wsl_review(campaign_id, adapter=reviewer_adapter)
-            else:
-                record = self._complete_pending_reviewed_application(record)
+                if expired:
+                    return self._update(record, event_kind="campaign_duration_expired",
+                        status="failed_safe", needs_tanner={"urgency":"urgent_blocking_flow",
+                        "reason":"campaign_duration_expired", "decision_needed":"create a new exact request"})
+                try:
+                    return self.run_wsl_review(campaign_id, adapter=reviewer_adapter)
+                except RuntimeError:
+                    failed = self.store.load(campaign_id)
+                    if (failed.get("status") == "failed_safe"
+                            and (failed.get("needs_tanner") or {}).get("reason") ==
+                                "provider_budget_exhausted"):
+                        return failed
+                    raise
+            if record["status"] == "review_accepted_application_pending":
+                if expired:
+                    return self._update(record, event_kind="campaign_expired_before_application",
+                        status="failed_safe", needs_tanner={"urgency":"urgent_blocking_flow",
+                        "reason":"campaign_duration_expired", "decision_needed":"create a new exact request"})
+                return self._complete_pending_reviewed_application(record)
+            if record["status"] == "reviewed_application_completed":
+                return self._complete_pending_reviewed_git(record)
+            return record
+        if record["status"] == "awaiting_independent_review":
+            return self.run_wsl_review(campaign_id, adapter=reviewer_adapter)
+        if record["status"] == "review_accepted_application_pending":
+            return self._complete_pending_reviewed_application(record)
+        if record["status"] == "reviewed_application_completed":
+            return self._complete_pending_reviewed_git(record)
+        return record
+
+    def run_to_terminal(self, campaign_id, *, reviewer_adapter=None):
+        """Compatibility loop over canonical stepwise advancement."""
+        record = self.store.load(campaign_id)
+        remaining_steps = ((record["execution_budget_v01"]["maximum_iterations"] * 4) + 4
+                           if record.get("stepwise_v01") else (MAX_ITERATIONS * 4) + 4)
+        while record["status"] in {"ready", "awaiting_independent_review",
+                                    "review_accepted_application_pending",
+                                    "reviewed_application_completed", "correction_pending"}:
+            if remaining_steps <= 0:
+                return self._update(record, event_kind="stepwise_progress_exhausted",
+                    status="failed_safe", needs_tanner={"urgency":"urgent_blocking_flow",
+                    "reason":"stepwise_progress_exhausted",
+                    "decision_needed":"inspect canonical campaign evidence"})
+            prior_revision = record["state_revision"]
+            record = self.advance_once(campaign_id, reviewer_adapter=reviewer_adapter)
+            remaining_steps -= 1
+            if (record["status"] in {"ready", "awaiting_independent_review",
+                    "review_accepted_application_pending", "reviewed_application_completed",
+                    "correction_pending"}
+                    and record["state_revision"] <= prior_revision):
+                return self._update(record, event_kind="stepwise_progress_stalled",
+                    status="failed_safe", needs_tanner={"urgency":"urgent_blocking_flow",
+                    "reason":"stepwise_progress_stalled",
+                    "decision_needed":"inspect canonical campaign evidence"})
         return record
 
     def cancel(self, campaign_id, *, authenticated_rider):
         if authenticated_rider is not True:
             raise PermissionError("authenticated rider authority is required")
-        record = self.store.load(campaign_id)
-        if record["status"] == "cancelled":
-            return record
-        if record["status"] == "succeeded":
-            raise RuntimeError("completed campaign cannot be cancelled")
-        return self._update(record, event_kind="rider_cancelled_campaign", status="cancelled",
-            cancelled=True, needs_tanner=None, active_builder_task_scope_id=None)
+        with self.store.protected(campaign_id):
+            record = self.store.load(campaign_id)
+            if record["status"] == "cancelled":
+                return record
+            if record["status"] == "succeeded":
+                raise RuntimeError("completed campaign cannot be cancelled")
+            return self._update(record, event_kind="rider_cancelled_campaign", status="cancelled",
+                cancelled=True, needs_tanner=None, active_builder_task_scope_id=None,
+                creates_authority=False, creates_continuing_authority=False)
 
     def presentation(self, campaign_id):
         record = self.store.load(campaign_id)

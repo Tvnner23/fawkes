@@ -1,9 +1,11 @@
 import json
 import subprocess
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from src.runtime.codex_write_builder_adapter import CodexWriteBuilderAdapter
+from src.runtime.worker_exchange import _digest
 from tests import test_autonomy_production_transports as transport_fixture
 
 
@@ -66,6 +68,28 @@ class ReviewedApplicationCallerSeamTests(unittest.TestCase):
         (self.fixture.workspace/"neighbor.txt").write_text("neighbor changed\n")
         with self.assertRaisesRegex(PermissionError,"neighboring|projection drift"):
             adapter.reconcile_reviewed_candidate_application(**arguments)
+
+    def test_canonical_owner_issues_and_resolves_exact_git_eligibility(self):
+        adapter, applied, _arguments = self.completed()
+        immutable={"maximum_duration_seconds":3600,"maximum_worker_turns":2,
+          "maximum_reviewer_turns":4,"maximum_provider_turns":6,
+          "maximum_cost_units":6,"maximum_correction_cycles":2,"maximum_iterations":3,
+          "created_at":datetime.now(timezone.utc).isoformat(),
+          "expires_at":(datetime.now(timezone.utc)+timedelta(hours=1)).isoformat(),
+          "contract":"conservative-provider-reservation-failed-safe-v0.1"}
+        budget={**immutable,"consumed_worker_turns":1,"consumed_reviewer_turns":2,
+          "consumed_provider_turns":3,"consumed_cost_units":3,
+          "consumed_correction_cycles":0,"provider_action":None,"provider_actions":[],
+          "budget_sha256":_digest(immutable)}
+        campaign={"campaign_id":self.fixture.campaign,
+          "status":"review_accepted_application_pending","stepwise_v01":True,
+          "execution_budget_v01":budget}
+        campaign["record_sha256"]=_digest(campaign)
+        with self.assertRaisesRegex(PermissionError,"prohibited"):
+            adapter.retain_git_commit_eligibility(
+              terminal_application_receipt=applied,campaign_record=campaign,
+              commit_operation_id=applied["operation_id"])
+        self.assertFalse(list(adapter.root.rglob("git-eligibility.json")))
 
 
 if __name__ == "__main__":

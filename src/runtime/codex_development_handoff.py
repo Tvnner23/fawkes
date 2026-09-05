@@ -115,7 +115,8 @@ def run_codex_development_handoff(*, instance_id, payload, authenticated_rider,
                                   workspace=ROOT, exchange=None, adapter=None,
                                   now=None, approval_handler=None,
                                   worker_timeout_seconds=180,
-                                  runtime_state_root=None):
+                                  runtime_state_root=None,
+                                  provider_reservation_owner=None):
     """Prepare, send, retain, and present one explicitly selected Codex task."""
     if authenticated_rider is not True:
         raise PermissionError("authenticated rider authority is required")
@@ -209,6 +210,13 @@ def run_codex_development_handoff(*, instance_id, payload, authenticated_rider,
         else:
             arguments["read_only_task"] = task_text
         arguments["invocation_id"] = invocation_id
+        if provider_reservation_owner is not None:
+            reserve = getattr(provider_reservation_owner, "reserve_worker_provider_action", None)
+            if not callable(reserve):
+                raise PermissionError("canonical campaign provider reservation owner is required")
+            reserve(campaign_id=payload.get("campaign_id") or task_scope_id,
+                task_scope_id=task_scope_id, package_id=package["package_id"],
+                package_sha256=package["record_sha256"], invocation_id=invocation_id)
         result = adapter.deliver_production_once(**arguments)
     except (PermissionError, RuntimeError, ValueError, OSError) as exc:
         result = {"status": "failed", "failure_reason": type(exc).__name__,
