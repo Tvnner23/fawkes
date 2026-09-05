@@ -163,6 +163,28 @@ class FawkesAppHandler(BaseHTTPRequestHandler):
             "message": "A current Tanner browser session and session-bound CSRF token are required."}})
         return False
 
+    def _attention_decision_failure(self, status, code, message, attention_id):
+        """Return an exact body-free lifecycle with a decision failure.
+
+        Failure projection never creates or repairs a decision. It lets the
+        browser replace a stale actionable card with the server-owned state for
+        the exact URL identity.
+        """
+        payload = {"error": {"code": code, "message": str(message)},
+                   "creates_authority": False,
+                   "creates_continuing_authority": False}
+        try:
+            lifecycle = self.server.chat_service.development_attention_event(
+                unquote(attention_id))
+            attention = lifecycle.get("attention") if isinstance(lifecycle, dict) else None
+            if (isinstance(attention, dict)
+                    and attention.get("attention_id") == unquote(attention_id)):
+                payload.update({"attention": attention,
+                                "decision": lifecycle.get("decision")})
+        except (KeyError, ValueError, RuntimeError):
+            pass
+        self._json(status, payload)
+
     def _require_auth(self):
         if self._authorized():
             instance_id = getattr(self.server.chat_service, "instance_id", None)
@@ -490,14 +512,17 @@ class FawkesAppHandler(BaseHTTPRequestHandler):
                     unquote(campaign_id), unquote(attention_id), payload.get("choice"),
                     authenticated_rider=True, expected_identity=payload.get("identity")))
             except PermissionError as exc:
-                self._json(403, {"error": {"code": "attention_decision_denied", "message": str(exc)}})
+                self._attention_decision_failure(
+                    403, "attention_decision_denied", exc, attention_id)
             except Exception as exc:
                 from src.runtime.development_attention import AttentionConsumerUnavailable
                 if isinstance(exc, AttentionConsumerUnavailable):
-                    self._json(409, {"error": {"code": exc.code, "message": str(exc)}})
+                    self._attention_decision_failure(
+                        409, exc.code, exc, attention_id)
                     return
                 if isinstance(exc, (KeyError, ValueError, RuntimeError)):
-                    self._json(400, {"error": {"code": "invalid_attention_decision", "message": str(exc)}})
+                    self._attention_decision_failure(
+                        400, "invalid_attention_decision", exc, attention_id)
                     return
                 raise
             return

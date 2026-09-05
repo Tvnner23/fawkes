@@ -1,3 +1,4 @@
+import hashlib
 import json
 import subprocess
 import tempfile
@@ -87,6 +88,9 @@ class DevelopmentAttentionTests(unittest.TestCase):
         self.assertEqual(first["state"], "needs_tanner")
         self.assertIsNone(first["expires_at"])
         self.assertEqual(first["urgency"], "normal")
+        self.assertEqual(first["authority_binding_sha256"], hashlib.sha256(
+            json.dumps(self.store._authority_binding(first), sort_keys=True,
+                       separators=(",", ":")).encode()).hexdigest())
         self.assertIn("section=attention&attention=" + first["attention_id"], first["detail_url"])
 
     def test_attention_detail_url_enforces_local_and_authenticated_remote_origins(self):
@@ -302,6 +306,7 @@ class DevelopmentAttentionTests(unittest.TestCase):
         self.assertEqual(event["urgency"], "urgent_expiring")
         self.assertEqual(event["approval_outcome"], "awaiting_decision")
         self.assertFalse(event["creates_authority"])
+        self.assertFalse(event["creates_continuing_authority"])
         expired = self.store.refresh_expiration(event["attention_id"],
             now=datetime.fromisoformat(event["expires_at"]) + timedelta(seconds=1))
         self.assertEqual(expired["state"], "expired")

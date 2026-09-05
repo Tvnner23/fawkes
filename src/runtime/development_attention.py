@@ -415,7 +415,11 @@ class DevelopmentAttentionStore:
             "consumer_binding": consumer_binding,
             "approval_outcome": "awaiting_decision",
             "detail_url": canonical_detail,
-            "decision_id": None, "acknowledged": False, "creates_authority": False}
+            "decision_id": None, "acknowledged": False,
+            "creates_authority": False, "creates_continuing_authority": False}
+        # The UI receives this server-owned digest as an external anchor for
+        # the exact authority tuple it displayed. It is not itself authority.
+        event["authority_binding_sha256"] = _digest(self._authority_binding(event))
         event["record_sha256"] = _digest(event)
         self.events.mkdir(parents=True, exist_ok=True)
         _write_json_atomic(path, event)

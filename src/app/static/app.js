@@ -38,6 +38,9 @@ const testProbePreviews = {};
 let developerSection = 'observations';
 let requestedAttentionId = null;
 let exactAttentionState = null;
+// One browser-local lifecycle per canonical Attention identity. Exact-link and
+// embedded campaign projections must observe the same in-flight decision.
+const attentionSubmissions = new Map();
 let exactAttentionLoadGeneration = 0;
 let campaignPoll = null;
 let testCenterPoll = null;
@@ -669,9 +672,53 @@ async function request(url, options = {}) {
   if (!response.ok) {
     const error = new Error((data.error && data.error.message) || 'Fawkes is unavailable right now.');
     error.status = response.status; error.code = data.error && data.error.code;
+    error.payload = data;
     throw error;
   }
   return data;
+}
+
+function canonicalAttentionIdentity(attention) {
+  const binding=attention.protocol_binding||{};
+  return {attention_id:attention.attention_id,campaign_id:attention.campaign_id,invocation_id:attention.invocation_id,rider_id:binding.rider_id||'tanner',recipient_sha256:binding.recipient_sha256||null,approval_binding_kind:binding.approval_binding_kind||null,approval_binding_sha256:binding.approval_binding_sha256||null,review_package_id:binding.review_package_id||null,review_package_record_sha256:binding.review_package_record_sha256||null,reviewer_worker_id:binding.reviewer_worker_id||null,reviewer_identity_sha256:binding.reviewer_identity_sha256||null,reviewer_invocation_id:binding.reviewer_invocation_id||null,candidate_snapshot_id:binding.candidate_snapshot_id||null,candidate_record_sha256:binding.candidate_record_sha256||null,mutation_digest_sha256:binding.mutation_digest_sha256||binding.workspace_changes_sha256||null,exact_change_evidence_sha256:binding.exact_change_evidence_sha256||null,authorized_scope_sha256:binding.authorized_scope_sha256||binding.allowed_scope_sha256||null,method:binding.method||null,item_id:binding.item_id||null,action_digest:binding.approved_action_sha256||null,protocol_binding_sha256:attention.protocol_binding_sha256||null,expires_at:attention.expires_at||null,decision_nonce:attention.decision_nonce||null};
+}
+
+function canonicalAttentionIdentityMatches(attention, expected, expectedAuthorityBindingSha256) {
+  if (!attention || !expected) return false;
+  return JSON.stringify(canonicalAttentionIdentity(attention)) === JSON.stringify(expected)
+    && typeof expectedAuthorityBindingSha256 === 'string'
+    && attention.authority_binding_sha256 === expectedAuthorityBindingSha256;
+}
+
+function canonicalDecisionIdentityMatches(decision, expected, expectedAuthorityBindingSha256, choice) {
+  if (!decision || decision.attention_id !== expected.attention_id
+      || decision.campaign_id !== expected.campaign_id
+      || decision.invocation_id !== expected.invocation_id
+      || decision.choice !== choice
+      || decision.protocol_binding_sha256 !== expected.protocol_binding_sha256
+      || decision.authority_binding_sha256 !== expectedAuthorityBindingSha256
+      || typeof decision.decision_id !== 'string' || !decision.decision_id
+      || typeof decision.record_sha256 !== 'string' || !decision.record_sha256
+      || decision.creates_continuing_authority !== false) return false;
+  const binding=decision.authority_binding||{};
+  return JSON.stringify(binding) === JSON.stringify(expected);
+}
+
+function requireCanonicalDecisionResult(result, expected, expectedAuthorityBindingSha256, choice) {
+  if (!result || !canonicalAttentionIdentityMatches(result.attention, expected, expectedAuthorityBindingSha256)
+      || !canonicalDecisionIdentityMatches(result.decision, expected, expectedAuthorityBindingSha256, choice)) {
+    throw Object.assign(new Error('Fawkes returned a mismatched decision lifecycle. The page was refreshed without trusting it.'),
+      {code:'decision_response_mismatch',status:409});
+  }
+  return result;
+}
+
+function canonicalFailureDecisionResult(result, expected, expectedAuthorityBindingSha256, choice) {
+  if (!result || !canonicalAttentionIdentityMatches(
+      result.attention, expected, expectedAuthorityBindingSha256)) return null;
+  if (result.decision != null && !canonicalDecisionIdentityMatches(
+      result.decision, expected, expectedAuthorityBindingSha256, choice)) return null;
+  return {attention:result.attention,decision:result.decision||null};
 }
 
 function clarificationViewModel(value) {
@@ -1115,6 +1162,15 @@ function renderDeveloperSection() {
     const attention = exactAttentionState && exactAttentionState.attention;
     const attentionDecision = exactAttentionState && exactAttentionState.decision;
     if (!attention) { card.append(element('h2', '', 'Loading exact Tanner decision…')); developerContent.append(card); return; }
+    const exactAttentionSubmission=attentionSubmissions.get(attention.attention_id)||null;
+    if (exactAttentionSubmission && exactAttentionSubmission.attention_id === attention.attention_id) {
+      const status=exactAttentionSubmission.status;
+      const heading=status==='submitting'?'Submitting exact decision…':status==='refreshing'?'Refreshing expired request…':status==='failed'?'Decision submission failed':status==='resolved'?'Decision recorded':'Decision status';
+      const summary=status==='failed'?`${exactAttentionSubmission.code||'decision_submission_failed'} (${exactAttentionSubmission.http_status||'no HTTP status'}): ${exactAttentionSubmission.message}`:status==='submitting'?'Fawkes is validating this exact identity. Do not submit it again.':status==='refreshing'?'The displayed deadline elapsed. Controls are closed while canonical state is reloaded.':'The browser received the canonical resolved lifecycle.';
+      const submission=element('section',status==='failed'?'attention-urgent':'attention-summary');
+      submission.append(element('h2','',heading),element('p','attention-submission-status',summary));
+      card.append(submission);
+    }
     if (attention.state !== 'needs_tanner') {
       card.append(element('h2', '', 'This attention request is already resolved'));
       const outcome=(attentionDecision&&attentionDecision.lifecycle_state)||attention.approval_outcome||attention.state;
@@ -1129,7 +1185,7 @@ function renderDeveloperSection() {
       const deadline=element('section','attention-urgent');
       const timezone=Intl.DateTimeFormat().resolvedOptions().timeZone||'local timezone';
       const remaining=element('p','attention-countdown');
-      const updateRemaining=()=>{const seconds=Math.max(0,Math.ceil((Date.parse(attention.expires_at)-Date.now())/1000));const minutes=Math.floor(seconds/60);remaining.textContent=`Time remaining: ${minutes}m ${seconds%60}s`;if(seconds>0)window.setTimeout(updateRemaining,1000);};
+      const updateRemaining=()=>{const deadlineMilliseconds=Date.parse(attention.expires_at);if(!Number.isFinite(deadlineMilliseconds)){remaining.textContent='Time remaining unavailable';return;}const seconds=Math.max(0,Math.ceil((deadlineMilliseconds-Date.now())/1000));const minutes=Math.floor(seconds/60);remaining.textContent=`Time remaining: ${minutes}m ${seconds%60}s`;if(seconds>0){window.setTimeout(updateRemaining,Math.min(1000,Math.max(1,deadlineMilliseconds-Date.now())));return;}const current=attentionSubmissions.get(attention.attention_id);if(!current||current.status!=='refreshing'){attentionSubmissions.set(attention.attention_id,{status:'refreshing',attention_id:attention.attention_id});renderDeveloperSection();window.setTimeout(()=>loadExactAttention({preserveSubmission:true}),0);}};
       deadline.append(element('h2','',`URGENT — TANNER DECISION REQUIRED BEFORE ${dateLabel(attention.expires_at)} (${timezone})`),remaining,
         element('p','',`Why this deadline exists: ${attention.expiration_reason||'The exact action has a bounded safety lifetime.'}`),
         element('p','',`If Tanner does nothing: ${attention.expiration_effect||'The request expires and fails closed.'}`),
@@ -1142,6 +1198,11 @@ function renderDeveloperSection() {
       card.append(element('p', '', attention.consumer_state === 'unavailable' || attention.actionable === false ? 'The exact consumer is no longer verifiably live or safely resumable. Fawkes did not record a decision or grant.' : 'The displayed decision period expired. Fawkes did not record an approval.'));
       card.append(element('p', '', 'Historical evidence remains available below. No decision controls are offered; a still-required action needs a new exact request.'));
       const inactiveDetails=document.createElement('details');inactiveDetails.append(element('summary','','Historical technical evidence'),element('pre','',JSON.stringify({campaign_id:attention.campaign_id,invocation_id:attention.invocation_id,attention_id:attention.attention_id,consumer_state:attention.consumer_state,stored_consumer_state:attention.stored_consumer_state,consumer_unavailable_reason:attention.consumer_unavailable_reason,protocol_binding:attention.protocol_binding},null,2)));card.append(inactiveDetails);
+      developerContent.append(card); return;
+    }
+    if (typeof attention.authority_binding_sha256 !== 'string' || !attention.authority_binding_sha256) {
+      card.append(element('h2', '', 'This approval is unavailable'));
+      card.append(element('p', '', 'The canonical Attention authority-binding identity is missing. No decision controls are offered.'));
       developerContent.append(card); return;
     }
     const rawAction=String(attention.blocked_action||'');
@@ -1167,10 +1228,12 @@ function renderDeveloperSection() {
     [['approve_once','Approve Once','Allow only this exact action one time. No continuing authority.'],
      ['deny','Deny','Reject only this action. No authority is granted.'],
      ['cancel_campaign','Cancel Campaign','Stop this campaign safely. No authority is granted.']].forEach(([choice,label,consequence]) => {
-      const immutableIdentity={attention_id:attention.attention_id,campaign_id:attention.campaign_id,invocation_id:attention.invocation_id,rider_id:(attention.protocol_binding||{}).rider_id||'tanner',recipient_sha256:(attention.protocol_binding||{}).recipient_sha256||null,approval_binding_kind:(attention.protocol_binding||{}).approval_binding_kind||null,approval_binding_sha256:(attention.protocol_binding||{}).approval_binding_sha256||null,review_package_id:(attention.protocol_binding||{}).review_package_id||null,review_package_record_sha256:(attention.protocol_binding||{}).review_package_record_sha256||null,reviewer_worker_id:(attention.protocol_binding||{}).reviewer_worker_id||null,reviewer_identity_sha256:(attention.protocol_binding||{}).reviewer_identity_sha256||null,reviewer_invocation_id:(attention.protocol_binding||{}).reviewer_invocation_id||null,candidate_snapshot_id:(attention.protocol_binding||{}).candidate_snapshot_id||null,candidate_record_sha256:(attention.protocol_binding||{}).candidate_record_sha256||null,mutation_digest_sha256:(attention.protocol_binding||{}).mutation_digest_sha256||(attention.protocol_binding||{}).workspace_changes_sha256||null,exact_change_evidence_sha256:(attention.protocol_binding||{}).exact_change_evidence_sha256||null,authorized_scope_sha256:(attention.protocol_binding||{}).authorized_scope_sha256||(attention.protocol_binding||{}).allowed_scope_sha256||null,method:(attention.protocol_binding||{}).method||null,item_id:(attention.protocol_binding||{}).item_id||null,action_digest:(attention.protocol_binding||{}).approved_action_sha256||null,protocol_binding_sha256:attention.protocol_binding_sha256||null,expires_at:attention.expires_at||null,decision_nonce:attention.decision_nonce||null};
+      const immutableIdentity=canonicalAttentionIdentity(attention);
+      const immutableAuthorityBindingSha256=attention.authority_binding_sha256;
       const box=element('div','attention-choice'); const button=element('button','',label); button.type='button';
+      button.disabled=Boolean(exactAttentionSubmission&&exactAttentionSubmission.attention_id===attention.attention_id&&['submitting','refreshing','failed','resolved'].includes(exactAttentionSubmission.status));
       const humanTarget=qualificationLabel||'this Fawkes request';
-      button.addEventListener('click', async()=>{if(window.confirm&&!window.confirm(`${label} for ${humanTarget}\n\n${consequence}`))return;button.disabled=true; try{const result=await request(`/api/development/codex-campaigns/${encodeURIComponent(immutableIdentity.campaign_id)}/attention/${encodeURIComponent(immutableIdentity.attention_id)}/decision`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({choice,identity:immutableIdentity})});exactAttentionState=result;renderDeveloperSection();}catch(error){showError(error.message);button.disabled=false;}});
+      button.addEventListener('click', async()=>{if(window.confirm&&!window.confirm(`${label} for ${humanTarget}\n\n${consequence}`))return;const current=attentionSubmissions.get(immutableIdentity.attention_id);if(current&&['submitting','refreshing','failed','resolved'].includes(current.status))return;attentionSubmissions.set(immutableIdentity.attention_id,{status:'submitting',attention_id:immutableIdentity.attention_id,choice});renderDeveloperSection();try{const result=requireCanonicalDecisionResult(await request(`/api/development/codex-campaigns/${encodeURIComponent(immutableIdentity.campaign_id)}/attention/${encodeURIComponent(immutableIdentity.attention_id)}/decision`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({choice,identity:immutableIdentity})}),immutableIdentity,immutableAuthorityBindingSha256,choice);exactAttentionState=result;attentionSubmissions.set(immutableIdentity.attention_id,{status:'resolved',attention_id:immutableIdentity.attention_id,choice});renderDeveloperSection();}catch(error){attentionSubmissions.set(immutableIdentity.attention_id,{status:'failed',attention_id:immutableIdentity.attention_id,choice,code:error.code||'decision_submission_failed',http_status:error.status||null,message:error.message});const failureLifecycle=canonicalFailureDecisionResult(error.payload,immutableIdentity,immutableAuthorityBindingSha256,choice);if(failureLifecycle){exactAttentionState=failureLifecycle;renderDeveloperSection();}else{await loadExactAttention({preserveSubmission:true});}showError(error.message);}});
       box.append(button,element('p','meta',consequence)); choices.append(box);
     });
     card.append(choices, element('p','meta','Notification delivery and opening this page grant no authority. Only an authenticated choice above can decide this exact request.'));
@@ -1221,7 +1284,14 @@ function renderDeveloperSection() {
       });
       if (record.needs_tanner) card.append(element('p', '', `Needs Tanner: ${readable(record.needs_tanner.reason)}`));
       const attention = (developerData.attention || []).find(item => item.campaign_id === record.campaign_id && item.state === 'needs_tanner');
-      if (attention) {
+      const embeddedSubmission=attention ? (attentionSubmissions.get(attention.attention_id)||null) : null;
+      if (embeddedSubmission) {
+        const heading=embeddedSubmission.status==='submitting'?'Submitting exact decision…':embeddedSubmission.status==='failed'?'Decision submission failed':'Decision recorded';
+        const summary=embeddedSubmission.status==='failed'?`${embeddedSubmission.code||'decision_submission_failed'} (${embeddedSubmission.http_status||'no HTTP status'}): ${embeddedSubmission.message}`:embeddedSubmission.status==='submitting'?'Fawkes is validating this exact identity. All decision controls are closed.':'The canonical exact decision was recorded. No further decision is available.';
+        const submission=element('section',embeddedSubmission.status==='failed'?'attention-urgent':'attention-summary');
+        submission.append(element('h2','',heading),element('p','attention-submission-status',summary));card.append(submission);
+      }
+      if (attention && !embeddedSubmission) {
         const decision = element('article', 'evidence attention-decision-card');
         decision.id = `attention-${attention.attention_id}`;
         decision.append(element('h2', '', 'Tanner: Fawkes is paused and needs your decision'));
@@ -1232,15 +1302,24 @@ function renderDeveloperSection() {
           resources: attention.resources, requested_authority: attention.requested_authority,
           reversible: attention.reversible, expires_at: attention.expires_at}, null, 2)));
         const choices = element('div', 'development-actions');
-        const embeddedIdentity={attention_id:attention.attention_id,campaign_id:attention.campaign_id,invocation_id:attention.invocation_id,method:(attention.protocol_binding||{}).method||null,item_id:(attention.protocol_binding||{}).item_id||null,action_digest:(attention.protocol_binding||{}).approved_action_sha256||null,protocol_binding_sha256:attention.protocol_binding_sha256||null};
+        const embeddedIdentity=canonicalAttentionIdentity(attention);
+        const embeddedAuthorityBindingSha256=attention.authority_binding_sha256;
+        if (typeof embeddedAuthorityBindingSha256 !== 'string' || !embeddedAuthorityBindingSha256) {
+          decision.append(element('p', 'attention-urgent', 'The canonical Attention authority-binding identity is missing. No decision controls are offered.'));
+          card.append(decision);
+          return;
+        }
         [['approve_once','Approve Once'],
          ['deny','Deny'],
          ['cancel_campaign','Cancel Campaign']].forEach(([choice,label]) => {
           const button = element('button', '', label); button.type = 'button';
-          button.addEventListener('click', async () => { button.disabled = true;
-            try { await request(`/api/development/codex-campaigns/${encodeURIComponent(embeddedIdentity.campaign_id)}/attention/${encodeURIComponent(embeddedIdentity.attention_id)}/decision`,
-              {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({choice,identity:embeddedIdentity})}); await loadDeveloper(); }
-            catch (error) { showError(error.message); button.disabled = false; }
+          button.addEventListener('click', async () => {
+            if (attentionSubmissions.has(embeddedIdentity.attention_id)) return;
+            attentionSubmissions.set(embeddedIdentity.attention_id,{status:'submitting',attention_id:embeddedIdentity.attention_id,campaign_id:embeddedIdentity.campaign_id,choice});
+            renderDeveloperSection();
+            try { requireCanonicalDecisionResult(await request(`/api/development/codex-campaigns/${encodeURIComponent(embeddedIdentity.campaign_id)}/attention/${encodeURIComponent(embeddedIdentity.attention_id)}/decision`,
+              {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({choice,identity:embeddedIdentity})}),embeddedIdentity,embeddedAuthorityBindingSha256,choice);attentionSubmissions.set(embeddedIdentity.attention_id,{status:'resolved',attention_id:embeddedIdentity.attention_id,campaign_id:embeddedIdentity.campaign_id,choice});await loadDeveloper(); }
+            catch (error) { attentionSubmissions.set(embeddedIdentity.attention_id,{status:'failed',attention_id:embeddedIdentity.attention_id,campaign_id:embeddedIdentity.campaign_id,choice,code:error.code||'decision_submission_failed',http_status:error.status||null,message:error.message});await loadDeveloper();showError(error.message); }
           }); choices.append(button);
         });
         decision.append(element('p', 'meta', 'No choice grants continuing authority. Notification delivery never counts as approval.'));
@@ -1358,8 +1437,8 @@ async function verifyBuildIdentity() {
     developerBuild.classList.toggle('auth-error', serverId !== pageId);
   } catch (error) { developerBuild.textContent = `Build identity unavailable: ${error.message}`; }
 }
-async function loadExactAttention() {
-  if (!requestedAttentionId) { exactAttentionState=null; renderDeveloperSection(); return; }
+async function loadExactAttention(options={}) {
+  if (!requestedAttentionId) { exactAttentionState=null;renderDeveloperSection(); return; }
   const requested = requestedAttentionId; const generation = ++exactAttentionLoadGeneration;
   exactAttentionState={loading:true}; renderDeveloperSection();
   try {
@@ -1367,6 +1446,8 @@ async function loadExactAttention() {
     if (generation !== exactAttentionLoadGeneration || requested !== requestedAttentionId) return;
     if (!result.attention || result.attention.attention_id !== requested) throw new Error('Fawkes returned a different attention identity. No decision controls were shown.');
     exactAttentionState = result;
+    const submission=attentionSubmissions.get(requested);
+    if(submission&&submission.status==='refreshing')attentionSubmissions.set(requested,{...submission,status:result.attention.state==='needs_tanner'?'failed':'resolved',code:result.attention.state==='needs_tanner'?'deadline_refresh_inconclusive':null,message:result.attention.state==='needs_tanner'?'The server still reports this request as pending after its displayed deadline. Controls remain closed.':null});
   }
   catch (error) { if(generation!==exactAttentionLoadGeneration||requested!==requestedAttentionId)return; exactAttentionState={error:error.status===404?'This attention ID is unknown or no longer retained.':error.message}; }
   renderDeveloperSection();

@@ -57,6 +57,42 @@ class FawkesAppClientTests(unittest.TestCase):
         self.assertIn("AttentionConsumerUnavailable", server)
         self.assertIn('"code": exc.code', server)
 
+    def test_attention_submission_resolves_success_failure_and_crossed_expiry(self):
+        import os
+        for scenario in ("success", "stale-submit", "crossing-expiry",
+                         "response-substitution", "decision-substitution",
+                         "decision-omission", "decision-inner-neighbor",
+                         "decision-extra-binding", "decision-binding-digest",
+                         "failure-decision-substitution", "failure-decision-omission",
+                         "failure-decision-inner-neighbor", "failure-decision-extra-binding",
+                         "failure-decision-binding-digest",
+                         "embedded-success", "embedded-stale",
+                         "embedded-concurrent", "cross-projection-concurrent"):
+            with self.subTest(scenario=scenario):
+                result = subprocess.run(
+                    ["node", "tests/js/app_attention_submission_harness.js"],
+                    cwd=ROOT, text=True, capture_output=True, timeout=10,
+                    env={**os.environ,
+                         "FAWKES_ATTENTION_SUBMISSION_SCENARIO": scenario},
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("attention-submission-ok " + scenario, result.stdout)
+
+    def test_failed_decision_response_is_bound_to_exact_lifecycle(self):
+        source = (ROOT / "src/app/static/app.js").read_text()
+        server = (ROOT / "src/app/server.py").read_text()
+        self.assertIn("error.payload = data", source)
+        self.assertIn("Decision submission failed", source)
+        self.assertIn("Refreshing expired request", source)
+        self.assertIn("canonicalAttentionIdentity(attention)", source)
+        self.assertIn("const attentionSubmissions = new Map()", source)
+        self.assertIn("JSON.stringify(binding) === JSON.stringify(expected)", source)
+        self.assertIn("decision.authority_binding_sha256 !== expectedAuthorityBindingSha256", source)
+        self.assertIn("function canonicalFailureDecisionResult", source)
+        self.assertIn("const failureLifecycle=canonicalFailureDecisionResult", source)
+        self.assertIn("_attention_decision_failure", server)
+        self.assertIn('attention.get("attention_id") == unquote(attention_id)', server)
+
     def test_authentication_uses_protected_cookie_session_and_preserves_deep_link(self):
         source = (ROOT / "src/app/static/app.js").read_text()
         server = (ROOT / "src/app/server.py").read_text()
@@ -76,7 +112,8 @@ class FawkesAppClientTests(unittest.TestCase):
 
     def test_attention_decision_submission_is_immutable_tuple_bound(self):
         source = (ROOT / "src/app/static/app.js").read_text()
-        self.assertIn("const immutableIdentity={attention_id:attention.attention_id", source)
+        self.assertIn("const immutableIdentity=canonicalAttentionIdentity(attention)", source)
+        self.assertIn("function canonicalAttentionIdentity(attention)", source)
         self.assertIn("identity:immutableIdentity", source)
         for field in (
             "approval_binding_kind", "approval_binding_sha256", "review_package_id",

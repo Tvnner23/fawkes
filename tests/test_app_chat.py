@@ -1,5 +1,6 @@
 import unittest
 import base64
+import json
 import tempfile
 from io import BytesIO
 from email.message import Message
@@ -363,6 +364,57 @@ class FawkesAppHTTPTests(unittest.TestCase):
             handler.headers.replace_header("Cookie", f"{SESSION_COOKIE}=wrong")
             handler.headers.replace_header("X-Fawkes-CSRF-Token", csrf)
             self.assertFalse(handler._require_attention_decision_auth())
+
+    def test_failed_attention_decision_returns_exact_canonical_lifecycle(self):
+        handler = self._handler()
+        handler.path = ("/api/development/codex-campaigns/campaign-a/attention/"
+                        "attention-a/decision")
+        handler._require_attention_decision_auth = Mock(return_value=True)
+        handler.server.chat_service = Mock()
+        handler.server.chat_service.decide_development_attention.side_effect = RuntimeError(
+            "attention request is stale")
+        handler.server.chat_service.development_attention_event.return_value = {
+            "attention": {"attention_id": "attention-a", "campaign_id": "campaign-a",
+                          "state": "expired", "decision_id": None,
+                          "creates_authority": False,
+                          "creates_continuing_authority": False},
+            "decision": None, "creates_authority": False,
+        }
+        body = json.dumps({"choice": "approve_once", "identity": {
+            "attention_id": "attention-a"}}).encode()
+        handler.headers["Content-Length"] = str(len(body))
+        handler.rfile = BytesIO(body)
+        handler._json = Mock()
+
+        handler.do_POST()
+
+        status, payload = handler._json.call_args.args
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["error"], {
+            "code": "invalid_attention_decision",
+            "message": "attention request is stale",
+        })
+        self.assertEqual(payload["attention"]["attention_id"], "attention-a")
+        self.assertEqual(payload["attention"]["state"], "expired")
+        self.assertIsNone(payload["decision"])
+        self.assertFalse(payload["creates_authority"])
+        self.assertFalse(payload["creates_continuing_authority"])
+
+    def test_failed_attention_decision_never_projects_neighboring_lifecycle(self):
+        handler = self._handler()
+        handler.server.chat_service = Mock()
+        handler.server.chat_service.development_attention_event.return_value = {
+            "attention": {"attention_id": "attention-neighbor"}, "decision": None}
+        handler._json = Mock()
+
+        handler._attention_decision_failure(
+            409, "attention_consumer_unavailable", "consumer unavailable", "attention-a")
+
+        payload = handler._json.call_args.args[1]
+        self.assertNotIn("attention", payload)
+        self.assertNotIn("decision", payload)
+        self.assertFalse(payload["creates_authority"])
+        self.assertFalse(payload["creates_continuing_authority"])
 
     def test_post_logout_requires_csrf_and_durably_invalidates_session(self):
         with tempfile.TemporaryDirectory() as directory:

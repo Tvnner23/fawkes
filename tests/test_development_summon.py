@@ -84,7 +84,8 @@ class DevelopmentSummonTests(unittest.TestCase):
             self.assertNotIn(forbidden, board.lower())
         self.assertIn("exact_worker_bodies_remain_in_worker_exchange", board)
         self.assertIn("hidden_chain_of_thought_exposed === false", board)
-        self.assertIn("const immutableIdentity={attention_id:attention.attention_id", javascript)
+        self.assertIn("const immutableIdentity=canonicalAttentionIdentity(attention)", javascript)
+        self.assertIn("function canonicalAttentionIdentity(attention)", javascript)
         self.assertIn("body:JSON.stringify({choice,identity:immutableIdentity})", javascript)
 
     @patch("src.runtime.production_control.subprocess.run")
