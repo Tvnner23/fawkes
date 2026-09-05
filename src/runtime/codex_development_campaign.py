@@ -484,6 +484,46 @@ class CodexDevelopmentCampaign:
             raise PermissionError("Worker Attention action identity is missing or mismatched")
         return {**protocol, **expected}
 
+    def _validated_review_attention_binding(self, record, binding, worker, invocation_id):
+        """Validate a Reviewer Attention tuple against canonical campaign records."""
+        if not isinstance(binding, dict):
+            raise PermissionError("Reviewer Attention lineage is missing")
+        review_request = next((item for item in reversed(record.get("review_requests", []))
+                               if item.get("iteration") == record.get("iteration")), None)
+        run = record.get("builder_runs", [])[-1] if record.get("builder_runs") else {}
+        retention = run.get("candidate_retention_receipt") or {}
+        snapshot = retention.get("candidate_snapshot") or run.get("candidate_snapshot") or {}
+        package_id = (review_request or {}).get("package_id")
+        try:
+            package = self.exchange._load("packages", package_id)
+        except Exception as exc:
+            raise PermissionError("Reviewer Attention package is unavailable") from exc
+        canonical = {
+            "approval_binding_kind": "independent_review_provider",
+            "campaign_id": record["campaign_id"],
+            "review_package_id": package_id,
+            "review_package_record_sha256": package.get("record_sha256"),
+            "candidate_snapshot_id": snapshot.get("candidate_snapshot_id"),
+            "candidate_record_sha256": snapshot.get("record_sha256"),
+            "mutation_digest_sha256": retention.get("mutation_manifest_sha256"),
+            "exact_change_evidence_sha256": retention.get(
+                "exact_change_evidence_sha256"),
+            "authorized_scope_sha256": retention.get("allowed_scope_sha256"),
+            "reviewer_worker_id": worker.get("worker_id"),
+            "reviewer_identity_sha256": _digest(worker),
+            "reviewer_invocation_id": invocation_id,
+        }
+        if (record.get("status") != "awaiting_independent_review"
+                or package.get("recipient", {}).get("worker_id") != worker.get("worker_id")
+                or package.get("recipient", {}).get("role") != worker.get("role")
+                or any(not isinstance(canonical.get(key), str) or not canonical[key]
+                       for key in canonical)
+                or any(binding.get(key) != value for key, value in canonical.items())
+                or binding.get("recipient_sha256") != canonical["reviewer_identity_sha256"]
+                or binding.get("approval_binding_sha256") != _digest(canonical)):
+            raise PermissionError("Reviewer Attention lineage is missing or mismatched")
+        return binding
+
     @staticmethod
     def _event(kind, detail=None):
         value = {"event_id": f"campaign-event-{uuid.uuid4()}", "kind": kind,
@@ -601,8 +641,12 @@ class CodexDevelopmentCampaign:
             raise RuntimeError("terminal campaign cannot request new authority")
         binding = dict(protocol_binding or {})
         binding.setdefault("rider_id", "tanner")
-        binding.setdefault("recipient_sha256", _digest(worker))
-        binding.setdefault("authorized_scope_sha256", _digest(record["allowed_scope"]))
+        if binding.get("approval_binding_kind") == "independent_review_provider":
+            self._validated_review_attention_binding(
+                record, binding, worker, invocation_id)
+        else:
+            binding.setdefault("recipient_sha256", _digest(worker))
+            binding.setdefault("authorized_scope_sha256", _digest(record["allowed_scope"]))
         event = self.attention_store.create(
             campaign_id=campaign_id, invocation_id=invocation_id, worker=worker,
             kind=kind, blocked_action=blocked_action, why_required=why_required,

@@ -97,6 +97,49 @@ def _now(): return datetime.now(timezone.utc).isoformat()
 def _sha(data): return hashlib.sha256(data).hexdigest()
 
 
+def _review_attention_binding(*, package, transport_authority, campaign_id,
+                              candidate_snapshot_id, reviewer, reviewer_invocation_id):
+    """Derive Attention lineage only from canonical retained review records."""
+    sections = {item.get("section_id"): item for item in package.get("included_sections", [])
+                if isinstance(item, dict)}
+    try:
+        snapshot = json.loads(sections["candidate-snapshot"]["content"])
+        retention = json.loads(sections["candidate-retention-receipt"]["content"])
+    except (KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise PermissionError("review Attention evidence is incomplete") from exc
+    if (snapshot.get("candidate_snapshot_id") != candidate_snapshot_id
+            or not isinstance(snapshot.get("record_sha256"), str)
+            or retention.get("record_sha256") != _digest(
+                {key: value for key, value in retention.items() if key != "record_sha256"})
+            or (retention.get("candidate_snapshot") or {}).get("candidate_snapshot_id")
+                != candidate_snapshot_id
+            or transport_authority.get("candidate_record_sha256")
+                != (retention.get("candidate_snapshot") or {}).get("record_sha256")
+            or transport_authority.get("mutation_manifest_sha256")
+                != retention.get("mutation_manifest_sha256")
+            or transport_authority.get("exact_change_evidence_sha256")
+                != retention.get("exact_change_evidence_sha256")
+            or transport_authority.get("allowed_scope_sha256")
+                != retention.get("allowed_scope_sha256")
+            or transport_authority.get("candidate_retention_receipt_sha256")
+                != retention.get("record_sha256")):
+        raise PermissionError("review Attention evidence lineage is mismatched")
+    return {
+        "approval_binding_kind": "independent_review_provider",
+        "campaign_id": campaign_id,
+        "review_package_id": package["package_id"],
+        "review_package_record_sha256": package["record_sha256"],
+        "candidate_snapshot_id": candidate_snapshot_id,
+        "candidate_record_sha256": retention["candidate_snapshot"]["record_sha256"],
+        "mutation_digest_sha256": retention["mutation_manifest_sha256"],
+        "exact_change_evidence_sha256": retention["exact_change_evidence_sha256"],
+        "authorized_scope_sha256": retention["allowed_scope_sha256"],
+        "reviewer_worker_id": reviewer["worker_id"],
+        "reviewer_identity_sha256": _digest(reviewer),
+        "reviewer_invocation_id": reviewer_invocation_id,
+    }
+
+
 _ARTIFACT_BEGIN = "\n----- BEGIN EXACT UTF-8 ARTIFACT -----\n"
 _ARTIFACT_END = "\n----- END EXACT UTF-8 ARTIFACT -----"
 
@@ -289,8 +332,11 @@ def prepare_wsl_review_package(*, exchange, campaign_record, candidate_snapshot,
     transport = {**package_authority, "adapter_id": WSL_ADAPTER_ID, "package_id": package["package_id"],
         "recipient_environment_id": WSL_ENVIRONMENT_ID, "campaign_id": campaign_record["campaign_id"],
         "builder_return_report_id": builder["report_id"], "builder_return_sha256": builder["record_sha256"],
-        "candidate_snapshot_id": snapshot_id, "builder_package_id": run["package_id"],
+        "candidate_snapshot_id": snapshot_id,
+        "candidate_record_sha256": retention["candidate_snapshot"]["record_sha256"],
+        "builder_package_id": run["package_id"],
         "mutation_manifest_sha256": retention["mutation_manifest_sha256"],
+        "exact_change_evidence_sha256": retention["exact_change_evidence_sha256"],
         "allowed_scope_sha256": retention["allowed_scope_sha256"],
         "candidate_retention_receipt_sha256": retention["record_sha256"],
         "adapter_promotion_reference": WSL_PROMOTION_RECORD["promotion_id"]}
@@ -370,7 +416,8 @@ class WslCodexReviewAdapter:
         binding = {"adapter_id": WSL_ADAPTER_ID, "package_id": package_id,
             "recipient_environment_id": WSL_ENVIRONMENT_ID, "campaign_id": campaign_id,
             "builder_return_report_id": builder_return_report_id, "builder_return_sha256": builder["record_sha256"],
-            "candidate_snapshot_id": candidate_snapshot_id}
+            "candidate_snapshot_id": candidate_snapshot_id,
+            "candidate_record_sha256": transport_authority.get("candidate_record_sha256")}
         if _production_use:
             binding["adapter_promotion_reference"] = WSL_PROMOTION_RECORD["promotion_id"]
         if any(transport_authority.get(k) != v for k, v in binding.items()):
@@ -388,6 +435,12 @@ class WslCodexReviewAdapter:
         provider_evidence = _provider_review_projection(exported)
         package_sha = _sha(exported); directory = self.root / package_id
         invocation_id = require_id(invocation_id or f"wsl-review-{uuid.uuid4()}", "invocation_id")
+        review_recipient = {"worker_id": recipient["worker_id"],
+            "role": recipient["role"], "environment_id": WSL_ENVIRONMENT_ID}
+        approval_binding = _review_attention_binding(package=package,
+            transport_authority=transport_authority, campaign_id=campaign_id,
+            candidate_snapshot_id=candidate_snapshot_id, reviewer=review_recipient,
+            reviewer_invocation_id=invocation_id)
         if directory.exists(): raise RuntimeError("review request was already attempted; blind replay forbidden")
         directory.mkdir(parents=True)
         request = {"schema_version": 1, "record_type": "wsl_codex_review_request",
@@ -395,8 +448,9 @@ class WslCodexReviewAdapter:
             "instance_id": package["instance_id"], "campaign_id": campaign_id,
             "task_scope_id": package["task_scope_id"], "package_id": package_id,
             "package_sha256": package_sha, "builder_return_reference": exact_ref,
-            "candidate_snapshot_id": candidate_snapshot_id, "recipient": {"worker_id": recipient["worker_id"],
-                "role": recipient["role"], "environment_id": WSL_ENVIRONMENT_ID},
+            "candidate_snapshot_id": candidate_snapshot_id, "recipient": review_recipient,
+            "approval_binding": approval_binding,
+            "approval_binding_sha256": _digest(approval_binding),
             "invocation_id": invocation_id, "sandbox": "read-only", "ephemeral": True,
             "candidate_qualified": WSL_ADAPTER_QUALIFIED if _production_use else False,
             "adapter_promoted": WSL_ADAPTER_PROMOTED if _production_use else False,
@@ -426,7 +480,8 @@ class WslCodexReviewAdapter:
                         cwd=snapshot_root, prompt=prompt, output_schema=bound_schema,
                         output_path=output, sandbox="read-only", campaign_id=campaign_id,
                         invocation_id=invocation_id, worker=request["recipient"],
-                        environment=_minimal_environment(), approval_handler=approval_handler)
+                        environment=_minimal_environment(), approval_handler=approval_handler,
+                        approval_binding=approval_binding)
                 else:
                     completed = self.run_process(command, prompt=prompt,
                         environment=_minimal_environment(), timeout=self.timeout_seconds)
@@ -503,6 +558,11 @@ class WslCodexReviewAdapter:
                     campaign_id=campaign_id, builder_return_id=builder_return_report_id,
                     candidate_snapshot_id=candidate_snapshot_id,
                     repair_invocation_id=active_invocation_id, repair_nonce=repair_nonce)
+                repair_approval_binding = _review_attention_binding(package=package,
+                    transport_authority=transport_authority, campaign_id=campaign_id,
+                    candidate_snapshot_id=candidate_snapshot_id,
+                    reviewer=request["recipient"],
+                    reviewer_invocation_id=active_invocation_id)
                 repair_command = [self.codex_binary, "--ask-for-approval", "never", "exec", "--ephemeral",
                     "--ignore-user-config", "--strict-config", "--sandbox", "read-only", "--cd", str(snapshot_root),
                     "--output-schema", str(schema), "--output-last-message", str(repair_output), "-"]
@@ -512,7 +572,8 @@ class WslCodexReviewAdapter:
                             prompt=repair_prompt, output_schema=repair_schema, output_path=repair_output,
                             sandbox="read-only", campaign_id=campaign_id,
                             invocation_id=active_invocation_id, worker=request["recipient"],
-                            environment=_minimal_environment(), approval_handler=approval_handler)
+                            environment=_minimal_environment(), approval_handler=approval_handler,
+                            approval_binding=repair_approval_binding)
                     else:
                         repair_completed = self.run_process(repair_command, prompt=repair_prompt,
                             environment=_minimal_environment(), timeout=self.timeout_seconds)

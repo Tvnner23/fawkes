@@ -78,6 +78,16 @@ class FawkesAppClientTests(unittest.TestCase):
         source = (ROOT / "src/app/static/app.js").read_text()
         self.assertIn("const immutableIdentity={attention_id:attention.attention_id", source)
         self.assertIn("identity:immutableIdentity", source)
+        for field in (
+            "approval_binding_kind", "approval_binding_sha256", "review_package_id",
+            "review_package_record_sha256", "reviewer_worker_id",
+            "reviewer_identity_sha256", "reviewer_invocation_id",
+            "candidate_snapshot_id", "candidate_record_sha256",
+            "mutation_digest_sha256", "exact_change_evidence_sha256",
+            "authorized_scope_sha256", "protocol_binding_sha256",
+            "expires_at", "decision_nonce",
+        ):
+            self.assertIn(f"{field}:", source)
         self.assertIn("protocol_binding_sha256", source)
         self.assertIn("action_digest", source)
         self.assertIn("Qualification instruction", source)

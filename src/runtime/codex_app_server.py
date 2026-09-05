@@ -36,6 +36,15 @@ TYPED_APPROVAL_METHODS = frozenset({
 WRITE_APPROVAL_METHODS = frozenset({
     "item/fileChange/requestApproval", "applyPatchApproval",
 })
+REVIEW_APPROVAL_BINDING_KIND = "independent_review_provider"
+REVIEW_APPROVAL_BINDING_FIELDS = frozenset({
+    "approval_binding_kind", "campaign_id", "review_package_id",
+    "review_package_record_sha256", "candidate_snapshot_id",
+    "candidate_record_sha256", "mutation_digest_sha256",
+    "exact_change_evidence_sha256", "authorized_scope_sha256",
+    "reviewer_worker_id", "reviewer_identity_sha256",
+    "reviewer_invocation_id",
+})
 _SECRET = re.compile(
     r"(?i)(authorization|token|api[_ -]?key|webhook|password|secret)\s*[:=]\s*\S+"
 )
@@ -57,6 +66,35 @@ def _safe(value, maximum=2_000):
 
 def _digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def _validated_review_approval_binding(value, *, campaign_id, worker,
+                                       reviewer_invocation_id):
+    """Validate one already-canonical review binding without deriving its lineage."""
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) != REVIEW_APPROVAL_BINDING_FIELDS:
+        raise CodexAppServerError("approval", "approval_binding_failure",
+                                  "review approval binding is incomplete")
+    if (value.get("approval_binding_kind") != REVIEW_APPROVAL_BINDING_KIND
+            or value.get("campaign_id") != campaign_id
+            or value.get("reviewer_worker_id") != worker.get("worker_id")
+            or value.get("reviewer_identity_sha256") != _digest(worker)
+            or value.get("reviewer_invocation_id") != reviewer_invocation_id):
+        raise CodexAppServerError("approval", "approval_binding_failure",
+                                  "review approval binding mismatches the invocation")
+    for key in ("review_package_record_sha256", "candidate_record_sha256",
+                "mutation_digest_sha256", "exact_change_evidence_sha256",
+                "authorized_scope_sha256", "reviewer_identity_sha256"):
+        if not re.fullmatch(r"[a-f0-9]{64}", str(value.get(key) or "")):
+            raise CodexAppServerError("approval", "approval_binding_failure",
+                                      "review approval binding has a malformed digest")
+    for key in ("review_package_id", "candidate_snapshot_id", "reviewer_worker_id",
+                "reviewer_invocation_id"):
+        if not isinstance(value.get(key), str) or not value[key]:
+            raise CodexAppServerError("approval", "approval_binding_failure",
+                                      "review approval binding has a missing identity")
+    return dict(value)
 
 
 def extend_deadline_for_attention(deadline, wait_started, wait_finished):
@@ -103,7 +141,8 @@ def approval_response(method, choice, params):
 
 
 def typed_approval(method, params, *, campaign_id, invocation_id, worker, process_id,
-                   active_thread_id=None, active_turn_id=None):
+                   active_thread_id=None, active_turn_id=None, approval_binding=None,
+                   reviewer_invocation_id=None):
     if method not in TYPED_APPROVAL_METHODS or not isinstance(params, dict):
         raise CodexAppServerError("approval", "approval_mapping_failure",
                                   "unsupported typed approval request")
@@ -125,6 +164,19 @@ def typed_approval(method, params, *, campaign_id, invocation_id, worker, proces
         "item_id": item_id, "action": action, "cwd": params.get("cwd"),
     }
     action_identity = {"method": method, "action": action, "cwd": params.get("cwd")}
+    review_binding = _validated_review_approval_binding(
+        approval_binding, campaign_id=campaign_id, worker=worker,
+        reviewer_invocation_id=reviewer_invocation_id or invocation_id)
+    protocol = {"version": PROTOCOL_VERSION, "method": method, "process_id": process_id,
+                "thread_id": thread_id, "turn_id": turn_id,
+                "item_id": item_id, "blocked_action_sha256": _digest(authority),
+                "approved_action_sha256": _digest(action_identity)}
+    if review_binding is not None:
+        protocol.update({
+            **review_binding,
+            "recipient_sha256": review_binding["reviewer_identity_sha256"],
+            "approval_binding_sha256": _digest(review_binding),
+        })
     return {
         "campaign_id": campaign_id, "invocation_id": invocation_id,
         "worker": worker, "kind": "native_codex_approval_required",
@@ -133,10 +185,7 @@ def typed_approval(method, params, *, campaign_id, invocation_id, worker, proces
         "requested_authority": _safe(json.dumps(authority, sort_keys=True)),
         "resources": [_safe(params.get("cwd"))] if params.get("cwd") else [],
         "reversible": None, "provider_code": method,
-        "protocol": {"version": PROTOCOL_VERSION, "method": method, "process_id": process_id,
-                     "thread_id": thread_id, "turn_id": turn_id,
-                     "item_id": item_id, "blocked_action_sha256": _digest(authority),
-                     "approved_action_sha256": _digest(action_identity)},
+        "protocol": protocol,
         "exact_action": action_identity,
     }
 
@@ -176,7 +225,12 @@ class CodexAppServerTransport:
 
     def run(self, *, cwd, prompt, output_schema, output_path, sandbox,
             campaign_id, invocation_id, worker, environment, approval_handler=None,
-            allow_detached_continuation=True):
+            allow_detached_continuation=True, approval_binding=None,
+            reviewer_invocation_id=None):
+        reviewer_invocation_id = reviewer_invocation_id or invocation_id
+        approval_binding = _validated_review_approval_binding(
+            approval_binding, campaign_id=campaign_id, worker=worker,
+            reviewer_invocation_id=reviewer_invocation_id)
         qualification = self.qualify(environment)
         process = self.popen([self.codex_binary, "-c", SHELL_ENVIRONMENT_POLICY_OVERRIDE,
                               "app-server", "--listen", "stdio://"],
@@ -219,6 +273,8 @@ class CodexAppServerTransport:
                                 output_schema=output_schema, output_path=output_path, sandbox=sandbox,
                                 campaign_id=campaign_id, invocation_id=invocation_id, worker=worker,
                                 environment=environment, approval_handler=approval_handler,
+                                approval_binding=approval_binding,
+                                reviewer_invocation_id=reviewer_invocation_id,
                                 original_approval=pending_grant["approval"],
                                 decision=pending_grant["decision"])
                         time.sleep(0.05)
@@ -255,7 +311,9 @@ class CodexAppServerTransport:
                 if method in TYPED_APPROVAL_METHODS and "id" in message:
                     approval = typed_approval(method, message.get("params"), campaign_id=campaign_id,
                         invocation_id=invocation_id, worker=worker, process_id=process.pid,
-                        active_thread_id=thread_id, active_turn_id=turn_id)
+                        active_thread_id=thread_id, active_turn_id=turn_id,
+                        approval_binding=approval_binding,
+                        reviewer_invocation_id=reviewer_invocation_id)
                     if approval["protocol"]["thread_id"] != thread_id or approval["protocol"]["turn_id"] != turn_id:
                         raise CodexAppServerError("approval", "lineage_mismatch", "approval request mismatches active turn")
                     decision = {"choice": "deny"}
@@ -284,6 +342,8 @@ class CodexAppServerTransport:
                                 output_schema=output_schema, output_path=output_path, sandbox=sandbox,
                                 campaign_id=campaign_id, invocation_id=invocation_id, worker=worker,
                                 environment=environment, approval_handler=approval_handler,
+                                approval_binding=approval_binding,
+                                reviewer_invocation_id=reviewer_invocation_id,
                                 original_approval=approval, decision=decision)
                         raise CodexAppServerError("approval", "stale_app_server_process",
                                                   "approval process is no longer alive")
@@ -351,7 +411,8 @@ class CodexAppServerTransport:
 
     def _continue_detached(self, *, cwd, original_prompt, output_schema, output_path,
                            sandbox, campaign_id, invocation_id, worker, environment,
-                           approval_handler, original_approval, decision):
+                           approval_handler, approval_binding, reviewer_invocation_id,
+                           original_approval, decision):
         if original_approval["provider_code"] not in {
                 "item/commandExecution/requestApproval", "execCommandApproval"}:
             raise CodexAppServerError("continuation", "action_not_reconstructable",
@@ -390,7 +451,8 @@ class CodexAppServerTransport:
                 output_schema=output_schema, output_path=output_path, sandbox=sandbox,
                 campaign_id=campaign_id, invocation_id=continuation_id, worker=worker,
                 environment=environment, approval_handler=continuation_handler,
-                allow_detached_continuation=False)
+                allow_detached_continuation=False, approval_binding=approval_binding,
+                reviewer_invocation_id=reviewer_invocation_id)
             if not claimed:
                 raise CodexAppServerError("continuation", "approved_action_not_claimed",
                                           "fresh continuation did not claim the exact action")

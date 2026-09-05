@@ -286,16 +286,26 @@ class DevelopmentAttentionStore:
             "invocation_id": event.get("invocation_id"),
             "rider_id": protocol.get("rider_id", "tanner"),
             "recipient_sha256": protocol.get("recipient_sha256"),
+            "approval_binding_kind": protocol.get("approval_binding_kind"),
+            "approval_binding_sha256": protocol.get("approval_binding_sha256"),
+            "review_package_id": protocol.get("review_package_id"),
+            "review_package_record_sha256": protocol.get("review_package_record_sha256"),
+            "reviewer_worker_id": protocol.get("reviewer_worker_id"),
+            "reviewer_identity_sha256": protocol.get("reviewer_identity_sha256"),
+            "reviewer_invocation_id": protocol.get("reviewer_invocation_id"),
             "candidate_snapshot_id": protocol.get("candidate_snapshot_id"),
             "candidate_record_sha256": protocol.get("candidate_record_sha256"),
             "mutation_digest_sha256": (protocol.get("mutation_digest_sha256")
                                        or protocol.get("workspace_changes_sha256")),
+            "exact_change_evidence_sha256": protocol.get(
+                "exact_change_evidence_sha256"),
             "authorized_scope_sha256": (protocol.get("authorized_scope_sha256")
                                          or protocol.get("allowed_scope_sha256")),
             "method": protocol.get("method"), "item_id": protocol.get("item_id"),
             "action_digest": protocol.get("approved_action_sha256"),
             "protocol_binding_sha256": event.get("protocol_binding_sha256"),
             "expires_at": event.get("expires_at"),
+            "decision_nonce": event.get("decision_nonce"),
         }
 
     @staticmethod
@@ -352,6 +362,8 @@ class DevelopmentAttentionStore:
         if path.exists():
             return json.loads(path.read_text(encoding="utf-8"))
         created = datetime.now(timezone.utc)
+        decision_nonce = _digest({"attention_id": logical_id,
+            "created_at": created.isoformat(), "entropy": uuid.uuid4().hex})
         canonical_detail = canonical_attention_detail_url(
             logical_id, environment=self.environment)
         if detail_url is not None and detail_url != canonical_detail:
@@ -389,6 +401,7 @@ class DevelopmentAttentionStore:
             "provider_code": sanitize_action(provider_code) if provider_code else None,
             "protocol_binding": binding or None,
             "protocol_binding_sha256": binding_sha,
+            "decision_nonce": decision_nonce,
             "created_at": created.isoformat(),
             "expires_at": ((created + timedelta(seconds=expires_in_seconds)).isoformat()
                            if expires_in_seconds is not None else None),
@@ -485,11 +498,20 @@ class DevelopmentAttentionStore:
         event_path = self.events / f"{attention_id}.json"
         with _decision_lock(event_path):
             event = json.loads(event_path.read_text(encoding="utf-8"))
+            if event.get("record_sha256") != _digest(
+                    {key: value for key, value in event.items() if key != "record_sha256"}):
+                raise PermissionError("attention event integrity is invalid")
             canonical = self._authority_binding(event)
             required = ("attention_id", "campaign_id", "invocation_id", "rider_id",
                 "recipient_sha256", "candidate_snapshot_id", "candidate_record_sha256",
                 "mutation_digest_sha256", "authorized_scope_sha256", "method",
                 "action_digest", "protocol_binding_sha256")
+            if canonical.get("approval_binding_kind") == "independent_review_provider":
+                required = (*required, "approval_binding_kind", "approval_binding_sha256",
+                    "review_package_id", "review_package_record_sha256",
+                    "reviewer_worker_id", "reviewer_identity_sha256",
+                    "reviewer_invocation_id", "exact_change_evidence_sha256",
+                    "expires_at", "decision_nonce")
             if (not isinstance(expected_identity, dict)
                     or any(not isinstance(expected_identity.get(key), str)
                            or not expected_identity[key] for key in required)):
@@ -515,6 +537,7 @@ class DevelopmentAttentionStore:
                 event["blocked_action"].encode()).hexdigest(),
             "protocol_binding_sha256": event.get("protocol_binding_sha256"),
             "one_time": choice == "approve_once", "consumed": False,
+            "creates_authority": choice == "approve_once",
             "lifecycle_state": ("recorded_pending_consumption" if choice == "approve_once"
                                 else "completed"),
             "creates_continuing_authority": False, "decided_by": "authenticated_tanner",
@@ -622,7 +645,8 @@ class DevelopmentAttentionStore:
                 raise PermissionError("detached continuation is not the exact reserved process")
             decision = {**decision, "consumed": True, "consumed_at": _now(),
                         "consumed_by_continuation_id": continuation_id,
-                        "lifecycle_state": "resumed" if continuation_id else "consumed"}
+                        "lifecycle_state": "resumed" if continuation_id else "consumed",
+                        "creates_authority": False}
             decision["consumption_receipt"] = {**canonical, "continuation_id": continuation_id,
                 "consumed_at": decision["consumed_at"], "creates_continuing_authority": False}
             decision.pop("record_sha256", None); decision["record_sha256"] = _digest(decision)
