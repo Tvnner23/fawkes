@@ -102,6 +102,25 @@ management. [Phoenix Worker Exchange](PHOENIX_WORKER_EXCHANGE.md),
 [Embodiment Development Gates](EMBODIMENT_DEVELOPMENT_GATES.md) define the
 approved architecture without implementing those future runtimes.
 
+### Parallel product track — Progressive physical embodiments
+
+The [2026-09-08 execution amendment](ROADMAP_AMENDMENT_2026_09_08_EXECUTION.md)
+records Tanner's direction to build our own increasingly capable physical
+Fawkes bodies throughout software development. The
+[physical development path](PHYSICAL_EMBODIMENT_DEVELOPMENT_PATH.md) places a
+first desk body around the usable console / Phase 10 / Alpha preparation,
+expressive and aware bodies alongside their supporting capabilities, supervised
+mobility under scoped physical-action controls, and a mature companion around
+Phases 28–34. Enjoyable interaction and practical learning are explicit outcomes.
+
+These are parallel capability milestones, not a mandatory purchase ladder or
+five new chassis. Pixel, Reachy Mini, Coglet, XiaoZhi, Beni and other references
+are optional design inputs. The in-app 3D Early Presence, handheld supervision
+console and our physical bodies remain distinct deliverables. Relevant controls
+must precede the specific capability; full late-phase completion is not a
+prerequisite to isolated stationary bench expression. This adds planning
+structure, not robot implementation, spending or physical authority to P5.
+
 ### Parallel product track — Phoenix public experience
 
 The [Phoenix Public Experience](PHOENIX_PUBLIC_EXPERIENCE.md) is an approved
@@ -1176,13 +1195,17 @@ or autonomous forwarding. See [Phoenix Worker Exchange](PHOENIX_WORKER_EXCHANGE.
 
 ### Pre-Phase-10 stabilization and rider-supervision gate
 
-Numbered roadmap advancement remains paused while the accepted bounded bridge
-completes supervised cleanup. The fixed order is: complete Rider supervision;
-run bounded cleanup/stabilization campaigns; perform post-cleanup REVIEWER audit,
-full regression, recovery verification, and a new known-good baseline; add the
-separately authorized two-way/proactive social-messaging milestone; add
-Rider-controlled personal recording/privacy controls; then resume the numbered
-roadmap. This temporary gate is not a new numbered phase.
+The [2026-09-08 execution amendment](ROADMAP_AMENDMENT_2026_09_08_EXECUTION.md)
+supersedes the older fixed order. Complete the observational P5 console; prove
+the composed campaign/application boundary and the separately authorized bounded
+pilot; close reproducibility, recovery and continuity defects in bounded work;
+then satisfy the remaining recording/privacy and Phase 0–10 trust conditions
+and the defined Tanner trial. Independent preparation may run in parallel;
+conflicting integrations remain serialized. Two-way/proactive social messaging
+is a separately authorized track after applicable recording, recipient and
+channel conditions, not a serial personal-Alpha prerequisite. Existing accepted
+P1–P4 work is retained. The current implementation pointer and dated evidence
+identify what is actually complete; this sequence claims no new runtime state.
 
 Personal recording exists for the Rider, not against the Rider. Before normal
 roadmap advancement, Phoenix must provide visible, authoritative control over
@@ -1509,7 +1532,10 @@ falsification.
 ### Post-Phase 28 capability — Ambient and experiential embodiment
 
 Add optional ambient desktop presence, habitats, game-like experiences, AR,
-and dedicated companion hardware through a constrained Embodiment Adapter API.
+and mature companion-hardware integration through a constrained Embodiment
+Adapter API. Early custom physical prototypes develop in parallel under the
+[progressive physical path](PHYSICAL_EMBODIMENT_DEVELOPMENT_PATH.md); they do
+not wait for completion of Phase 28.
 Adapters receive negotiated presentation state and emit bounded interaction
 events; they do not receive unrestricted Phoenix data, infer observation
 permission from presence, execute arbitrary assets, or create another Phoenix.
@@ -1634,6 +1660,18 @@ self-improvement. Continue extending the roadmap as new legitimate Phoenix
 capabilities are discovered.
 
 ## Immediate implementation sequence
+
+The current sequence is controlled by the
+[2026-09-08 execution amendment](ROADMAP_AMENDMENT_2026_09_08_EXECUTION.md) and
+[Current Implementation](CURRENT_IMPLEMENTATION.md). Its next software outcome
+is the accepted P5 development-console preview. Its next physical design
+opportunity is the FB1 desk-body brief after that console is useful. A live
+pilot has a separate exact start decision. Do not restart completed P1–P4 work.
+
+### Historical implementation sequence — retained for provenance
+
+The following checklist predates the 2026-09-08 assessment. It preserves earlier
+ordering and completion claims as history; it is not another active task queue.
 
 1. Freeze this roadmap and maintain the current implementation pointer.
 2. Implement the versioned, instance-scoped source-artifact/lifecycle contract.

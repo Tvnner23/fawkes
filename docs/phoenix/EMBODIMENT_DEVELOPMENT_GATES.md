@@ -121,3 +121,29 @@ and exclusions, body version, and algorithm version.
 No Semantic Expression runtime, GLB readiness automation, island-manifest
 runtime, pose-regression library, animation system, asset promotion, or Presence
 expansion is implemented by this document.
+
+## Progressive physical-prototype synchronization
+
+The [physical development path](PHYSICAL_EMBODIMENT_DEVELOPMENT_PATH.md)
+extends parallel embodiment development to our own increasingly capable robot
+forms. Its first desk body is scheduled around the usable console / Phase 10 /
+Alpha preparation, followed by expressive, aware, supervised rolling and refined
+bodies as supporting capabilities become ready. These are learning and product
+milestones; upgrading the same body is valid. Enjoyable actual interaction and a
+short keep/change-next record are required outcomes of a useful prototype.
+
+The GLB/rig gates above continue to govern digital assets. They do not certify
+physical power, thermal behavior, actuator travel, stopping, connection loss or
+mechanical safety. Introduce only capability-specific physical checks before the
+corresponding function: scoped sessions before connecting to Fawkes, visible
+privacy/retention controls before capture, bounded actuation and a local stop
+before motion, and the physical-action boundary before autonomous movement.
+A manual isolated fixture remains labeled Development evidence, not lived
+Fawkes experience or permission to act. Mature Phase 26/28/29 functionality is
+not required wholesale for an early stationary experiment, and earlier slices
+must not claim those full phases complete.
+
+Reuse the existing Semantic Expression direction without freezing a universal
+anatomy or creating a second authority or capability registry. This amendment
+adds planning/synchronization detail only; no robot runtime or operation is
+implemented by it.
