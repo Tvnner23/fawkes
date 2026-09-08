@@ -21,6 +21,7 @@ from src.runtime.chat_service import (
 )
 from src.runtime.autonomy_supervision import RiderActivityStore, console_timestamp
 from src.runtime.console_observation import ordered_campaigns, primary_campaign_id
+from src.runtime.windows_clipboard import ConsoleClipboardDelivery
 
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -1197,7 +1198,12 @@ class FawkesAppHandler(BaseHTTPRequestHandler):
             if not self._require_auth(record_rider_activity=False):
                 return
             try:
-                self._json(200, self.server.console_update_store.list())
+                payload = self.server.console_update_store.list()
+                delivery = getattr(self.server, 'console_clipboard_delivery', None)
+                if delivery is not None:
+                    for item in payload['updates']:
+                        item['windows_clipboard'] = delivery.status(item)
+                self._json(200, payload)
             except Exception:
                 self._json(503, {"error": {"code": "console_updates_unavailable",
                     "message": "Prepared console updates are unavailable right now."}})
@@ -1213,6 +1219,9 @@ class FawkesAppHandler(BaseHTTPRequestHandler):
                     self._text(200, update["content"],
                                filename=f"{update['snapshot_id']}.txt")
                 else:
+                    delivery = getattr(self.server, 'console_clipboard_delivery', None)
+                    if delivery is not None:
+                        update = {**update, 'windows_clipboard': delivery.status(update)}
                     self._json(200, update)
             except KeyError:
                 self._json(404, {"error": {"code": "console_update_not_found",
@@ -1349,7 +1358,9 @@ class FawkesAppHandler(BaseHTTPRequestHandler):
                 if set(request) not in ({"idempotency_key"}, {"idempotency_key", "campaign_id"}):
                     raise ValueError("only an idempotency key and optional campaign identity are accepted")
                 projection = developer_console_projection(self.server.chat_service)
-                update = self.server.console_update_store.save(
+                delivery = getattr(self.server, 'console_clipboard_delivery', None)
+                save = delivery.send if delivery is not None else self.server.console_update_store.save
+                update = save(
                     idempotency_key=request["idempotency_key"], projection=projection,
                     campaign_id=request.get("campaign_id"))
                 self._json(201, update)
@@ -1358,7 +1369,7 @@ class FawkesAppHandler(BaseHTTPRequestHandler):
                     "message": str(exc)}})
             except Exception:
                 self._json(503, {"error": {"code": "console_update_failed",
-                    "message": "The previous prepared update was preserved, but a new update could not be saved."}})
+                    "message": "Windows delivery was not confirmed. The snapshot may already be saved; retry checks the same request. Previous updates are preserved."}})
             return
         observation_prefix = "/api/development/observations/"
         proposal_prefix = "/api/development/proposals/"
@@ -1787,7 +1798,7 @@ class FawkesAppServer(ThreadingHTTPServer):
     daemon_threads = True
 
     def __init__(self, address, *, chat_service, app_token, app_session_store=None,
-                 console_update_store=None):
+                 console_update_store=None, console_clipboard_writer=None):
         super().__init__(address, FawkesAppHandler)
         self.chat_service = chat_service
         self.app_token = app_token
@@ -1797,6 +1808,10 @@ class FawkesAppServer(ThreadingHTTPServer):
         self.console_update_store = console_update_store or ConsoleUpdateStore(
             os.environ.get("FAWKES_CONSOLE_UPDATE_ROOT",
                            state_root / "database" / "console_updates"))
+        # Only the explicitly configured PC launcher enables Windows execution.
+        # No browser request can supply an executable, script, account or writer.
+        self.console_clipboard_delivery = ConsoleClipboardDelivery(
+            self.console_update_store, console_clipboard_writer)
 
 
 def main():

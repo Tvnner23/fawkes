@@ -1531,7 +1531,7 @@
     if (id === "pi-companion") return {short:"Remote unknown",detail:"This PC observation does not verify Pi reachability. The retained accepted rollout and Tanner's physical checks are historical evidence, not a live device heartbeat."};
     if (id === "pc-console-service") return {short:live?"Reachable":"Not current",detail:"Authenticated PC service synchronization: "+(live?"successful":"not current")+". This does not establish Worker execution or Pi health."};
     if (id === "console-surface") return {short:live?"Synchronized":"Last known",detail:identity+" · "+(live?"Browser received current authenticated observations.":"Retained observations only; current task state is unknown.")};
-    if (id === "pc-saved-update") return {short:live?"Service reachable":"Not current",detail:"Save outcome is verified per durable snapshot receipt, not inferred from service reachability. Retrieve that same ID on the PC; clipboard copying acts only on the device used."};
+    if (id === "pc-saved-update") return {short:live?"Service reachable":"Not current",detail:"Send update saves an exact snapshot, then requests Windows clipboard delivery. Only a matching Windows read-back acknowledgement confirms copying; service reachability alone does not."};
     return {short:"Unknown",detail:"No independent runtime observation for this item."};
   }
 
@@ -1822,6 +1822,22 @@
     }
   }
 
+  function windowsClipboardMessage(update) {
+    const id = safeIdentifier(update && update.snapshot_id, 90);
+    const receipt = update && update.windows_clipboard;
+    const bound = receipt && receipt.snapshot_id === id;
+    const status = bound ? receipt.status : "unknown";
+    if (status === "copied" && receipt.content_sha256 === update.content_sha256
+        && receipt.code === "verified_windows_readback" && Number.isFinite(Date.parse(receipt.copied_at))) {
+      return `Copied to Windows clipboard · ${safeText(receipt.copied_at, 80)} · ${id}. Press Ctrl+V on your PC.`;
+    }
+    if (status === "pending") return `Update saved · ${id} · Windows clipboard delivery pending; not confirmed yet.`;
+    if (status === "superseded") return `Update saved · ${id} · A newer/current update takes priority; this one was not copied again.`;
+    if (status === "not_requested") return `Saved update · ${id} · No Windows clipboard write was requested for this historical snapshot.`;
+    if (status === "failed" || status === "unavailable") return `Update saved · ${id} · Windows clipboard unavailable or failed. The saved update is still retrievable.`;
+    return `Update saved · ${id} · Windows clipboard delivery unconfirmed. Copy/download remains available; no automatic replay.`;
+  }
+
   async function postJson(fetchImpl, path, body, options) {
     const value = options || {};
     const response = await fetchImpl(path, {method: "POST", credentials: "same-origin",
@@ -2026,6 +2042,7 @@
     let selectedRoadmapId = "";
     let roadmapFilter = "";
     let pendingUpdateKey = "";
+    let preparedUpdatePending = false;
     let pendingUpdateCampaign = null;
     let explicitCampaignSelection = false;
     let localStore;
@@ -2184,6 +2201,7 @@
     function renderPreparedUpdates(payload) {
       preparedUpdates.replaceChildren();
       const updates = payload && Array.isArray(payload.updates) ? payload.updates : [];
+      preparedUpdatePending = updates.some(update => update.windows_clipboard && update.windows_clipboard.status === "pending");
       if (!updates.length) {
         preparedUpdates.appendChild(element(documentRef, "p", "meta",
           "No durable update has been prepared yet."));
@@ -2194,6 +2212,7 @@
         if (!/^console-update-[a-f0-9]{64}$/.test(snapshotId)) continue;
         const card = element(documentRef, "article", "prepared-update");
         card.appendChild(element(documentRef, "p", "", `${update.created_at || "Unknown time"} · ${snapshotId}`));
+        card.appendChild(element(documentRef, "p", "meta", windowsClipboardMessage(update)));
         const actions = element(documentRef, "div", "prepared-update-actions");
         const copy = element(documentRef, "button", "", "Copy completed + working on");
         copy.type = "button"; copy.dataset.copyUpdateId = snapshotId;
@@ -2219,7 +2238,7 @@
     async function savePreparedUpdate() {
       if (!fetchImpl) return;
       saveUpdate.disabled = true;
-      updateResult.textContent = "Saving one exact update…";
+      updateResult.textContent = "Saving the current update and sending it to Windows clipboard…";
       try {
         const csrf = await postJson(fetchImpl, ENDPOINTS.csrf, {});
         if (!pendingUpdateKey) {
@@ -2232,14 +2251,14 @@
         }
         const update = await postJson(fetchImpl, ENDPOINTS.updates,
           {idempotency_key: pendingUpdateKey, ...(pendingUpdateCampaign ? {campaign_id: pendingUpdateCampaign} : {})}, {csrf: csrf.csrf_token});
-        updateResult.textContent = `Update saved · ${update.snapshot_id} · Open Fawkes on your PC to copy or download it.`;
+        updateResult.textContent = windowsClipboardMessage(update);
         pendingUpdateKey = "";
         pendingUpdateCampaign = null;
         try {localStore.removeItem("fawkes-console-update-retry-v1");} catch (_unavailable) {}
         await refreshPreparedUpdates();
       } catch (error) {
-        updateResult.textContent = "Update not saved · " + safeText(error && error.message, 300)
-          + " · the previous good snapshot remains available.";
+        updateResult.textContent = "Windows delivery not confirmed · " + safeText(error && error.message, 300)
+          + " · A snapshot may already be saved. Retry checks the same request; previous updates remain available.";
       } finally {
         saveUpdate.disabled = false;
       }
@@ -2602,7 +2621,12 @@
     refresh();
     if (value.disableUpdateRefresh !== true) refreshPreparedUpdates();
     pollTimer = value.pollIntervalMs === 0 || !root.setInterval
-      ? null : root.setInterval(refresh, Number.isFinite(value.pollIntervalMs) ? value.pollIntervalMs : 10000);
+      ? null : root.setInterval(() => {
+        refresh();
+        // A reload during native delivery observes the eventual receipt; it
+        // never executes another write or keeps an expired attempt pending.
+        if (preparedUpdatePending) refreshPreparedUpdates();
+      }, Number.isFinite(value.pollIntervalMs) ? value.pollIntervalMs : 10000);
     const timingTimer = root.setInterval ? root.setInterval(() => {
       if (displayedProjection) updateStageTimers(campaignElements.graph,
         selectCampaign(displayedProjection.campaigns, selectedCampaignId), shell.dataset.projectionState, clock());
@@ -2625,6 +2649,7 @@
   }
 
   const api = Object.freeze({
+    windowsClipboardMessage,
     ENDPOINTS,
     PROJECTION_SCHEMA,
     PAGE_TITLES,
