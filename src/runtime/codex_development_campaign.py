@@ -426,6 +426,12 @@ class CodexDevelopmentCampaign:
             progress_handler=self.record_managed_worker_activity)
 
     def record_managed_worker_activity(self, event):
+        return self._record_console_execution(event, role="worker")
+
+    def record_managed_reviewer_activity(self, event, *, package_id):
+        return self._record_console_execution(event, role="reviewer", package_id=package_id)
+
+    def _record_console_execution(self, event, *, role, package_id=None):
         """Bounded observational sidecar, never campaign state or authority.
 
         Do not bump the campaign revision while its synchronous builder is
@@ -437,8 +443,36 @@ class CodexDevelopmentCampaign:
         with self.store.protected(campaign_id):
             campaign = self.store.load(campaign_id)
             scope = campaign.get("active_builder_task_scope_id")
-            if not scope or invocation_id != scope + "-appserver":
-                raise PermissionError("activity is not bound to the active managed Worker")
+            if role == "worker":
+                cancelled_native = (campaign.get("cancelled") is True
+                    and event.get("kind") in {"permission_result", "transport_closed", "final_result"}
+                    and any(item.get("kind") == "tanner_attention_required"
+                        and (item.get("detail") or {}).get("invocation_id") == invocation_id
+                        and (item.get("detail") or {}).get("worker_id") == campaign["builder"]["worker_id"]
+                        for item in campaign.get("events", [])[-128:]))
+                if ((not scope or invocation_id != scope + "-appserver") and not cancelled_native
+                        or event.get("worker", {}).get("worker_id") != campaign["builder"]["worker_id"]):
+                    raise PermissionError("activity is not bound to the active managed Worker")
+            else:
+                requests = campaign.get("review_requests", [])
+                active = campaign.get("active_review_native_action") or {}
+                approved_native = (campaign["status"] == "reviewer_native_action_approved"
+                    and active.get("invocation_id") == invocation_id
+                    and active.get("review_package_id") == package_id)
+                # A denied/cancelled native action still has a real terminal
+                # observation. Permit only its previously bound invocation;
+                # this observational write cannot resume or authorize work.
+                closing_native = (campaign["status"] in {"failed_safe", "cancelled"}
+                    and any(item.get("kind") == "tanner_attention_required"
+                        and (item.get("detail") or {}).get("invocation_id") == invocation_id
+                        and (item.get("detail") or {}).get("worker_id") == event.get("worker", {}).get("worker_id")
+                        for item in campaign.get("events", [])[-128:]))
+                if (role != "reviewer" or not package_id
+                        or not requests or requests[-1].get("package_id") != package_id
+                        or event.get("worker", {}).get("worker_id") != campaign["reviewer_requirement"]["worker_id"]
+                        or not (campaign["status"] in {"awaiting_independent_review", "tanner_escalation"}
+                                or approved_native or closing_native)):
+                    raise PermissionError("activity is not bound to the current independent review")
             if event.get("state") not in {"running", "waiting", "completed", "failed", "disconnected"}:
                 raise ValueError("unknown managed Worker observation")
             path = self.store.root / ".managed-activity" / (invocation_id + ".json")
@@ -449,16 +483,49 @@ class CodexDevelopmentCampaign:
             if any(item["event_id"] == event["event_id"] for item in events): return
             from src.runtime.codex_app_server import _safe
             public = {key: event[key] for key in ("event_id", "created_at", "kind", "state")}
+            for key in ("thread_id", "turn_id"):
+                if event.get(key) is not None:
+                    public[key] = require_id(event[key], key)
             message = _safe(event.get("public_message"))
             encoded = message.encode("utf-8")
             public["public_message"] = (encoded[:1900].decode("utf-8", errors="ignore") + " [truncated]"
                                         if len(encoded) > 1900 else message)
-            value = {"campaign_id": campaign_id, "invocation_id": invocation_id,
+            timing = list(old.get("timing_events", []))
+            losses = event.get("timing_observation_losses", [])
+            overflow = event.get("timing_observation_loss_overflow", False)
+            if (not isinstance(losses, list) or len(losses) > 32 or type(overflow) is not bool):
+                raise ValueError("invalid timing observation loss metadata")
+            losses = [require_id(identity, "lost_timing_event_id") for identity in losses]
+            retained = {item["event_id"] for item in timing
+                        if item.get("thread_id") == public.get("thread_id")
+                        and item.get("turn_id") == public.get("turn_id")}
+            if losses or overflow:
+                public["timing_observation_losses"] = losses
+                public["timing_gap_before"] = overflow or any(identity not in retained for identity in losses)
+            if public.get("timing_gap_before") or public["kind"] in {"turn_started", "permission_wait", "permission_result", "final_result", "transport_closed"}:
+                timing.append({k:v for k,v in public.items() if k != "public_message"})
+            value = {"campaign_id": campaign_id, "invocation_id": invocation_id, "role": role,
+                "review_package_id": package_id if role == "reviewer" else None,
                 "worker_id": event["worker"]["worker_id"], "process_id": event["process_id"],
                 "process_identity": _linux_process_identity(event["process_id"]),
-                "events": [*events, public][-64:], "state": event["state"],
+                "timing_events": timing[-256:], "timing_history_incomplete": len(timing)>256 or old.get("timing_history_incomplete", False),
+                # A denied action is not a finished native execution turn.
+                # Preserve the action's actual event state separately.
+                "events": [*events, public][-64:],
+                "state": "running" if public["kind"] == "permission_result" else event["state"],
                 "updated_at": event["created_at"], "creates_authority": False,
                 "creates_continuing_authority": False}
+            # Record causal order while holding the same canonical campaign
+            # lock as Attention publication. Timestamps are not an ordering
+            # authority across a backward wall-clock adjustment. This metadata
+            # describes an observation and grants no approval/execution rights.
+            if type(campaign.get("state_revision")) is int and campaign.get("record_sha256"):
+                canonical_events=campaign.get("events", [])
+                value["campaign_observation_binding"]={
+                    "state_revision":campaign["state_revision"],
+                    "record_sha256":campaign["record_sha256"],
+                    "event_count":len(canonical_events),
+                    "event_tail_sha256":_digest(canonical_events[-1] if canonical_events else None)}
             value["record_sha256"] = _digest(value)
             path.parent.mkdir(parents=True, exist_ok=True)
             temporary = path.with_suffix('.tmp')
@@ -468,9 +535,11 @@ class CodexDevelopmentCampaign:
 
     def managed_worker_activity_projection(self, campaign_id):
         from src.runtime.development_attention import _linux_process_identity
+        from src.runtime.console_observation import unobserved_attention_transition
         values = []
         root = self.store.root / ".managed-activity"
         if not root.exists(): return []
+        campaign = self.store.load(campaign_id)
         for path in root.glob('*.json'):
             value = json.loads(path.read_text())
             if value.get("campaign_id") != campaign_id: continue
@@ -480,9 +549,23 @@ class CodexDevelopmentCampaign:
             if state in {"running", "waiting"} and (not value.get("process_identity") or
                     _linux_process_identity(value["process_id"]) != value["process_identity"]):
                 state = "disconnected"
+            timing_unverified, timing_hint = unobserved_attention_transition(campaign, value)
+            if timing_unverified and state in {"running", "waiting"} and timing_hint == "waiting":
+                state = "waiting"
             values.append({k:value[k] for k in ("invocation_id", "worker_id", "events", "updated_at")}
-                          | {"state": state, "creates_authority": False})
-        return sorted(values, key=lambda x:x["updated_at"], reverse=True)[:8]
+                          | {"state": state, "role": value.get("role", "worker"),
+                             "verified_at": _now() if state in {"running", "waiting"} else None,
+                             "last_verified_at": value.get("updated_at"),
+                             "timing_events": value.get("timing_events", []),
+                             "timing_state_unverified": timing_unverified,
+                             "timing_state_hint": timing_hint if timing_unverified else None,
+                             "timing_history_incomplete": value.get("timing_history_incomplete", False),
+                             "creates_authority": False})
+        retained = sorted(values, key=lambda x:x["updated_at"], reverse=True)[:8]
+        if len(values) > len(retained):
+            for value in retained:
+                value["timing_history_incomplete"] = True
+        return retained
 
     @staticmethod
     def _budget_from_payload(payload, created):
@@ -2066,7 +2149,9 @@ class CodexDevelopmentCampaign:
                     builder_return_report_id=builder_return_id,
                     candidate_snapshot_id=snapshot.provenance["candidate_snapshot_id"],
                     candidate_snapshot_root=snapshot.root,
-                    approval_handler=self._handle_typed_approval)
+                    approval_handler=self._handle_typed_approval,
+                    progress_handler=lambda event: self.record_managed_reviewer_activity(
+                        event, package_id=prepared["package_id"]))
                 snapshot.verify_source_unchanged()
             except Exception as exc:
                 current = (self._close_failed_provider_reservation(campaign_id,
@@ -2335,6 +2420,7 @@ class CodexDevelopmentCampaign:
             "observations_are_not_policy_or_authority": True}
         return {"schema_version": 1, "presentation_type": "codex_development_campaign",
             "campaign_id": record["campaign_id"], "objective": record["objective"],
+            "created_at": record.get("created_at"), "updated_at": record.get("updated_at"),
             "status": record["status"], "iteration": record["iteration"],
             "maximum_iterations": record["maximum_iterations"], "builder": record["builder"],
             "reviewer": record["reviewer_requirement"], "last_builder_run": record["builder_runs"][-1] if record["builder_runs"] else None,
@@ -2430,4 +2516,5 @@ class CodexDevelopmentCampaign:
                         "recovery_references": record.get("recovery_references", []), "activity": [],
                         "exact_worker_bodies_remain_in_worker_exchange": True,
                         "hidden_chain_of_thought_exposed": False, "creates_authority": False}})
-        return presentations
+        from src.runtime.console_observation import ordered_campaigns
+        return ordered_campaigns(presentations)

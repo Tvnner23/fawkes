@@ -182,7 +182,6 @@ class DevConsoleStaticContractTests(unittest.TestCase):
             "Approve Once",
             "/decision",
             "Authorization",
-            "localStorage",
             "sessionStorage",
         ):
             self.assertNotIn(forbidden, combined)
@@ -190,6 +189,8 @@ class DevConsoleStaticContractTests(unittest.TestCase):
         self.assertIn("textContent", self.javascript)
         self.assertIn("X-Fawkes-CSRF-Token", self.javascript)
         self.assertIn("idempotency_key", self.javascript)
+        self.assertIn('key: pendingUpdateKey, campaign_id: pendingUpdateCampaign', self.javascript)
+        self.assertNotRegex(self.javascript, r'setItem\([^\n]*(credential|csrf|token)')
 
     def test_script_uses_only_compact_authenticated_read_only_projection(self):
         expected = {"/api/development/dev-console", "/api/development/console-updates",
@@ -584,6 +585,7 @@ class DevConsoleReadOnlyHTTPTests(unittest.TestCase):
                 "schema_version", "observed_at", "build", "campaigns", "attention",
                 "components", "repository", "roadmap", "jobs", "creates_authority",
                 "creates_continuing_authority", "managed_activity_window",
+                "current_campaign_id", "selection_basis",
             },
         )
         self.assertEqual(projection["schema_version"], "fawkes.dev_console.read_only.v1")
@@ -601,6 +603,7 @@ class DevConsoleReadOnlyHTTPTests(unittest.TestCase):
             "cancelled", "builder", "reviewer", "needs_tanner", "recovery_references",
             "activity", "satisfied_condition_count",
             "operational_learning_observations", "managed_worker_activity", "console_reporting",
+            "created_at", "updated_at",
         })
         self.assertEqual(set(projection["campaigns"][0]["builder"]), {
             "worker_id", "role", "functional_role", "environment_id",
@@ -1066,7 +1069,7 @@ class ConsoleUpdateStoreTests(unittest.TestCase):
         handler._require_attention_decision_auth.assert_called_once_with()
         projection.assert_called_once_with(handler.server.chat_service)
         store.save.assert_called_once_with(idempotency_key="browser-fixture-key-0003",
-                                           projection=self._projection())
+                                           projection=self._projection(), campaign_id=None)
         self.assertEqual(handler._json.call_args.args[0], 201)
 
 

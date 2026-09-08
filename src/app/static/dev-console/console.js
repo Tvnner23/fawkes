@@ -113,11 +113,17 @@
       && campaign.status !== "integrity_unavailable");
   }
 
-  function campaignObservation(campaigns, projectionState) {
+  function campaignObservation(campaigns, projectionState, nowMs = Date.now()) {
     if (projectionState === "sample") return {kind: "sample", label: "SAMPLE CAMPAIGN DATA"};
     if (projectionState !== "live") return {kind: "unknown", label: "EXECUTION UNKNOWN"};
     const values = Array.isArray(campaigns) ? campaigns : [];
     if (!values.length) return {kind: "unavailable", label: "EXECUTION UNAVAILABLE"};
+    for (const campaign of values) {
+      for (const clock of roleClocks(campaign, projectionState, nowMs)) {
+        if (clock.label === "Executing") return {kind: "executing", label: clock.role.toUpperCase() + " EXECUTING"};
+        if (clock.label.includes("clock paused")) return {kind: "waiting", label: clock.role.toUpperCase() + " WAITING FOR TANNER"};
+      }
+    }
     if (values.some(isOpenCampaignRecord)) {
       return {kind: "unknown", label: "EXECUTION NOT OBSERVED"};
     }
@@ -249,6 +255,7 @@
     const result = {
       campaign_id: campaignId,
       objective: safeText(value.objective, 500) || campaignId,
+      created_at: safeText(value.created_at, 80),
       status,
       current_stage: safeIdentifier(value.current_stage, 120) || status,
       iteration: finiteInteger(value.iteration, 0),
@@ -269,6 +276,7 @@
     result.managed = Array.isArray(value.managed_worker_activity) ? value.managed_worker_activity.slice(0,8).map(item=>({
       invocation_id:safeIdentifier(item.invocation_id,180), worker_id:safeIdentifier(item.worker_id,180),
       updated_at:safeText(item.updated_at,80),
+      verified_at:safeText(item.verified_at,80), role:safeIdentifier(item.role||'worker',30),
       state:['running','waiting','completed','failed','disconnected'].includes(item.state)?item.state:'unknown',
       events:Array.isArray(item.events)?item.events.slice(-64).map(event=>({event_id:safeIdentifier(event.event_id,180),
         created_at:safeText(event.created_at,80),kind:safeIdentifier(event.kind,80),
@@ -446,11 +454,28 @@
   function normalizeConsoleReporting(value) {
     if (!isObject(value) || value.creates_authority !== false) return null;
     return {observed_at: safeText(value.observed_at, 80),
+      turns: (Array.isArray(value.turns) ? value.turns : []).slice(0,32).map(item=>({
+        role:safeIdentifier(item.role,20),turn_id:safeIdentifier(item.turn_id,180),
+        thread_id:safeIdentifier(item.thread_id,180),
+        invocation_id:safeIdentifier(item.invocation_id,180),
+        started_at:safeText(item.started_at,80),ended_at:safeText(item.ended_at,80),
+        observed_at:safeText(item.observed_at,80),state:safeIdentifier(item.state,32),
+        active_verified:item.active_verified===true,
+        duration_incomplete:item.duration_incomplete===true,
+        active_seconds:Number.isSafeInteger(item.active_seconds)&&item.active_seconds>=0?item.active_seconds:null,
+        waiting_seconds:Number.isSafeInteger(item.waiting_seconds)&&item.waiting_seconds>=0?item.waiting_seconds:null})),
+      timing_history_incomplete:value.timing_history_incomplete===true,
+      timing_incomplete_roles:Array.isArray(value.timing_incomplete_roles) && value.timing_incomplete_roles.length<=2
+        && value.timing_incomplete_roles.every(role=>role==="worker"||role==="reviewer")
+        ? value.timing_incomplete_roles.filter(role=>role==="worker"||role==="reviewer")
+        : value.timing_history_incomplete===true ? ["worker","reviewer"] : [],
       record_sha256: safeIdentifier(value.record_sha256, 64),
       intervals: (Array.isArray(value.intervals) ? value.intervals : []).slice(0, 24).map((item) => ({
         stage: safeIdentifier(item.stage, 40), attempt: finiteInteger(item.attempt, 0),
         started_at: safeText(item.started_at, 80), ended_at: safeText(item.ended_at, 80),
         state: safeIdentifier(item.state, 80), active_verified: item.active_verified === true,
+        timing_basis: safeIdentifier(item.timing_basis, 80),
+        active_time_excludes_attention: item.active_time_excludes_attention === true,
         duration_seconds: Number.isSafeInteger(item.duration_seconds) && item.duration_seconds >= 0
           ? item.duration_seconds : null,
         source_references: (Array.isArray(item.source_references) ? item.source_references : [])
@@ -470,6 +495,14 @@
     const observed = lifecycleTime(reporting.observed_at);
     if (!Number.isFinite(start) || !Number.isFinite(observed) || start > observed
         || observed > nowMs || !interval.source_references.length) return null;
+    if (interval.active_time_excludes_attention) {
+      const base=interval.duration_seconds;
+      const finish=interval.ended_at?end:observed;
+      if(!Number.isSafeInteger(base)||base<0||!Number.isFinite(finish)||finish<start||finish>observed
+        ||base>Math.floor((finish-start)/1000))return null;
+      return base+(!interval.ended_at&&interval.active_verified&&state==='live'&&nowMs-observed<=30000
+        ?Math.floor((nowMs-observed)/1000):0);
+    }
     if (interval.ended_at) {
       const seconds = Math.floor((end - start) / 1000);
       return Number.isFinite(end) && end >= start && end <= observed && interval.duration_seconds === seconds
@@ -491,6 +524,8 @@
       const intervals = (reporting && reporting.intervals || []).filter((item) => item.stage === node.dataset.stageTimer);
       const latest = intervals[intervals.length - 1];
       node.textContent = latest ? formatDuration(intervalSeconds(latest, reporting, state, nowMs)) : "—";
+      node.title = latest && latest.timing_basis === "historical_invocation_envelope"
+        ? "Historical invocation elapsed time; not native active execution time." : "Recorded stage timing";
       const observed = reporting ? lifecycleTime(reporting.observed_at) : NaN;
       if (latest && latest.active_verified) {
         const live = state === "live" && Number.isFinite(observed) && nowMs >= observed && nowMs - observed <= 30000;
@@ -503,6 +538,77 @@
     }
   }
 
+  function nativeTurnLabel(turn, state, nowMs) {
+    const observed = turn && lifecycleTime(turn.observed_at);
+    const fresh = state === "live" && Number.isFinite(observed)
+      && nowMs >= observed && nowMs - observed <= 30000;
+    return !turn ? "Not observed"
+      : turn.ended_at ? "Waiting · last turn " + turn.state + (turn.duration_incomplete ? " · timing unavailable" : "")
+        : !fresh ? "Last known · current execution unknown"
+          : turn.state === "waiting" ? "Waiting for Tanner · clock paused"
+            : turn.active_verified ? "Executing" : "Execution unknown";
+  }
+
+  function roleClocks(campaign, state, nowMs) {
+    const turns = campaign && campaign.reporting && campaign.reporting.turns || [];
+    return ["worker", "reviewer"].map(role => {
+      const own = turns.filter(turn => turn.role === role);
+      const last = own[own.length - 1];
+      const values = own.map(turn => {
+        if (turn.active_seconds === null) return null;
+        const verified = lifecycleTime(turn.observed_at);
+        const live = state === "live" && turn.active_verified && Number.isFinite(verified)
+          && nowMs >= verified && nowMs - verified <= 30000;
+        return turn.active_seconds + (live ? Math.floor((nowMs - verified) / 1000) : 0);
+      });
+      const reporting = campaign && campaign.reporting;
+      const incomplete = reporting && reporting.timing_history_incomplete
+        && (!Array.isArray(reporting.timing_incomplete_roles)
+          || reporting.timing_incomplete_roles.some(value=>value!=="worker"&&value!=="reviewer")
+          || reporting.timing_incomplete_roles.includes(role));
+      return {role, last, seconds: values.length ? values[values.length - 1] : null,
+        total: values.length && !incomplete && values.every(value => value !== null)
+          ? values.reduce((a,b) => a+b, 0) : null,
+        label: nativeTurnLabel(last, state, nowMs)};
+    });
+  }
+
+  function renderRoleClocks(documentRef, target, campaign, state, nowMs) {
+    if (!target) return;
+    const identity = JSON.stringify([campaign && campaign.campaign_id, campaign && campaign.reporting && campaign.reporting.turns,
+      campaign && campaign.reporting && campaign.reporting.timing_history_incomplete]);
+    if (target.clockIdentity === identity) {
+      roleClocks(campaign, state, nowMs).forEach((clock, index) => {
+        const card = target.children[index];
+        if (!card) return;
+        card.querySelector('.role-clock-value').textContent = formatDuration(clock.seconds);
+        card.querySelector('.role-clock-state').textContent = clock.label;
+        card.querySelector('.role-clock-total').textContent = "Cumulative active " + formatDuration(clock.total);
+      });
+      return;
+    }
+    target.clockIdentity = identity;
+    const open = Array.from(target.querySelectorAll("details")).map(item => item.open);
+    target.replaceChildren();
+    for (const clock of roleClocks(campaign, state, nowMs)) {
+      const card = element(documentRef, "section", "role-clock");
+      card.append(element(documentRef, "strong", "", clock.role === "worker" ? "Worker" : "Reviewer"),
+        element(documentRef, "div", "role-clock-value", formatDuration(clock.seconds)),
+        element(documentRef, "p", "meta role-clock-state", clock.label),
+        element(documentRef, "p", "meta role-clock-total", "Cumulative active " + formatDuration(clock.total)));
+      if (clock.last) card.appendChild(element(documentRef, "p", "meta",
+        "Turn " + clock.last.turn_id + " · wait " + formatDuration(clock.last.waiting_seconds)));
+      const history = element(documentRef, "details", "");
+      history.open = Boolean(open[clock.role === "worker" ? 0 : 1]);
+      history.appendChild(element(documentRef, "summary", "", "Retained turns"));
+      for (const turn of campaign && campaign.reporting && campaign.reporting.turns || []) {
+        if (turn.role === clock.role) history.appendChild(element(documentRef, "p", "meta",
+          `${turn.turn_id} · ${turn.started_at} · active ${formatDuration(turn.active_seconds)} · waiting ${formatDuration(turn.waiting_seconds)} · ${turn.state}`));
+      }
+      card.appendChild(history); target.appendChild(card);
+    }
+  }
+
   function normalizeJobsResponse(payload) {
     if (!Array.isArray(payload) || payload.length > 32) return {valid: false, jobs: []};
     const jobs = [];
@@ -510,6 +616,7 @@
       if (!isObject(raw) || raw.creates_authority !== false) return {valid: false, jobs: []};
       const job = {
         job_id: safeIdentifier(raw.job_id, 180), objective: safeText(raw.objective, 500),
+        created_at: safeText(raw.created_at,80), is_current_objective:raw.is_current_objective===true,
         state: safeIdentifier(raw.state, 32), recorded_status: safeIdentifier(raw.recorded_status, 100),
         current_step: safeText(raw.current_step, 180), last_activity_at: safeText(raw.last_activity_at, 80),
         accomplished: safeText(raw.accomplished, 1800), gained: safeText(raw.gained, 1200),
@@ -612,6 +719,7 @@
       observed_at: observationValid ? observedAt : "",
       observed_at_ms: observationValid ? observedAtMs : null,
       campaigns: campaigns.campaigns,
+      current_campaign_id:safeIdentifier(values.current_campaign_id,180),
       attention: attention.attention,
       components: runtime.components,
       repository: repository.repository,
@@ -779,10 +887,8 @@
 
   function renderJobs(documentRef, target, jobs, projectionState) {
     target.replaceChildren();
-    const priority = {needs_you: 0, working: 1, waiting: 2, done: 3, failed: 3, closed: 3, unknown: 4};
-    const values = Array.isArray(jobs) ? jobs.slice().sort((left, right) =>
-      (priority[left.state] ?? 9) - (priority[right.state] ?? 9)
-        || Date.parse(right.last_activity_at || 0) - Date.parse(left.last_activity_at || 0)) : [];
+    // Canonical objective order is shared with Campaign and saved updates.
+    const values = Array.isArray(jobs) ? jobs.slice() : [];
     if (!values.length) {
       target.appendChild(element(documentRef, "p", "empty",
         "No job records are available to this preview. This does not mean Fawkes has no history or that every job is idle."));
@@ -792,6 +898,7 @@
       const card = element(documentRef, "article", "job-card " + job.state
         + (job.state === "done" && !job.successful ? " unsuccessful" : ""));
       card.dataset.consoleKey = "job:" + job.job_id;
+      card.appendChild(element(documentRef,"p","eyebrow",job.is_current_objective?'CURRENT OBJECTIVE':'RETAINED JOB HISTORY'));
       const heading = element(documentRef, "div", "job-title-row");
       heading.append(element(documentRef, "span", "job-state",
         (projectionState === "live" || projectionState === "sample" ? "" : "Last known ")
@@ -830,6 +937,7 @@
       const link = element(documentRef, "a", "evidence-link", "Open campaign evidence");
       link.href = "#campaign-heading";
       link.dataset.pageLink = "1";
+      link.dataset.campaignId = job.job_id;
       card.appendChild(link);
       target.appendChild(card);
     }
@@ -923,9 +1031,6 @@
   function selectCampaign(campaigns, selectedId) {
     const values = Array.isArray(campaigns) ? campaigns : [];
     return values.find((campaign) => campaign.campaign_id === selectedId)
-      || values.find((campaign) => !campaign.terminal
-        && campaign.status !== "historical_contract_unavailable"
-        && campaign.status !== "integrity_unavailable")
       || values[0] || null;
   }
 
@@ -936,7 +1041,7 @@
     return widget;
   }
 
-  function renderCampaignDashboard(documentRef, elements, campaigns, selectedId, selectedStageId) {
+  function renderCampaignDashboard(documentRef, elements, campaigns, selectedId, selectedStageId, observationState = "live", nowMs = Date.now()) {
     const campaign = selectCampaign(campaigns, selectedId);
     elements.selector.replaceChildren();
     for (const candidate of campaigns) {
@@ -955,7 +1060,7 @@
       return {campaign_id: "", stage_id: ""};
     }
     elements.history.textContent = campaign.terminal
-      ? "HISTORICAL RECORD" : "OPEN RECORD · EXECUTION NOT PROVEN";
+      ? "HISTORICAL RECORD" : "OPEN RECORD · " + campaignObservation([campaign], observationState, nowMs).label;
     elements.widgets.replaceChildren(
       factWidget(documentRef, "Recorded outcome", campaignStatusLabel(campaign.status)),
       factWidget(documentRef, "Recorded stage", campaignStatusLabel(campaign.current_stage)),
@@ -1041,6 +1146,7 @@
     for (const attempt of attempts) {
       elements.detail.appendChild(element(documentRef, "p", "stage-attempt",
         `Attempt ${attempt.attempt} · ${attempt.stage.replace("_", " ")} · ${attempt.state} · `
+        + (attempt.timing_basis === "historical_invocation_envelope" ? "Historical invocation elapsed (not native active time) · " : "")
         + formatDuration(intervalSeconds(attempt, campaign.reporting, "stale", Date.now()))
         + ` · ${attempt.started_at || "Unknown start"} → ${attempt.ended_at || "No recorded close"}`
         + ` · Source: ${attempt.source_references.join(", ")}`));
@@ -1261,6 +1367,29 @@
       // redundant root spokes obscuring those documented relationships.
       if (id === "identity") edges.push({from: "combined-root", to: id, kind: "grouping", label: "contains"});
     }
+    const flows = [
+      ["console-surface", "Pi / PC console", "clients", "Lets Tanner inspect the same authenticated campaign state from supported console browsers.", "src/app/static/dev-console/console.js"],
+      ["pc-console-service", "PC console service", "clients", "Serves authenticated observations and durable updates while the required PC remains awake.", "src/app/server.py"],
+      ["pi-companion", "Pi companion", "embodiment", "Opens Summary through the bridge and manages Matrix; remote device health requires separate evidence.", "docs/console-observation-contract.md"],
+      ["managed-worker", "Managed Worker", "workers", "Executes the bound task and waits for exact native decisions; a standalone CLI is separate.", "src/runtime/codex_development_campaign.py"],
+      ["managed-reviewer", "Independent Reviewer", "workers", "Examines exact candidate material read-only and returns a separately validated independent disposition.", "src/runtime/wsl_codex_reviewer.py"],
+      ["pc-saved-update", "Saved PC update", "clients", "Retains one dated report for retrieval and copying on the device where that browser is open.", "src/app/server.py"]
+    ];
+    for (const [id,name,parent,summary,source] of flows) {
+      nodes.push({id,name,parent,summary,source,kind:"operation",maturity:"Existing implementation"});
+      groups.find(group=>group.id===parent).children.push(id);
+      edges.push({from:parent,to:id,kind:"association",label:"implemented flow participant",source});
+    }
+    for (const [from,to,label,source] of [
+      ["console-surface","pc-console-service","authenticated state / update request","src/app/server.py"],
+      ["pi-companion","console-surface","opens Summary through retained bridge","docs/console-observation-contract.md"],
+      ["pc-console-service","attention","exact authenticated decision","src/app/server.py"],
+      ["attention","managed-worker","one-action response to waiting operation","src/runtime/codex_app_server.py"],
+      ["managed-worker","development","task return / progress","src/runtime/codex_development_campaign.py"],
+      ["development","managed-reviewer","bound read-only review request","src/runtime/wsl_codex_reviewer.py"],
+      ["managed-reviewer","development","independent return, not deployment","src/runtime/wsl_codex_reviewer.py"],
+      ["pc-console-service","pc-saved-update","durable snapshot / exact download","src/app/server.py"]
+    ]) edges.push({from,to,label,source,kind:"flow"});
     const unmapped = new Map();
     for (const item of [...(roadmap && roadmap.phases || []), ...(roadmap && roadmap.tracks || [])]) {
       const topic = item.kind === "phase" && COMBINED_PHASE_TOPICS[item.number];
@@ -1295,7 +1424,7 @@
     for (const group of groups) {
       if (group.kind === "component" && group.children.some(id => {
         const child = nodes.find(node => node.id === id);
-        return child && child.maturity !== "implemented";
+        return child && child.kind !== "operation" && child.maturity !== "implemented";
       })) group.maturity = group.maturity === "Built" ? "Foundation built; expansions planned" : group.maturity;
     }
     return {nodes, edges, groups};
@@ -1373,13 +1502,48 @@
     state.y = 170 - (position.y + position.height / 2) * state.zoom;
   }
 
+  function combinedOperationStatus(id, projection, state, nowMs = Date.now()) {
+    const live = state === "live";
+    const campaign = selectCampaign(projection && projection.campaigns,
+      projection && projection.current_campaign_id);
+    const identity = campaign ? campaign.campaign_id : "No current campaign";
+    if (["managed-worker","managed-reviewer"].includes(id)) {
+      const role = id === "managed-worker" ? "worker" : "reviewer";
+      const observations = (campaign && campaign.managed || [])
+        .filter(item => (item.role || "worker") === role).sort((a,b)=>Date.parse(b.updated_at)-Date.parse(a.updated_at));
+      const current = observations[0];
+      if (!current) return {short:"Not attached",detail:identity+" · No managed "+role+" observation. A standalone CLI is not attached."};
+      const known = current.state === "completed" || current.state === "failed";
+      const fresh = live && Number.isFinite(Date.parse(current.verified_at))
+        && nowMs-Date.parse(current.verified_at)>=0 && nowMs-Date.parse(current.verified_at)<=30000;
+      // Process reachability is not execution. Use the same native-state
+      // interpretation as role clocks, scoped to this role and invocation.
+      const turns = (campaign.reporting && campaign.reporting.turns || [])
+        .filter(turn => turn.role === role && turn.invocation_id === current.invocation_id);
+      const turn = turns[turns.length - 1];
+      const native = nativeTurnLabel(turn, fresh ? "live" : "disconnected", nowMs);
+      const label = known ? "Last " + current.state : !fresh ? "Unknown / last known"
+        : !turn ? "No native turn"
+          : native.startsWith("Waiting") ? "Waiting"
+            : native === "Executing" ? "Executing" : "Execution unknown";
+      return {short:label,detail:`${identity} · ${current.invocation_id} · ${label}. Native turn ${turn ? turn.thread_id + "/" + turn.turn_id : "not observed"}: ${native}. Last activity ${current.updated_at||'unknown'}; last verified ${current.verified_at||'unavailable'}. A retained record is not a live process.`};
+    }
+    if (id === "pi-companion") return {short:"Remote unknown",detail:"This PC observation does not verify Pi reachability. The retained accepted rollout and Tanner's physical checks are historical evidence, not a live device heartbeat."};
+    if (id === "pc-console-service") return {short:live?"Reachable":"Not current",detail:"Authenticated PC service synchronization: "+(live?"successful":"not current")+". This does not establish Worker execution or Pi health."};
+    if (id === "console-surface") return {short:live?"Synchronized":"Last known",detail:identity+" · "+(live?"Browser received current authenticated observations.":"Retained observations only; current task state is unknown.")};
+    if (id === "pc-saved-update") return {short:live?"Service reachable":"Not current",detail:"Save outcome is verified per durable snapshot receipt, not inferred from service reachability. Retrieve that same ID on the PC; clipboard copying acts only on the device used."};
+    return {short:"Unknown",detail:"No independent runtime observation for this item."};
+  }
+
   function renderCombined(documentRef, elements, roadmap, state, components, projectionState) {
     if (!elements.combinedMap) return null;
     const model = combinedModel(roadmap), layout = combinedLayout(model, state.expanded);
     const graph = elements.combinedMap;
     state.minimumZoom = Math.min(0.15, Math.min(660 / layout.width, 400 / layout.height) / 2);
     if (!state.initialized) {combinedControl(state, "fit", layout); state.initialized = true;}
-    const renderKey = JSON.stringify([model, Array.from(state.expanded), state.selected]);
+    const operational = node => combinedOperationStatus(node.id,elements.projection,projectionState);
+    const renderKey = JSON.stringify([model, Array.from(state.expanded), state.selected,
+      model.nodes.filter(node=>node.kind==="operation").map(operational)]);
     if (graph.dataset.combinedRenderKey !== renderKey && !state.gesturing) {
     graph.dataset.combinedRenderKey = renderKey;
     graph.replaceChildren();
@@ -1406,11 +1570,11 @@
       const path = svgElement(documentRef, "path", {
         d: route,
         class: "combined-edge " + edge.kind, "aria-label": `${edge.from} → ${edge.to}: ${edge.label}`,
-        ...(edge.kind === "architecture" || edge.kind === "prerequisite" ? {"marker-end": "url(#combined-arrow)"} : {})});
+        ...(["architecture","prerequisite","flow"].includes(edge.kind) ? {"marker-end": "url(#combined-arrow)"} : {})});
       path.appendChild(svgElement(documentRef, "title", {}, `${edge.kind}: ${edge.label}`));
       layer.appendChild(path);
       if ((edge.from === state.selected || edge.to === state.selected)
-          && ["architecture", "prerequisite"].includes(edge.kind)) {
+          && ["architecture", "prerequisite", "flow"].includes(edge.kind)) {
         layer.appendChild(svgElement(documentRef, "text", {x: ex - 10, y: ey - 9,
           class: "combined-edge-label"}, edge.label));
       }
@@ -1440,7 +1604,7 @@
         {x: position.width / 2, y: (position.height === 64 ? 18 : 23) + index * (position.height === 64 ? 15 : 19)}, line + (index === 1 && lines.length > 2 ? "…" : ""))));
       button.appendChild(svgElement(documentRef, "text", {x: position.width / 2, y: position.height - 12, class: "combined-status"},
         (group ? (state.expanded.has(node.id) ? "− " : "+ ") + node.children.length + " · " : "")
-        + (String(node.maturity).startsWith("Foundation built") ? "Partial" : node.maturity === "In progress" ? "In progress" : node.maturity || (node.kind === "group" ? "Unknown" : "Overview"))
+        + (node.kind === "operation" ? operational(node).short : String(node.maturity).startsWith("Foundation built") ? "Partial" : node.maturity === "In progress" ? "In progress" : node.maturity || (node.kind === "group" ? "Unknown" : "Overview"))
         + (node.source_status === "proposed" ? " · proposed" : "")));
       layer.appendChild(button);
     }
@@ -1464,14 +1628,14 @@
     }
     const selected = model.nodes.find((node) => node.id === state.selected) || model.nodes[0];
     // Preserve source-excerpt reading state when an ordinary refresh repeats selection.
-    const key = JSON.stringify([selected, projectionState, components]);
+    const key = JSON.stringify([selected, projectionState, components, operational(selected)]);
     if (elements.detail.dataset.combinedDetailKey !== key) {
       elements.detail.dataset.combinedDetailKey = key;
       elements.detail.replaceChildren(element(documentRef, "h3", "", selected.name),
         element(documentRef, "p", "", selected.summary), detailList(documentRef, [
           ["Phase / track / component", selected.id], ["Maturity", selected.maturity || "Grouping only"],
           ["Planning status", selected.source_status || "Component reference"],
-          ["Runtime", selected.kind === "component" ? architectureObservation(components || [], selected.id, projectionState) : "unknown"],
+          ["Runtime", selected.kind === "operation" ? operational(selected).detail : selected.kind === "component" ? architectureObservation(components || [], selected.id, projectionState) : "unknown"],
           ["Source", selected.source || "Existing console inventory grouping"],
           ["Source revision", selected.source_revision || "Not projected"],
           ["Source digest", selected.source_sha256 || "Not projected"],
@@ -1678,7 +1842,8 @@
     if (projectionState === "sample") return {state: "sample", label: "SAMPLE Worker"};
     if (projectionState === "disconnected") return {state: "disconnected", label: "⊘ Disconnected"};
     if (projectionState !== "live") return {state: "stale", label: "◷ Stale"};
-    const managed = (projection && projection.campaigns || []).flatMap((campaign) => campaign.managed || []);
+    const selected = selectCampaign(projection && projection.campaigns, projection && projection.current_campaign_id);
+    const managed = (selected && selected.managed || []).slice();
     if (!managed.length) return {state: "unavailable", label: "◌ Worker not attached"};
     managed.sort((left, right) => Date.parse(right.updated_at || 0) - Date.parse(left.updated_at || 0));
     const latest = managed[0];
@@ -1686,8 +1851,8 @@
     if (["completed", "failed"].includes(latest.state)) {
       return {state: "unavailable", label: "◌ Worker not attached", updated_at: latest.updated_at};
     }
-    const age = Number(nowMs) - Date.parse(latest.updated_at);
-    if (!Number.isFinite(age) || age > 45_000) {
+    const age = Number(nowMs) - Date.parse(latest.verified_at || '');
+    if (!Number.isFinite(age) || age < 0 || age > 30_000) {
       return {state: "stale", label: "◷ Stale", updated_at: latest.updated_at};
     }
     return {state: "live", label: "◉ Live", updated_at: latest.updated_at};
@@ -1861,6 +2026,16 @@
     let selectedRoadmapId = "";
     let roadmapFilter = "";
     let pendingUpdateKey = "";
+    let pendingUpdateCampaign = null;
+    let explicitCampaignSelection = false;
+    let localStore;
+    try {
+      localStore = value.storage || root.localStorage;
+      const retained = JSON.parse(localStore.getItem("fawkes-console-update-retry-v1") || "null");
+      if (retained && typeof retained.key === "string") {
+        pendingUpdateKey = retained.key; pendingUpdateCampaign = retained.campaign_id || null;
+      }
+    } catch (_unavailable) { /* Saving remains available without local browser storage. */ }
     const clock = typeof value.now === "function" ? value.now : Date.now;
     const projectionScheduler = value.projectionScheduler || {
       setTimeout: root.setTimeout.bind(root), clearTimeout: root.clearTimeout.bind(root)
@@ -1941,7 +2116,8 @@
       bridgeState.textContent = observedAt && state === "live"
         ? "PC SERVICE REACHABLE" : "PC SERVICE NOT CURRENT";
       previewContext.textContent = previewContextLabel(projection && projection.build, candidateContext);
-      const observedCampaign = campaignObservation(projection && projection.campaigns, state);
+      const observedCampaign = campaignObservation((projection && projection.campaigns || [])
+        .filter(item => item.campaign_id === projection.current_campaign_id), state, clock());
       campaignState.textContent = observedCampaign.label;
       campaignState.dataset.campaignObservation = observedCampaign.kind;
       const observedAttention = attentionObservation(projection && projection.attention, state);
@@ -1975,16 +2151,25 @@
         Number.isFinite(nowMs) ? nowMs : clock());
       renderAttention(documentRef, attentionSlot, visibleAttention);
       renderJobs(documentRef, activityFeed, projection.jobs || [], state);
+      if (!explicitCampaignSelection || !(projection.campaigns || []).some(c => c.campaign_id === selectedCampaignId)) {
+        selectedCampaignId = projection.current_campaign_id || "";
+        explicitCampaignSelection = false;
+      }
+      const selectionLabel = documentRef.getElementById("summary-selection");
+      if (selectionLabel) selectionLabel.textContent = "Current objective · " + (projection.current_campaign_id || "No campaign recorded");
       const campaignSelection = renderCampaignDashboard(documentRef, campaignElements,
-        projection.campaigns || [], selectedCampaignId, selectedCampaignStageId);
+        projection.campaigns || [], selectedCampaignId, selectedCampaignStageId, state, clock());
       selectedCampaignId = campaignSelection.campaign_id;
       selectedCampaignStageId = campaignSelection.stage_id;
       updateStageTimers(campaignElements.graph, selectCampaign(projection.campaigns, selectedCampaignId), state, clock());
+      renderRoleClocks(documentRef, documentRef.getElementById("campaign-role-clocks"),
+        selectCampaign(projection.campaigns, selectedCampaignId), state, clock());
       const repositorySelection = renderRepositoryDashboard(documentRef, repositoryElements,
         projection.repository, state, selectedRepositoryPath, repositoryDetailOpen);
       selectedRepositoryPath = repositorySelection.path;
       repositoryDetailOpen = repositorySelection.detail_open;
       architectureElements.components = projection.components || [];
+      architectureElements.projection = projection;
       architectureElements.projectionState = state;
       if (architectureMode === "current") selectedArchitectureId = renderArchitectureDashboard(documentRef, architectureMap,
         architectureDetail, projection.components || [], state, selectedArchitectureId);
@@ -2041,11 +2226,16 @@
           const suffix = root.crypto && typeof root.crypto.randomUUID === "function"
             ? root.crypto.randomUUID() : `${clock()}-${Math.random().toString(16).slice(2)}`;
           pendingUpdateKey = "console-browser-" + suffix;
+          pendingUpdateCampaign = displayedProjection && displayedProjection.current_campaign_id || null;
+          try { localStore.setItem("fawkes-console-update-retry-v1", JSON.stringify({
+            key: pendingUpdateKey, campaign_id: pendingUpdateCampaign})); } catch (_unavailable) {}
         }
         const update = await postJson(fetchImpl, ENDPOINTS.updates,
-          {idempotency_key: pendingUpdateKey}, {csrf: csrf.csrf_token});
+          {idempotency_key: pendingUpdateKey, ...(pendingUpdateCampaign ? {campaign_id: pendingUpdateCampaign} : {})}, {csrf: csrf.csrf_token});
         updateResult.textContent = `Update saved · ${update.snapshot_id} · Open Fawkes on your PC to copy or download it.`;
         pendingUpdateKey = "";
+        pendingUpdateCampaign = null;
+        try {localStore.removeItem("fawkes-console-update-retry-v1");} catch (_unavailable) {}
         await refreshPreparedUpdates();
       } catch (error) {
         updateResult.textContent = "Update not saved · " + safeText(error && error.message, 300)
@@ -2158,6 +2348,7 @@
     documentRef.getElementById("next-page").addEventListener("click", () => navigation.next());
     indicators.forEach((item) => item.addEventListener("click", () => navigation.go(Number(item.dataset.pageTarget), "indicator")));
     campaignElements.selector.addEventListener("change", () => {
+      explicitCampaignSelection = true;
       selectedCampaignId = safeIdentifier(campaignElements.selector.value, 180);
       selectedCampaignStageId = "";
       if (displayedProjection) {
@@ -2345,7 +2536,7 @@
         const clipboard = value.clipboard || (root.navigator && root.navigator.clipboard);
         if (!clipboard || typeof clipboard.writeText !== "function") throw new Error("Clipboard access is unavailable.");
         await clipboard.writeText(content);
-        updateResult.textContent = `Copied · ${snapshotId}`;
+        updateResult.textContent = `Copied to this device's clipboard · ${snapshotId}. Pi copying does not fill Windows' clipboard.`;
       } catch (error) {
         updateResult.textContent = "Copy unavailable; use Download .txt or the selectable text below.";
         try {
@@ -2359,7 +2550,14 @@
     shell.addEventListener("click", (event) => {
       navigation.activity();
       const pageLink = event.target.closest && event.target.closest("[data-page-link]");
-      if (pageLink) navigation.go(Number(pageLink.dataset.pageLink), "detail-link");
+      if (pageLink) {
+        if (pageLink.dataset.campaignId && displayedProjection) {
+          selectedCampaignId = pageLink.dataset.campaignId; explicitCampaignSelection = true;
+          selectedCampaignStageId = "";
+          render(displayedProjection, shell.dataset.projectionState, lastSuccessMs, clock());
+        }
+        navigation.go(Number(pageLink.dataset.pageLink), "detail-link");
+      }
       const card = event.target.closest && event.target.closest("details.console-card");
       if (selectedCard && selectedCard !== card) selectedCard.classList.remove("selected");
       selectedCard = card || selectedCard;
@@ -2408,6 +2606,8 @@
     const timingTimer = root.setInterval ? root.setInterval(() => {
       if (displayedProjection) updateStageTimers(campaignElements.graph,
         selectCampaign(displayedProjection.campaigns, selectedCampaignId), shell.dataset.projectionState, clock());
+      if (displayedProjection) renderRoleClocks(documentRef, documentRef.getElementById("campaign-role-clocks"),
+        selectCampaign(displayedProjection.campaigns, selectedCampaignId), shell.dataset.projectionState, clock());
     }, 1000) : null;
     return {
       navigation,
@@ -2451,8 +2651,8 @@
     architectureObservation,
     managedFeedObservation,
     renderRoadmapInventory,
-    normalizeConsoleReporting, lifecycleTime, formatDuration, intervalSeconds, updateStageTimers,
-    combinedModel, combinedLayout, combinedState, combinedControl, focusCombined, renderCombined, bindCombinedGestures,
+    normalizeConsoleReporting, lifecycleTime, formatDuration, intervalSeconds, updateStageTimers, roleClocks,
+    combinedModel, combinedLayout, combinedState, combinedControl, focusCombined, renderCombined, bindCombinedGestures, combinedOperationStatus,
     renderJobs, renderCampaignDashboard,
     ConsoleNavigation,
     attachContentScrolling,

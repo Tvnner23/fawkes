@@ -22,10 +22,10 @@ class LegacyActionMaterialTests(unittest.TestCase):
             '/fixture/old.txt':{'type':'delete','content':''},
             '/fixture/edit.txt':{'type':'update','unified_diff':'-old\n+new\n','move_path':None}}}
 
-    def run_request(self, method, params, choice='approve_once', mutate=False):
+    def run_request(self, method, params, choice='approve_once', mutate=False, sandbox='workspace-write'):
         from tests.test_codex_reviewer_client_compatibility import Process, START, ITEM, END
         from src.runtime import codex_app_server as app
-        self.seen=[];self.claims=[]
+        self.seen=[];self.claims=[];self.progress=[]
         frames=copy.deepcopy(START)+[{'id':41,'method':method,'params':params}]
         if choice == 'approve_once':
             frames.append({'method':'serverRequest/resolved','params':{'threadId':'t','requestId':41}})
@@ -47,9 +47,9 @@ class LegacyActionMaterialTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root, patch.object(transport,'qualify',return_value={'synthetic':True}), \
              patch.object(app.subprocess,'Popen',side_effect=AssertionError('Real process forbidden')):
             return transport.run(cwd=root,prompt='synthetic',output_schema={'type':'object'},
-                output_path=Path(root)/'output.json',sandbox='workspace-write',campaign_id='c',
+                output_path=Path(root)/'output.json',sandbox=sandbox,campaign_id='c',
                 invocation_id='i',worker={'worker_id':'fixture'},environment={},
-                approval_handler=handler,allow_detached_continuation=False)
+                approval_handler=handler,allow_detached_continuation=False,progress_handler=self.progress.append)
 
     def replies(self):
         return [json.loads(line) for line in self.process.stdin.getvalue().splitlines()
@@ -63,6 +63,17 @@ class LegacyActionMaterialTests(unittest.TestCase):
                 self.assertNotIn('approve_once',self.seen[0]['protocol']['native_decision_choices'])
                 self.assertIsNone(self.seen[0]['exact_action']['action'])
                 self.assertEqual(self.replies(),[]);self.assertEqual(self.claims,[])
+
+    def test_read_only_policy_denial_is_not_a_wait_for_tanner(self):
+        result=self.run_request('applyPatchApproval',self.valid('applyPatchApproval'),
+            choice='deny',sandbox='read-only')
+        self.assertEqual(result.returncode,0)
+        self.assertEqual(self.seen,[]);self.assertEqual(self.claims,[])
+        self.assertEqual(self.replies(),[{'id':41,'result':{
+            'decision':{'denied':{'rejection':'Denied by authenticated Rider'}}}}])
+        self.assertNotIn('permission_wait',[event['kind'] for event in self.progress])
+        self.assertEqual(next(event['state'] for event in self.progress if event['kind']=='permission_result'),'running')
+        self.assertEqual(self.progress[-1]['kind'],'final_result')
 
     def test_required_material_missing_or_wrong_type_fails_display_and_response(self):
         for method,keys in (('execCommandApproval',('command','cwd','parsedCmd')),
@@ -175,7 +186,95 @@ class LocalTransport(CodexAppServerTransport):
         # Protocol fixture only; the installed executable has a separate real qualification.
         return {"protocol_version":PROTOCOL_VERSION,"synthetic":True}
 
+class NativeTerminalObservationTests(unittest.TestCase):
+    def replay(self,status,*,message=True,write_failure=False,wrong_identity=False,drop_start=False):
+        from tests.test_codex_reviewer_client_compatibility import Process,START,ITEM,END
+        from src.runtime import codex_app_server as app
+        end=copy.deepcopy(END);end['params']['turn']['status']=status
+        if wrong_identity:end['params']['turn']['id']='another-turn'
+        frames=copy.deepcopy(START)+([copy.deepcopy(ITEM)] if message else [])+[end]
+        process=Process(frames);events=[]
+        def observe(event):
+            if drop_start and event['kind']=='turn_started':
+                raise OSError('Synthetic start observation write unavailable')
+            events.append(event)
+        transport=app.CodexAppServerTransport(protocol_version=MANAGED_PROTOCOL_VERSION,
+            timeout_seconds=2,popen=lambda *a,**k:process)
+        with tempfile.TemporaryDirectory() as root,patch.object(transport,'qualify',return_value={'synthetic':True}),patch.object(app.subprocess,'Popen',side_effect=AssertionError('No process')):
+            output=Path(root)/'out.json'
+            def run():
+                return transport.run(cwd=root,prompt='synthetic',output_schema={'type':'object'},
+                    output_path=output,sandbox='read-only',campaign_id='synthetic-c',
+                    invocation_id='synthetic-i',worker={'worker_id':'synthetic-r'},environment={},
+                    allow_detached_continuation=False,progress_handler=observe)
+            if write_failure:
+                with patch.object(Path,'write_text',side_effect=OSError('Synthetic output unavailable')):
+                    with self.assertRaises(OSError):run()
+            elif status!='completed' or not message or wrong_identity:
+                with self.assertRaises(OSError):run()
+            else:self.assertEqual(run().returncode,0)
+            if write_failure or status!='completed' or not message or wrong_identity:self.assertFalse(output.exists())
+        self.assertEqual(process.terminated,1)
+        sent=[json.loads(line) for line in process.stdin.getvalue().splitlines()]
+        self.assertEqual([v.get('method') for v in sent],['initialize','initialized','thread/start','turn/start'])
+        return events
+
+    def test_observed_terminal_preserved_before_return_validation_or_output_write(self):
+        from src.runtime.console_observation import execution_turns
+        cases=[('completed',True,False),('failed',True,False),('interrupted',True,False),
+               ('completed',False,False),('completed',True,True)]
+        for status,message,write_failure in cases:
+            with self.subTest(status=status,message=message,write_failure=write_failure):
+                events=self.replay(status,message=message,write_failure=write_failure)
+                terminal=[e for e in events if e['kind']=='final_result']
+                self.assertEqual(len(terminal),1)
+                self.assertEqual(terminal[0]['state'],'completed' if status=='completed' and message else 'failed')
+                timing=[e for e in events if e['kind'] in {'turn_started','final_result','transport_closed'}]
+                observation={'invocation_id':'synthetic-i','role':'reviewer','state':events[-1]['state'],
+                    'timing_events':timing,'last_verified_at':timing[-1]['created_at']}
+                turn=execution_turns([observation],observed_at=timing[-1]['created_at'])[0]
+                self.assertIsNotNone(turn['ended_at']);self.assertIsNotNone(turn['active_seconds'])
+                self.assertEqual(turn['state'],terminal[0]['state']);self.assertFalse(turn['active_verified'])
+                self.assertEqual(turn['ended_at'],terminal[0]['created_at'])
+
+    def test_wrong_or_nonterminal_frame_never_becomes_completed_observation(self):
+        for status,wrong in [('completed',True),('inProgress',False),('unfamiliar',False),([],False),(None,False)]:
+            events=self.replay(status,wrong_identity=wrong)
+            self.assertNotIn('final_result',[e['kind'] for e in events])
+            self.assertEqual(events[-1]['kind'],'transport_closed')
+
+    def test_actual_tolerated_start_observation_failure_retains_unknown_duration(self):
+        from src.runtime.console_observation import execution_turns
+        events=self.replay('completed',drop_start=True)
+        timing=[e for e in events if e['kind'] in {'turn_started','final_result','transport_closed'}]
+        turn=execution_turns([{'invocation_id':'synthetic-i','role':'reviewer',
+            'state':'completed','timing_events':timing}],observed_at=timing[-1]['created_at'])[0]
+        self.assertTrue(turn['history_incomplete']);self.assertIsNone(turn['started_at'])
+        self.assertIsNone(turn['active_seconds']);self.assertIsNotNone(turn['ended_at'])
+
 class PiConsoleTests(unittest.TestCase):
+    def test_permission_history_exact_authenticated_observation_route(self):
+        url='/api/development/attention?observation=true'
+        self.assertEqual(self.request(url)[0],401)
+        self.login();event=self.pending()
+        before={str(p.relative_to(self.root)):p.read_bytes() for p in self.root.rglob('*.json')}
+        with patch.object(self.service,'development_attention',create=True,side_effect=AssertionError('Mutating collection forbidden')):
+            status,history,_=self.request(url)
+            self.assertEqual(status,200,history)
+            self.assertIn(event['attention_id'],json.dumps(history))
+            for suffix in ('','?observation=false','?observation=true&observation=false','?observation=true&extra=x'):
+                self.assertEqual(self.request('/api/development/attention'+suffix)[0],404)
+        after={str(p.relative_to(self.root)):p.read_bytes() for p in self.root.rglob('*.json')}
+        self.assertEqual(before,after)
+        identity=self.campaign.attention_store._authority_binding(event)
+        self.assertEqual(self.request(self.decision_path(event),{'choice':'deny','identity':identity})[0],200)
+        before={str(p.relative_to(self.root)):p.read_bytes() for p in self.root.rglob('*.json')}
+        status,history,_=self.request(url)
+        self.assertEqual(status,200,history);self.assertIn(event['attention_id'],json.dumps(history))
+        self.assertEqual(before,{str(p.relative_to(self.root)):p.read_bytes() for p in self.root.rglob('*.json')})
+        print(json.dumps({'synthetic_history_http_status':status,'path':url,
+            'response':history,'canonical_files_unchanged_by_read':True}))
+
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
         self.root=Path(self.tmp.name)
@@ -186,6 +285,7 @@ class PiConsoleTests(unittest.TestCase):
             "maximum_reviewer_turns":1,"maximum_provider_turns":2,"maximum_cost_units":2,
             "maximum_correction_cycles":1,"maximum_iterations":1}
         record=self.campaign.create(payload,authenticated_rider=True,stepwise=True)
+        self.worker_id=record["builder"]["worker_id"]
         self.campaign_id=record["campaign_id"];self.invocation_id="pi-fixture-worker-appserver"
         self.campaign._update(record,event_kind="fixture_owner_binding",event_detail={},
             active_builder_task_scope_id="pi-fixture-worker",status="builder_running")
@@ -228,7 +328,7 @@ class PiConsoleTests(unittest.TestCase):
         approval=self.binding(typed_approval(METHOD,{"threadId":"fixture-thread","turnId":"fixture-turn",
             "itemId":"fixture-action","startedAtMs":1,"command":"fixture marker only","cwd":str(self.root),
             "availableDecisions":["accept","decline","cancel"]},campaign_id=self.campaign_id,
-            invocation_id=self.invocation_id,worker={"worker_id":"fixture-worker","role":"builder"},process_id=os.getpid()))
+            invocation_id=self.invocation_id,worker={"worker_id":self.worker_id,"role":"builder"},process_id=os.getpid()))
         record=self.campaign.require_tanner(self.campaign_id,invocation_id=self.invocation_id,
             worker=approval["worker"],kind=approval["kind"],blocked_action=approval["blocked_action"],
             why_required=approval["why_required"],requested_authority=approval["requested_authority"],
@@ -293,19 +393,23 @@ class PiConsoleTests(unittest.TestCase):
                 approved_action_sha256=event["protocol_binding"]["approved_action_sha256"])
             self.campaign.attention_store.finish_live_action(d["decision_id"],status="failed")
     def _native_roundtrip(self,choice):
-        self.login();completed=[];errors=[];child=[]
+        self.login();completed=[];errors=[];child=[];decision_observations=[]
         def popen(_command,**kwargs):
             p=subprocess.Popen([sys.executable,str(Path(__file__).parent/"fixtures"/"pi_native_appserver_child.py"),str(self.root)],**kwargs)
             child.append(p);return p
         def handler(approval,**kwargs):
             return self.campaign._handle_typed_approval(self.binding(approval),**kwargs)
+        def observe(event):
+            self.campaign.record_managed_worker_activity(event)
+            if event["kind"] == "permission_result":
+                decision_observations.append(self.campaign.managed_worker_activity_projection(self.campaign_id)[0])
         def run():
             try:completed.append(LocalTransport(popen=popen,timeout_seconds=10,decision_timeout_seconds=20).run(
                 cwd=self.root,prompt="LOCAL FIXTURE ONLY",output_schema={"type":"object"},
                 output_path=self.root/"fixture-output.json",sandbox="workspace-write",
                 campaign_id=self.campaign_id,invocation_id=self.invocation_id,
-                worker={"worker_id":"fixture-worker","role":"builder"},environment=dict(os.environ),
-                approval_handler=handler,progress_handler=self.campaign.record_managed_worker_activity))
+                worker={"worker_id":self.worker_id,"role":"builder"},environment=dict(os.environ),
+                approval_handler=handler,progress_handler=observe))
             except BaseException as exc:errors.append(exc)
         thread=threading.Thread(target=run);thread.start()
         event=None
@@ -330,7 +434,18 @@ class PiConsoleTests(unittest.TestCase):
                 "cancelled" if choice=="cancel_campaign" else "failed_safe")
             if choice=="cancel_campaign":
                 self.assertEqual(len(errors),1);self.assertEqual(errors[0].category,"campaign_cancelled")
-            else:self.assertEqual(errors,[])
+            else:
+                self.assertEqual(errors,[])
+                self.assertEqual(decision_observations[0]["state"],"running")
+                self.assertEqual(decision_observations[0]["timing_events"][-1]["state"],"failed")
+                activity=self.campaign.managed_worker_activity_projection(self.campaign_id)[0]
+                from src.runtime.console_observation import execution_turns
+                turn=execution_turns([activity],observed_at=datetime.now(timezone.utc).isoformat())[0]
+                final=activity["timing_events"][-1]
+                self.assertEqual(final["kind"],"final_result")
+                self.assertEqual(turn["ended_at"],datetime.fromisoformat(final["created_at"]).isoformat())
+                self.assertEqual(turn["state"],"failed")
+                self.assertIsNotNone(turn["active_seconds"])
             return
         self.assertEqual(errors,[])
         self.assertEqual(len(completed),1);self.assertTrue((self.root/"fixture-action-once").is_file())
@@ -345,6 +460,14 @@ class PiConsoleTests(unittest.TestCase):
         self.assertEqual(len({e["event_id"] for e in activity["events"]}),len(activity["events"]))
         self.assertIn("Reading the harmless local fixture.",str(activity))
         self.assertNotIn("HIDDEN-MUST-NOT-PROJECT",str(activity))
+        timing=activity['timing_events']
+        self.assertEqual([e['kind'] for e in timing],['turn_started','permission_wait','permission_result','final_result'])
+        self.assertEqual(len({(e['thread_id'],e['turn_id']) for e in timing}),1)
+        from src.runtime.console_observation import execution_turns
+        turns=execution_turns([activity],observed_at=datetime.now(timezone.utc).isoformat())
+        self.assertEqual(len(turns),1);self.assertEqual(turns[0]['state'],'completed')
+        self.assertFalse(turns[0]['active_verified'])
+        self.assertGreaterEqual(turns[0]['waiting_seconds'],0)
         from src.runtime.codex_development_campaign import CodexDevelopmentCampaign
         restored=CodexDevelopmentCampaign(self.campaign.instance_id,root=self.root/"campaigns",
             runtime_state_root=self.root/"runtime")
@@ -383,13 +506,52 @@ class PiConsoleTests(unittest.TestCase):
         record=self.campaign.store.load(self.campaign_id)
         event={"campaign_id":self.campaign_id,"invocation_id":self.invocation_id,"event_id":"fixture-event",
             "created_at":datetime.now(timezone.utc).isoformat(),"kind":"progress","state":"running",
-            "public_message":"Reading source","worker":{"worker_id":"fixture-worker"},"process_id":os.getpid()}
+            "public_message":"Reading source","worker":{"worker_id":self.worker_id},"process_id":os.getpid()}
         self.campaign.record_managed_worker_activity(event);self.campaign.record_managed_worker_activity(event)
         self.assertEqual(record,self.campaign.store.load(self.campaign_id))
         self.assertEqual(len(self.campaign.managed_worker_activity_projection(self.campaign_id)[0]["events"]),1)
         with self.assertRaises(PermissionError):self.campaign.record_managed_worker_activity({**event,"invocation_id":"neighbor-appserver"})
         with patch("src.runtime.development_attention._linux_process_identity",return_value=None):
             self.assertEqual(self.campaign.managed_worker_activity_projection(self.campaign_id)[0]["state"],"disconnected")
+    def test_reviewer_clock_requires_current_package_and_exact_role(self):
+        record=self.campaign.store.load(self.campaign_id)
+        record=self.campaign._update(record,event_kind='synthetic-review-queue',status='awaiting_independent_review',
+            review_requests=[{'package_id':'old-package'},{'package_id':'exact-package'}])
+        event={'campaign_id':self.campaign_id,'invocation_id':'independent-review-one',
+            'worker':{'worker_id':record['reviewer_requirement']['worker_id']},'process_id':os.getpid(),
+            'event_id':'review-turn-start','created_at':datetime.now(timezone.utc).isoformat(),
+            'kind':'turn_started','state':'running','thread_id':'review-thread','turn_id':'review-turn',
+            'public_message':'Independent review started'}
+        with self.assertRaises(PermissionError):self.campaign.record_managed_reviewer_activity(event,package_id='old-package')
+        with self.assertRaises(PermissionError):self.campaign.record_managed_reviewer_activity(
+            {**event,'worker':{'worker_id':self.worker_id}},package_id='exact-package')
+        self.campaign.record_managed_reviewer_activity(event,package_id='exact-package')
+        self.campaign.record_managed_reviewer_activity(event,package_id='exact-package')
+        observed=self.campaign.managed_worker_activity_projection(self.campaign_id)[0]
+        self.assertEqual(observed['role'],'reviewer');self.assertEqual(len(observed['timing_events']),1)
+        self.assertEqual(self.campaign.store.load(self.campaign_id),record)
+    def test_retained_invocation_cap_propagates_incomplete_timing(self):
+        from src.runtime.autonomy_supervision import campaign_console_reporting
+        from tests.test_console_observation import transition
+        record=self.campaign.store.load(self.campaign_id)
+        record=self.campaign._update(record,event_kind="synthetic-review-queue",
+            status="awaiting_independent_review",review_requests=[{"package_id":"exact-package"}])
+        for index in range(9):
+            for kind,second,state in (("turn_started",index*20,"running"),("final_result",index*20+10,"completed")):
+                event=transition(kind,second,state,turn=f"turn-{index}")
+                event.update(campaign_id=self.campaign_id,invocation_id=f"review-{index}",
+                    worker={"worker_id":record["reviewer_requirement"]["worker_id"]},
+                    process_id=os.getpid(),public_message="Synthetic timing boundary")
+                self.campaign.record_managed_reviewer_activity(event,package_id="exact-package")
+            projected=self.campaign.managed_worker_activity_projection(self.campaign_id)
+            self.assertEqual(any(item["timing_history_incomplete"] for item in projected),index==8)
+        self.assertEqual(len(projected),8)
+        report=campaign_console_reporting(record,projected,observed_at="2026-09-11T03:10:00Z")
+        self.assertTrue(report["timing_history_incomplete"])
+        self.assertEqual(len(report["turns"]),8)
+        self.assertTrue(all(turn["active_seconds"]==10 for turn in report["turns"]))
+        self.assertEqual(self.campaign.store.load(self.campaign_id),record)
+
     def test_public_progress_redacts_complete_credentials_before_durable_retention(self):
         from src.runtime.codex_app_server import _safe
         samples=['Authorization: Bearer SYNTHETIC_REVIEW_MARKER',
@@ -402,7 +564,7 @@ class PiConsoleTests(unittest.TestCase):
             self.campaign.record_managed_worker_activity({"campaign_id":self.campaign_id,
                 "invocation_id":self.invocation_id,"event_id":"redaction-"+str(index),
                 "created_at":datetime.now(timezone.utc).isoformat(),"kind":"progress","state":"running",
-                "public_message":text,"worker":{"worker_id":"fixture-worker"},"process_id":os.getpid()})
+                "public_message":text,"worker":{"worker_id":self.worker_id},"process_id":os.getpid()})
         records=list((self.campaign.store.root/'.managed-activity').glob('*.json'))
         self.assertTrue(records)
         for path in records:self.assertNotIn('SYNTHETIC_REVIEW_MARKER',path.read_text())
@@ -416,7 +578,7 @@ class PiConsoleTests(unittest.TestCase):
                 "invocation_id":self.invocation_id,"event_id":"large-"+str(index),
                 "created_at":datetime.now(timezone.utc).isoformat(),"kind":"progress","state":"running",
                 "public_message":"Public progress "+chr(0x1f600)*2000,
-                "worker":{"worker_id":"fixture-worker"},"process_id":os.getpid()})
+                "worker":{"worker_id":self.worker_id},"process_id":os.getpid()})
         with patch.object(self.service,"development_console_repository_projection",return_value=_repository_fixture()):
             status,value,_=self.request("/api/development/dev-console")
         self.assertEqual(status,200,value)

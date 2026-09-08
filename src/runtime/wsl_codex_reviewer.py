@@ -785,6 +785,7 @@ class WslCodexReviewAdapter:
     def deliver_candidate_once(self, *, package_id, transport_authority, return_authority,
                                campaign_id, builder_return_report_id, candidate_snapshot_id,
                                candidate_snapshot_root, invocation_id=None, approval_handler=None,
+                               progress_handler=None,
                                _production_use=False):
         package = self.exchange._load("packages", package_id); recipient = package["recipient"]
         if recipient.get("worker_id") != WSL_REVIEWER_WORKER_ID or recipient.get("role") != WSL_REVIEWER_ROLE:
@@ -874,7 +875,7 @@ class WslCodexReviewAdapter:
                         output_path=output, sandbox="read-only", campaign_id=campaign_id,
                         invocation_id=invocation_id, worker=request["recipient"],
                         environment=_minimal_environment(), approval_handler=approval_handler,
-                        approval_binding=approval_binding)
+                        approval_binding=approval_binding, progress_handler=progress_handler)
                 else:
                     completed = self.run_process(command, prompt=prompt,
                         environment=_minimal_environment(), timeout=self.timeout_seconds)
@@ -966,7 +967,7 @@ class WslCodexReviewAdapter:
                             sandbox="read-only", campaign_id=campaign_id,
                             invocation_id=active_invocation_id, worker=request["recipient"],
                             environment=_minimal_environment(), approval_handler=approval_handler,
-                            approval_binding=repair_approval_binding)
+                            approval_binding=repair_approval_binding, progress_handler=progress_handler)
                     else:
                         repair_completed = self.run_process(repair_command, prompt=repair_prompt,
                             environment=_minimal_environment(), timeout=self.timeout_seconds)

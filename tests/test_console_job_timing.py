@@ -110,7 +110,7 @@ class ConsoleJobTimingTests(unittest.TestCase):
         self.assertFalse(job["successful"])
         self.assertEqual(job["state"], "waiting")
 
-    def test_active_requires_exact_fresh_running_observation(self):
+    def test_process_observation_without_native_start_never_counts_execution(self):
         source = record("builder_in_progress")
         source["builder_runs"] = []
         source["events"] = source["events"][:2]
@@ -118,11 +118,12 @@ class ConsoleJobTimingTests(unittest.TestCase):
         managed = {"invocation_id": "task-one-appserver", "worker_id": "worker-one",
             "state": "running", "updated_at": "2026-09-11T03:09:59+00:00", "events": []}
         result = campaign_console_reporting(source, [managed], observed_at=NOW)["intervals"][0]
-        self.assertTrue(result["active_verified"])
-        self.assertEqual(result["duration_seconds"], 540)
-        self.assertEqual(_console_jobs([projected(source, [managed])], [])[0]["state"], "working")
+        self.assertFalse(result["active_verified"])
+        self.assertIsNone(result["duration_seconds"])
+        self.assertEqual(result["timing_basis"], "historical_invocation_envelope")
+        self.assertEqual(_console_jobs([projected(source, [managed])], [])[0]["state"], "waiting")
         quiet = campaign_console_reporting(source, [{**managed, "updated_at": "2026-09-11T03:01:00+00:00"}], observed_at=NOW)
-        self.assertTrue(quiet["intervals"][0]["active_verified"], "quiet process-verified work is not stale prose")
+        self.assertFalse(quiet["intervals"][0]["active_verified"], "quiet process reachability is not native execution")
         for change in ({"state": "waiting"}, {"state": "disconnected"}, {"state": "completed"},
                        {"invocation_id": "neighbor"}, {"worker_id": "neighbor"},
                        {"updated_at": "2026-09-11T03:10:01+00:00"}):
@@ -213,6 +214,119 @@ class ConsoleJobTimingTests(unittest.TestCase):
             broken = copy.deepcopy(report); mutate(broken)
             owner.exchange = SimpleNamespace(_load=lambda kind, _: broken if kind == "reports" else package)
             self.assertEqual(owner._console_return_recap(source), {"status": "unavailable"})
+
+
+class CompleteExecutionProjectionTests(unittest.TestCase):
+    def project_all(self, sources):
+        from datetime import datetime
+        from src.app.server import developer_console_projection
+        from tests.test_dev_console_projection import _repository_fixture
+        wrappers=[]
+        for source,rows in sources:
+            owner=object.__new__(CodexDevelopmentCampaign)
+            owner.store=SimpleNamespace(load=lambda _,s=source:copy.deepcopy(s))
+            owner.exchange=SimpleNamespace(_load=lambda *_: (_ for _ in ()).throw(KeyError('No fixture return')))
+            owner.managed_worker_activity_projection=lambda _,r=rows:copy.deepcopy(r)
+            with patch('src.runtime.autonomy_supervision.campaign_console_reporting',
+                    side_effect=lambda s,r:campaign_console_reporting(s,r,observed_at=NOW)):
+                wrappers.append(owner.presentation(source['campaign_id']))
+        service=SimpleNamespace(list_codex_development_campaigns=lambda:{'campaigns':wrappers},
+            development_attention_projection=lambda **_:{'attention':[],'creates_authority':False},
+            production_component_status=lambda:{'components':{},'creates_authority':False},
+            development_console_repository_projection=_repository_fixture)
+        with patch('src.app.server.datetime',wraps=datetime) as clock:
+            clock.now.return_value=datetime.fromisoformat(NOW)
+            return developer_console_projection(service)
+
+    def source(self, role='worker', native=False):
+        source=record('builder_in_progress' if role=='worker' else 'awaiting_independent_review')
+        source.update(campaign_id='current-objective',created_at='2026-09-11T03:00:00+00:00',
+            updated_at=NOW,builder_runs=[],events=source['events'][:2],active_builder_task_scope_id='task-one')
+        rows=[{'invocation_id':'task-one-appserver' if role=='worker' else 'review-one',
+            'worker_id':role+'-one','role':role,'state':'running',
+            'updated_at':'2026-09-11T03:01:00+00:00','verified_at':NOW,'events':[],
+            'timing_events':([{'event_id':'native-start','kind':'turn_started','state':'running',
+                'created_at':'2026-09-11T03:09:00+00:00','thread_id':'thread-one','turn_id':'turn-one'}] if native else [])}]
+        return source,rows
+
+    def render(self, projection):
+        script="""const a=require('./tests/js/dev_console_projection_harness.js').consoleApi;
+const raw=JSON.parse(require('fs').readFileSync(0,'utf8')),n=Date.parse(raw.observed_at);
+const p=a.normalizePayloads(raw,{nowMs:n,baseUrl:'http://127.0.0.1:8792/'});
+if(!p.ok)throw Error(JSON.stringify(p));const c=a.selectCampaign(p.campaigns,p.current_campaign_id);
+const stages=a.campaignGraphModel(c).stages;process.stdout.write(JSON.stringify({
+clocks:a.roleClocks(c,'live',n),combined:['worker','reviewer'].map(r=>a.combinedOperationStatus('managed-'+r,p,'live',n)),
+feed:a.managedFeedObservation(p,'live',n),execution:a.campaignObservation([c],'live',n),
+stages:stages.map(s=>({id:s.id,state:s.state,seconds:s.intervals.length?a.intervalSeconds(s.intervals[s.intervals.length-1],c.reporting,'live',n):null}))}));"""
+        result=subprocess.run(['node','-e',script],input=json.dumps(projection),cwd=ROOT,
+            capture_output=True,text=True,timeout=30)
+        self.assertEqual(result.returncode,0,result.stderr)
+        return json.loads(result.stdout)
+
+    def test_process_only_summary_export_stage_and_native_views_agree(self):
+        for role in ('worker','reviewer'):
+            with self.subTest(role=role):
+                raw=self.project_all([self.source(role)]);shown=self.render(raw)
+                self.assertEqual(raw['jobs'][0]['state'],'waiting')
+                self.assertNotIn('execution observed',raw['jobs'][0]['current_step'].lower())
+                exported=_console_update_text(raw,created_at=NOW,snapshot_id='synthetic')
+                self.assertNotIn('execution observed',exported.lower())
+                self.assertTrue(all(s['state']!='current' and s['seconds'] is None for s in shown['stages'] if s['id'] in ('worker','review')))
+                index=0 if role=='worker' else 1
+                self.assertEqual(shown['clocks'][index]['label'],'Not observed')
+                self.assertEqual(shown['combined'][index]['short'],'No native turn')
+                self.assertEqual(shown['execution']['label'],'EXECUTION NOT OBSERVED')
+                self.assertEqual(shown,self.render(json.loads(json.dumps(raw))))
+        historical=campaign_console_reporting(record(),observed_at=NOW)['intervals'][0]
+        self.assertEqual(historical['duration_seconds'],65)
+        self.assertEqual(historical['timing_basis'],'historical_invocation_envelope')
+        self.assertFalse(historical['active_verified'])
+
+    def test_quiet_current_roles_survive_nonadjacent_activity_window(self):
+        for role in ('worker','reviewer'):
+            with self.subTest(role=role):
+                sources=[self.source(role,True)]
+                for number in range(4):
+                    old,row=self.source();old.update(campaign_id='older-'+str(number),created_at='2026-09-10T03:00:00+00:00')
+                    row[0].update(invocation_id='old-'+str(number),updated_at=NOW,
+                        events=[{'event_id':'old-event','created_at':NOW,'state':'running','kind':'commentary','public_message':'Synthetic old activity'}])
+                    sources.append((old,row))
+                raw=self.project_all(sources);shown=self.render(raw)
+                self.assertEqual(raw['current_campaign_id'],'current-objective')
+                self.assertEqual(len(raw['campaigns'][0]['managed_worker_activity']),1)
+                self.assertEqual(sum(len(c['managed_worker_activity']) for c in raw['campaigns']),5)
+                self.assertEqual(raw['jobs'][0]['state'],'working')
+                index=0 if role=='worker' else 1
+                self.assertEqual(shown['clocks'][index]['seconds'],60)
+                self.assertEqual(shown['combined'][index]['short'],'Executing')
+                self.assertEqual(shown['feed']['state'],'live')
+                self.assertEqual(shown,self.render(json.loads(json.dumps(raw))))
+
+    def test_status_metadata_retains_existing_resource_bound(self):
+        sources=[]
+        for number in range(20):
+            source,rows=self.source();source['campaign_id']='bounded-'+str(number)
+            rows[0].update(invocation_id='i'*1800,worker_id='w'*1800)
+            sources.append((source,rows))
+        with self.assertRaisesRegex(ValueError,'managed activity metadata exceeds its window'):
+            self.project_all(sources)
+
+    def test_prior_native_duration_does_not_fill_a_queued_correction_clock(self):
+        source,rows=self.source(native=True)
+        source['iteration']=2;source['active_builder_task_scope_id']='task-two'
+        source['events'].append(event('builder_invocation_started','2026-09-11T03:09:50+00:00',2,task_scope_id='task-two'))
+        source['builder_runs']=[{'iteration':1,'status':'completed','task_scope_id':'task-one','completed_at':'2026-09-11T03:09:30+00:00'}]
+        rows[0]['state']='completed';rows[0]['timing_events'].append({'event_id':'native-end','kind':'final_result','state':'completed',
+            'created_at':'2026-09-11T03:09:30+00:00','thread_id':'thread-one','turn_id':'turn-one'})
+        rows.append({**rows[0],'invocation_id':'task-two-appserver','state':'running','updated_at':NOW,'timing_events':[]})
+        raw=self.project_all([(source,rows)]);shown=self.render(raw)
+        worker=next(s for s in shown['stages'] if s['id']=='worker')
+        self.assertEqual(worker['state'],'waiting');self.assertIsNone(worker['seconds'])
+        self.assertEqual(shown['clocks'][0]['seconds'],30)
+        self.assertIn('last turn completed',shown['clocks'][0]['label'])
+        self.assertEqual(shown['combined'][0]['short'],'No native turn')
+        intervals=[v for v in raw['campaigns'][0]['console_reporting']['intervals'] if v['stage']=='worker']
+        self.assertEqual([i['duration_seconds'] for i in intervals],[30,None])
 
 
 class ConsoleJavaScriptQualificationTests(unittest.TestCase):

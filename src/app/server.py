@@ -20,6 +20,7 @@ from src.runtime.chat_service import (
     ChatServiceError, FawkesChatService, sanitize_development_console_diff,
 )
 from src.runtime.autonomy_supervision import RiderActivityStore, console_timestamp
+from src.runtime.console_observation import ordered_campaigns, primary_campaign_id
 
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -190,6 +191,8 @@ def _console_campaigns(payload):
             "campaign_id": _console_text(activity.get("campaign_id"), "campaign_id"),
             "objective": _console_text(activity.get("objective", wrapper.get("objective", "")),
                                        "objective", optional=True),
+            "created_at": _console_text(wrapper.get("created_at"), "created_at", optional=True),
+            "updated_at": _console_text(wrapper.get("updated_at"), "updated_at", optional=True),
             "satisfied_condition_count": (
                 len(acceptance_satisfied) if acceptance_satisfied is not None else None),
             "operational_learning_observations": projected_observations,
@@ -207,7 +210,7 @@ def _console_campaigns(payload):
             "managed_worker_activity": _console_managed_activity(wrapper.get("managed_worker_activity", [])),
             "console_reporting": _console_reporting(wrapper.get("console_reporting")),
         })
-    return result
+    return ordered_campaigns(result)
 
 
 def _console_reporting(value):
@@ -217,7 +220,7 @@ def _console_reporting(value):
         raise ValueError("console reporting must be observational")
     result = {field: _console_text(value.get(field), field, optional=True) for field in (
         "record_sha256", "observed_at", "worker_status", "worker_task_scope_id", "review_status",
-        "application_status", "git_status", "parent_campaign_id")}
+        "application_status", "git_status", "parent_campaign_id", "created_at", "updated_at")}
     result["facts"] = [_console_text(item, "job fact") for item in value.get("facts", [])[:12]]
     recap = value.get("return_recap")
     result["return_recap"] = ({key: _console_text(recap.get(key), key, optional=True)
@@ -228,16 +231,38 @@ def _console_reporting(value):
     result["intervals"] = []
     for item in value.get("intervals", [])[:24]:
         projected = {field: _console_text(item.get(field), field, optional=True)
-                     for field in ("stage", "started_at", "ended_at", "state")}
+                     for field in ("stage", "started_at", "ended_at", "state", "timing_basis")}
         for field in ("attempt", "duration_seconds"):
             number = item.get(field)
             if number is not None and (type(number) is not int or number < 0):
                 raise ValueError("invalid console timing number")
             projected[field] = number
         projected["active_verified"] = item.get("active_verified") is True
+        projected["active_time_excludes_attention"] = item.get("active_time_excludes_attention") is True
         projected["source_references"] = [_console_text(source, "interval source")
                                            for source in item.get("source_references", [])[:8]]
         result["intervals"].append(projected)
+    result["turns"] = []
+    for item in value.get("turns", [])[:32]:
+        turn = {key: _console_text(item.get(key), key, optional=True) for key in (
+            "turn_id", "thread_id", "invocation_id", "role", "state", "started_at", "ended_at", "observed_at")}
+        if turn["role"] not in {"worker", "reviewer"}:
+            raise ValueError("invalid execution role")
+        for key in ("active_seconds", "waiting_seconds"):
+            number = item.get(key)
+            if number is not None and (type(number) is not int or number < 0):
+                raise ValueError("invalid turn timing")
+            turn[key] = number
+        turn["active_verified"] = item.get("active_verified") is True
+        turn["duration_incomplete"] = item.get("duration_incomplete") is True
+        result["turns"].append(turn)
+    result["timing_history_incomplete"] = value.get("timing_history_incomplete") is True
+    roles = value.get("timing_incomplete_roles")
+    if roles is None:
+        roles = ["worker", "reviewer"] if result["timing_history_incomplete"] else []
+    if not isinstance(roles, list) or len(roles) > 2 or any(not isinstance(role, str) or role not in {"worker", "reviewer"} for role in roles):
+        raise ValueError("invalid incomplete timing roles")
+    result["timing_incomplete_roles"] = sorted(set(roles))
     result["creates_authority"] = False
     return result
 
@@ -250,6 +275,8 @@ def _console_managed_activity(value):
             raise ValueError("unknown managed Worker state")
         record = {key:_console_text(item.get(key), key) for key in
                   ("invocation_id", "worker_id", "updated_at", "state")}
+        record["role"] = _console_text(item.get("role", "worker"), "role")
+        record["verified_at"] = _console_text(item.get("verified_at"), "verified_at", optional=True)
         record["events"] = [{key:_console_text(event.get(key), key) for key in
             ("event_id", "created_at", "kind", "state", "public_message")}
             for event in item.get("events", [])[-64:]]
@@ -471,6 +498,7 @@ def _console_jobs(campaigns, attention):
     jobs = []
     for campaign in campaigns:
         stamps = [event.get("created_at") for event in campaign.get("activity", [])]
+        stamps.append(campaign.get("updated_at"))
         stamps.extend(item.get("updated_at") for item in campaign.get("managed_worker_activity", []))
         now = datetime.now(timezone.utc)
         valid_stamps = [(console_timestamp(stamp), stamp) for stamp in stamps
@@ -492,7 +520,7 @@ def _console_jobs(campaigns, attention):
             state = "waiting"
         reporting = campaign.get("console_reporting") or {}
         if not historical and state == "waiting" and any(
-                item.get("active_verified") for item in reporting.get("intervals", [])):
+                item.get("active_verified") for item in reporting.get("turns", [])):
             state = "working"
         objective = campaign.get("objective") or campaign["campaign_id"]
         facts = list(reporting.get("facts") or [])
@@ -527,6 +555,10 @@ def _console_jobs(campaigns, attention):
                 item.get("stage") == "review_queue" and item.get("state") == "dispatched"
                 for item in reporting.get("intervals", [])):
             current_step = "Independent review dispatched; current Reviewer execution is unverified."
+        if status == "awaiting_independent_review" and any(
+                item.get("role") == "reviewer" and item.get("active_verified")
+                for item in reporting.get("turns", [])):
+            current_step = "Independent Reviewer execution observed on the exact candidate."
         next_step = {
             "awaiting_independent_review": "Independent review of the retained candidate.",
             "review_accepted_application_pending": "Canonical application of the accepted candidate.",
@@ -554,13 +586,15 @@ def _console_jobs(campaigns, attention):
                 if recorded_gain else "No verified capability gain is recorded here; stage results are listed separately."),
             "return_recap": recap,
             "parent_campaign_id": reporting.get("parent_campaign_id"),
+            "created_at": campaign.get("created_at"),
             "source_record_sha256": reporting.get("record_sha256"),
             "next": next_step,
             "creates_authority": False})
-    priority = {"needs_you": 0, "working": 1, "waiting": 2, "done": 3, "failed": 3, "closed": 3, "unknown": 4}
-    jobs.sort(key=lambda job: (priority[job["state"]],
-        -(datetime.fromisoformat(job["last_activity_at"].replace("Z", "+00:00")).timestamp()
-          if job["last_activity_at"] else 0)))
+    ordered = [item["campaign_id"] for item in ordered_campaigns(campaigns)]
+    primary = primary_campaign_id(campaigns)
+    jobs.sort(key=lambda job: (job["job_id"] != primary, ordered.index(job["job_id"])))
+    for job in jobs:
+        job["is_current_objective"] = job["job_id"] == primary
     return jobs[:32]
 
 
@@ -588,18 +622,20 @@ def developer_console_projection(chat_service):
         "creates_continuing_authority": False,
     }
     projection["jobs"] = _console_jobs(projection["campaigns"], projection["attention"])
+    projection["current_campaign_id"] = primary_campaign_id(projection["campaigns"])
+    projection["selection_basis"] = "Latest recorded user objective by creation, not last historical state change; known parent retained."
     # Recent observation window only, never a budget or authority decision.
     # Bound activity independently so public progress cannot crowd out pending
     # Attention. Full retained sidecars remain with their canonical owner.
     managed = sorted((item for campaign in projection["campaigns"]
         for item in campaign.get("managed_worker_activity", [])),
         key=lambda item:item["updated_at"], reverse=True)
-    selected = {id(item) for item in managed[:4]}
     omitted = sum(len(item["events"]) for item in managed[4:])
-    for campaign in projection["campaigns"]:
-        campaign["managed_worker_activity"] = [item for item in campaign["managed_worker_activity"]
-                                              if id(item) in selected]
-    managed = managed[:4]
+    # Limit public event bodies, not the status metadata needed to interpret
+    # native clocks. Quiet current roles must survive newer historical activity.
+    # Existing per-campaign counts, total32KiB window and response guard remain.
+    for item in managed[4:]:
+        item["events"] = []
     while len(json.dumps(managed, ensure_ascii=False).encode("utf-8")) > 32768:
         populated = [item for item in managed if item["events"]]
         if not populated: raise ValueError("managed activity metadata exceeds its window")
@@ -625,6 +661,8 @@ def _console_update_text(projection, *, created_at, snapshot_id):
         "",
         "REQUESTED JOBS",
     ]
+    lines.insert(4, f"Current objective campaign: {projection.get('current_campaign_id') or 'Unknown'}")
+    lines.insert(5, f"Selected campaign: {projection.get('selected_campaign_id') or projection.get('current_campaign_id') or 'Unknown'}")
     jobs = projection.get("jobs") if isinstance(projection.get("jobs"), list) else []
     if not jobs:
         lines.append("- No campaign/job records are available to this preview; this is not an all-history claim.")
@@ -646,12 +684,14 @@ def _console_update_text(projection, *, created_at, snapshot_id):
         if job.get("public_result"):
             lines.append(f"  Public Worker result: {job['public_result']}")
         lines.append(f"  Parent job: {job.get('parent_campaign_id') or 'Not recorded; no parent completion inferred'}")
+        lines.append(f"  Source record: {job.get('source_record_sha256') or 'Unknown'}")
     attention = [item for item in projection.get("attention", [])
                  if isinstance(item, dict) and item.get("actionable")]
     lines.extend(["", "BLOCKERS / DECISIONS"])
     if not attention:
         lines.append("- No presently actionable canonical Attention request is projected.")
     for item in attention:
+        lines.append(f"- Campaign / request: {item.get('campaign_id') or 'Unknown'} / {item.get('attention_id') or 'Unknown'}")
         lines.append(f"- {item.get('blocked_action') or 'Decision required'}")
         lines.append(f"  Why: {item.get('why_required') or 'Canonical owner requires Tanner'}")
         lines.append(f"  Expires: {item.get('expires_at') or 'Unknown'}")
@@ -745,13 +785,26 @@ class ConsoleUpdateStore:
                     and retained_key is not None
                     and retained_key != expected_idempotency_sha256):
                 raise ValueError("console update idempotency binding failed")
+            if "campaign_id" in value:
+                expected = hashlib.sha256(self._canonical({k:v for k,v in value.items()
+                    if k != "record_sha256"})).hexdigest()
+                if value.get("record_sha256") != expected:
+                    raise ValueError("console update campaign/record binding failed")
             return value
         except FileNotFoundError as exc:
             raise KeyError("console update not found") from exc
 
-    def save(self, *, idempotency_key, projection):
+    def save(self, *, idempotency_key, projection, campaign_id=None):
         if not self._KEY.fullmatch(str(idempotency_key or "")):
             raise ValueError("console update idempotency key is malformed")
+        if campaign_id is not None and (not isinstance(campaign_id, str)
+                or not any(c.get("campaign_id") == campaign_id for c in projection.get("campaigns", []))):
+            raise ValueError("selected campaign is not in the authenticated observation")
+        projection = dict(projection, selected_campaign_id=campaign_id or projection.get("current_campaign_id"))
+        def bound(record):
+            if campaign_id is not None and record.get("campaign_id") != campaign_id:
+                raise ValueError("retry key is already bound to a different campaign snapshot")
+            return record
         with self._lock:
             self._prepare()
             key_digest = hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest()
@@ -762,18 +815,18 @@ class ConsoleUpdateStore:
                 fcntl.flock(descriptor.fileno(), fcntl.LOCK_EX)
                 try:
                     if key_path.exists():
-                        return self._read(
+                        return bound(self._read(
                             key_path.read_text(encoding="ascii").strip(),
                             expected_idempotency_sha256=key_digest,
-                        )
+                        ))
                     seed = {"schema_version": "fawkes.console_update.identity.v2",
                             "idempotency_sha256": key_digest}
                     snapshot_id = "console-update-" + hashlib.sha256(
                         self._canonical(seed)).hexdigest()
                     record_path = self.root / "records" / f"{snapshot_id}.json"
                     if record_path.exists():
-                        record = self._read(
-                            snapshot_id, expected_idempotency_sha256=key_digest)
+                        record = bound(self._read(
+                            snapshot_id, expected_idempotency_sha256=key_digest))
                     else:
                         created_at = datetime.now(timezone.utc).isoformat()
                         content = _console_update_text(
@@ -781,11 +834,13 @@ class ConsoleUpdateStore:
                         record = {"schema_version": "fawkes.console_update.v1",
                                   "snapshot_id": snapshot_id, "created_at": created_at,
                                   "projection_observed_at": projection.get("observed_at"),
+                                  "campaign_id": projection.get("selected_campaign_id"),
                                   "idempotency_sha256": key_digest,
                                   "content_sha256": hashlib.sha256(
                                       content.encode("utf-8")).hexdigest(),
                                   "content": content, "creates_authority": False,
                                   "creates_continuing_authority": False}
+                        record["record_sha256"] = hashlib.sha256(self._canonical(record)).hexdigest()
                         self._write_atomic(record_path, self._canonical(record))
                     self._write_atomic(key_path, (snapshot_id + "\n").encode("ascii"))
                     return record
@@ -1209,7 +1264,10 @@ class FawkesAppHandler(BaseHTTPRequestHandler):
                 return
             try:
                 query = parse_qs(parsed.query)
-                self._json(200, self.server.chat_service.development_attention(
+                owner = (self.server.chat_service.development_attention_projection
+                    if query.get("observation", ["false"])[0].lower() == "true"
+                    else self.server.chat_service.development_attention)
+                self._json(200, owner(
                     pending_only=query.get("pending", ["false"])[0].lower() == "true"))
             except Exception:
                 self._json(503, {"error": {"code": "attention_unavailable", "message": "Development attention state is unavailable right now."}})
@@ -1285,11 +1343,12 @@ class FawkesAppHandler(BaseHTTPRequestHandler):
                 return
             try:
                 request = self._read_json()
-                if set(request) != {"idempotency_key"}:
-                    raise ValueError("only an idempotency key is accepted")
+                if set(request) not in ({"idempotency_key"}, {"idempotency_key", "campaign_id"}):
+                    raise ValueError("only an idempotency key and optional campaign identity are accepted")
                 projection = developer_console_projection(self.server.chat_service)
                 update = self.server.console_update_store.save(
-                    idempotency_key=request["idempotency_key"], projection=projection)
+                    idempotency_key=request["idempotency_key"], projection=projection,
+                    campaign_id=request.get("campaign_id"))
                 self._json(201, update)
             except (ValueError, ChatServiceError) as exc:
                 self._json(400, {"error": {"code": "invalid_console_update",
@@ -1689,9 +1748,13 @@ class FawkesConsoleApprovalHandler(FawkesAppHandler):
             "/native-attention.css", "/api/status", "/api/development/dev-console",
             "/api/development/console-updates"}
         exact = path.startswith("/api/development/attention/") and path.count("/") == 4
+        # The console history uses the passive owner only. Never expose the
+        # collection's lifecycle-maintenance branch through this narrow surface.
+        history = (path == "/api/development/attention" and
+            parse_qs(urlparse(self.path).query, keep_blank_values=True) == {"observation": ["true"]})
         update = bool(re.fullmatch(
             r"/api/development/console-updates/console-update-[a-f0-9]{64}(?:\.txt)?", path))
-        if path in allowed or exact or update:
+        if path in allowed or exact or update or history:
             return super().do_GET()
         self._json(404, {"error": {"code": "unavailable_in_console"}})
 

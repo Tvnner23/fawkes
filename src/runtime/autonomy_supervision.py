@@ -141,21 +141,14 @@ def campaign_console_reporting(record, managed=(), *, observed_at=None):
         source = [f"events/{event['event_id']}"]
         if run:
             source.append(f"builder_runs/iteration={attempt}/completed_at")
-        scope = (event.get("detail") or {}).get("task_scope_id")
-        active = next((item for item in managed
-            if item.get("invocation_id") == str(scope) + "-appserver"
-            and item.get("worker_id") == (record.get("builder") or {}).get("worker_id")
-            and item.get("state") == "running"), None)
-        # The caller's managed projection checks the exact current process identity.
-        # Last prose/tool activity is not a heartbeat: a quiet live process stays live.
-        stamp = console_timestamp((active or {}).get("updated_at"))
-        verified = bool(not run and now and stamp and stamp <= now
-            and record.get("status") == "builder_in_progress"
-            and scope and record.get("active_builder_task_scope_id") == scope)
+        # This envelope starts at dispatch, not at native turn/start. Retain a
+        # reliable historical close, but never use it as live execution proof.
         interval("worker", attempt, event.get("created_at"), end, source,
-                 run.get("status", "running" if verified else "unobserved"), verified,
+                 run.get("status", "unobserved"), False,
                  valid_order=boundary == len(events[index + 1:]) or bool(
                      next_start and console_timestamp(end) and console_timestamp(end) <= next_start))
+        intervals[-1]["timing_basis"] = "historical_invocation_envelope"
+        intervals[-1]["invocation_id"] = str((event.get("detail") or {}).get("task_scope_id")) + "-appserver"
         retained = next((item for item in following if item.get("kind") == "builder_return_retained"), None)
         prepared = next((item for item in following if item.get("kind") == "logical_review_request_prepared"), None)
         review = next((item for item in reviews if item.get("iteration") == attempt), {})
@@ -192,6 +185,9 @@ def campaign_console_reporting(record, managed=(), *, observed_at=None):
     application = record.get("application_evidence") or {}
     git = record.get("git_commit_evidence") or {}
     facts = []
+    failure_reason = (record.get("needs_tanner") or {}).get("failure_code") or (record.get("needs_tanner") or {}).get("reason")
+    if failure_reason and record.get("status") in {"failed_safe", "tanner_escalation"}:
+        facts.append("Recorded stop reason: " + str(failure_reason)[:160] + ".")
     for run in runs[-3:]:
         iteration = run.get("iteration", "?")
         facts.append(f"Worker attempt {iteration}: {run.get('status') or 'unknown'}.")
@@ -213,13 +209,51 @@ def campaign_console_reporting(record, managed=(), *, observed_at=None):
             facts.append("Applied paths: " + ", ".join(str(path) for path in paths[:4])[:350])
     if git:
         facts.append(f"Git: {git.get('status') or 'unknown'}. Recorded HEAD: {git.get('head') or 'unknown'}.")
+    from src.runtime.console_observation import execution_turns
+    turns = execution_turns(list(managed), observed_at=observed_at)
+    for role in ("worker", "reviewer"):
+        role_turns = [turn for turn in turns if turn["role"] == role]
+        if role_turns:
+            # Replace only the matching Worker envelope. A later queued
+            # correction without turn/start must retain its unavailable clock;
+            # another invocation's completed native turn cannot fill it.
+            native_intervals = []
+            for number, turn in enumerate(role_turns, 1):
+                native_intervals.append({"stage": "review" if role == "reviewer" else "worker", "attempt": number,
+                    "started_at": turn["started_at"], "ended_at": turn["ended_at"], "state": turn["state"],
+                    "duration_seconds": turn["active_seconds"], "active_verified": turn["active_verified"],
+                    "invocation_id": turn["invocation_id"],
+                    "source_references": ["managed-turn/"+turn["invocation_id"]+"/"+turn["turn_id"]],
+                    "timing_basis": "native_turn_active_time",
+                    "active_time_excludes_attention": True})
+            if role == "worker":
+                merged=[];used=set()
+                for item in (i for i in intervals if i["stage"] == "worker"):
+                    matching=[i for i in native_intervals if i["invocation_id"] == item.get("invocation_id")]
+                    if matching:
+                        merged.extend(matching);used.update(id(i) for i in matching)
+                    else:
+                        merged.append(item)
+                merged.extend(i for i in native_intervals if id(i) not in used)
+                intervals=[i for i in intervals if i["stage"] != "worker"]+merged
+            else:
+                intervals=[i for i in intervals if i["stage"] != "review"]+native_intervals
+    parents = [item.get("reference_id") for item in record.get("recovery_references", [])
+               if item.get("reference_type") == "parent_campaign"]
     return {"record_sha256": record.get("record_sha256"), "observed_at": observed_at,
+        "created_at": record.get("created_at"), "updated_at": record.get("updated_at"),
+        "turns": turns, "timing_history_incomplete": len(managed) > 16
+            or any(item.get("timing_history_incomplete") for item in managed)
+            or any(item.get("history_incomplete") for item in turns),
+        "timing_incomplete_roles": ["worker", "reviewer"] if len(managed) > 16
+            or any(item.get("timing_history_incomplete") for item in managed)
+            else sorted({item["role"] for item in turns if item.get("history_incomplete")}),
         "intervals": intervals[:24], "facts": facts[:12],
         "worker_status": last_run.get("status"),
         "worker_task_scope_id": last_run.get("task_scope_id"),
         "review_status": last_review.get("status"),
         "application_status": application.get("status"), "git_status": git.get("status"),
-        "parent_campaign_id": record.get("parent_campaign_id"),
+        "parent_campaign_id": record.get("parent_campaign_id") or (parents[0] if len(parents) == 1 else None),
         "source_references": ["builder_runs", "reviews", "application_evidence", "git_commit_evidence"],
         "creates_authority": False}
 

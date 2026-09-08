@@ -146,6 +146,7 @@ assert.strictEqual(
 
 const fixtureNow = Date.now();
 const rawProjection = {
+  current_campaign_id: 'campaign-safe',
   schema_version: 'fawkes.dev_console.read_only.v1',
   observed_at: new Date(fixtureNow).toISOString(),
   build: {
@@ -175,7 +176,7 @@ const rawProjection = {
         },
         managed_worker_activity: [{
           invocation_id: 'managed-fixture', worker_id: 'worker-safe',
-          updated_at: new Date(fixtureNow).toISOString(), state: 'running', events: [],
+          updated_at: new Date(fixtureNow).toISOString(), verified_at: new Date(fixtureNow).toISOString(), role: 'worker', state: 'running', events: [],
         }],
         creates_authority: false,
   }],

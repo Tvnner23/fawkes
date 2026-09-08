@@ -422,13 +422,20 @@ class CodexAppServerTransport:
         pending_grant = None
         native_denied = False
         deadline = time.monotonic() + self.timeout_seconds
+        timing_kinds = {"turn_started", "permission_wait", "permission_result", "final_result", "transport_closed"}
+        timing_losses, timing_loss_overflow = [], False
 
         def progress(kind, text, state="running", item_id=None):
+            nonlocal timing_loss_overflow
             if progress_handler is None:
                 return
             event = {"campaign_id": campaign_id, "invocation_id": invocation_id,
                      "worker": worker, "process_id": process.pid, "kind": kind,
-                     "public_message": _safe(text), "state": state, "item_id": item_id}
+                     "public_message": _safe(text), "state": state, "item_id": item_id,
+                     "thread_id": thread_id, "turn_id": turn_id}
+            if timing_losses or timing_loss_overflow:
+                event["timing_observation_losses"] = list(timing_losses)
+                event["timing_observation_loss_overflow"] = timing_loss_overflow
             event["event_id"] = "managed-" + _digest(event)
             from datetime import datetime, timezone
             event["created_at"] = datetime.now(timezone.utc).isoformat()
@@ -436,6 +443,17 @@ class CodexAppServerTransport:
                 progress_handler(event)
             except (OSError, ValueError, PermissionError, RuntimeError):
                 lifecycle.append({"stage": "public_activity_unavailable"})
+                if kind in timing_kinds:
+                    if len(timing_losses) < 32:
+                        timing_losses.append(event["event_id"])
+                    else:
+                        timing_loss_overflow = True
+            else:
+                # Carry missing-transition identities until an observation is
+                # acknowledged. The store can distinguish a failed write from
+                # a committed write whose acknowledgement was lost.
+                timing_losses.clear()
+                timing_loss_overflow = False
 
         progress("starting", "Managed app-server process started.")
 
@@ -501,6 +519,7 @@ class CodexAppServerTransport:
                     elif stage == "turn/start":
                         turn_id = message["result"]["turn"]["id"]
                         lifecycle.append({"stage": "turn_started", "turn_id": turn_id})
+                        progress("turn_started", "Managed execution turn started.")
                     continue
                 method = message.get("method")
                 if method in {"item/started", "item/completed"}:
@@ -539,16 +558,18 @@ class CodexAppServerTransport:
                     if approval["protocol"]["thread_id"] != thread_id or approval["protocol"]["turn_id"] != turn_id:
                         raise CodexAppServerError("approval", "lineage_mismatch", "approval request mismatches active turn")
                     decision = {"choice": "deny"}
-                    progress("permission_wait",
-                             "Waiting for Tanner's exact native permission decision.",
-                             "waiting", approval["protocol"]["item_id"])
                     if sandbox == "read-only" and method in WRITE_APPROVAL_METHODS:
                         response = approval_response(method, "deny", message["params"])
+                        progress("permission_result", "Read-only policy denied this write request.",
+                                 "running", approval["protocol"]["item_id"])
                         lifecycle.append({"stage": "reviewer_write_denied", **approval["protocol"]})
                     else:
                         if approval_handler is None:
                             raise CodexAppServerError("approval", "attention_handler_unavailable",
                                                       "typed approval requires Tanner")
+                        progress("permission_wait",
+                                 "Waiting for Tanner's exact native permission decision.",
+                                 "waiting", approval["protocol"]["item_id"])
                         approval_wait_started = time.monotonic()
                         decision = approval_handler(approval,
                             timeout_seconds=self.decision_timeout_seconds,
@@ -610,6 +631,14 @@ class CodexAppServerTransport:
                         raise CodexAppServerError("turn", "lineage_mismatch", "terminal turn identity mismatch")
                     status = (params.get("turn") or {}).get("status")
                     lifecycle.append({"stage": "turn_completed", "status": status})
+                    if status in ("completed", "failed", "interrupted"):
+                        # A correctly bound native terminal event is an execution
+                        # boundary even if the return is missing or cannot be saved.
+                        # This observation is not canonical result acceptance.
+                        progress("final_result",
+                            "Native turn ended (" + status + "); canonical result validation remains separate.",
+                            "failed" if native_denied or status != "completed"
+                            or last_agent_text is None else "completed")
                     if status != "completed":
                         error = (params.get("turn") or {}).get("error")
                         raise CodexAppServerError("turn", "turn_not_completed",
@@ -621,11 +650,6 @@ class CodexAppServerTransport:
                     output_path = Path(output_path)
                     output_path.parent.mkdir(parents=True, exist_ok=True)
                     output_path.write_text(last_agent_text, encoding="utf-8")
-                    progress("final_result",
-                        "Managed turn ended after denial; the campaign did not succeed."
-                        if native_denied else
-                        "Managed provider turn completed; canonical result validation remains separate.",
-                        "failed" if native_denied else "completed")
                     break
                 if method == "item/completed":
                     if self.protocol_version in {REVIEWER_PROTOCOL_VERSION,

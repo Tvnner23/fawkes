@@ -2,6 +2,15 @@
   'use strict';
   const binding = root.FawkesAttentionBinding;
   const labels = {approve_once:'Approve Once', deny:'Deny action', cancel_campaign:'Cancel campaign'};
+  // Display-only best effort. Canonical request/decision bytes are untouched.
+  // Unknown secret formats may still need manual care; this is not a guarantee.
+  function displayText(value) {
+    return String(value == null ? '' : value)
+      .replace(/(\b(?:password|passwd|secret|token|api[_-]?key|authorization)\b["']?\s*[:=]\s*)(?:(?:Bearer|Basic|token)\s+)?("(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'|[^\s,;\n]+)/gi,'$1[redacted]')
+      .replace(/\bBearer\s+[^\s"',;]+/gi,'Bearer [redacted]')
+      .replace(/\bsk-[A-Za-z0-9_-]{12,}\b/g,'[redacted]')
+      .replace(/(https?:\/\/)[^\s/@:]+:[^\s/@]+@/gi,'$1[redacted]@');
+  }
   // Explanations are display-only projections of this exact observed request.
   // Do not infer shell effects, safety, or task necessity from arbitrary text.
   function explainRequest(event,decision=null) {
@@ -58,7 +67,7 @@
     const panel=document.getElementById('native-permission');
     if (!panel || !binding) return null;
     let current=null, selected=null, csrf='', sending=false, stale=true, closedId=null, sequence=0;
-    let lastRender=null, lastFailure='', expiryTimer=null, pendingQueue=[], technicalOpen=false;
+    let lastRender=null, lastFailure='', expiryTimer=null, pendingQueue=[], technicalOpen=false, historyShowing=false;
     const locatorKey='fawkes.native-attention.locator.v1';
     const wakeKey='fawkes.native-attention.woken.v1';
     let woken=[];
@@ -106,7 +115,7 @@
         if(expiryTimer&&expiryTimer.unref)expiryTimer.unref();
       }
     }
-    function element(tag,text) {const x=document.createElement(tag);x.textContent=text;return x;}
+    function element(tag,text) {const x=document.createElement(tag);x.textContent=displayText(text);return x;}
     async function request(path, options) {
       const response=await fetchImpl(path,{credentials:'same-origin',cache:'no-store',...options,
         headers:{'Content-Type':'application/json',...(csrf ? {'X-Fawkes-CSRF-Token':csrf} : {}),...(options&&options.headers||{})}});
@@ -130,6 +139,8 @@
     }
     function render(message) {
       updateLauncher();
+      if(historyShowing&&!needsDecision(current))return;
+      historyShowing=false;
       const signature=JSON.stringify([current,selected,Boolean(csrf),sending,stale,needsDecision(current),message||'',lastFailure]);
       if(signature===lastRender)return;
       lastRender=signature;
@@ -151,6 +162,7 @@
       const details=element('details','');details.open=technicalOpen;
       details.ontoggle=()=>{technicalOpen=details.open;};
       details.append(element('summary','Show technical details'),element('h3','Recorded command / file changes'),element('pre',String(event.blocked_action||'Unavailable')),
+        element('p','Recognizable credential values are masked in this display; exact audit material stays with the authenticated owner. Masking cannot identify every secret format.'),
         element('p','Display text is the approval service’s recorded view and may be shortened or masked. The decision remains bound to the exact waiting operation.'),
         element('p',explanation.scopeDetails),element('pre',JSON.stringify({worker:event.worker,task:event.campaign_id,requested_authority:event.requested_authority||'Unavailable',resources:event.resources,deadline:event.expires_at,identity:binding.canonicalAttentionIdentity(event),protocol},null,2)));panel.append(details);
       if (!csrf) {
@@ -222,13 +234,38 @@
       else if(!id){stale=false;render();}
     });
     root.addEventListener('fawkes:console-disconnected',()=>{sequence++;stale=true;selected=null;cosmeticPending(false);render('Connection lost; no decision was sent.');});
+    const historyButton=document.getElementById('permission-history');
+    if(historyButton)historyButton.addEventListener('click',async()=>{
+      panel.hidden=false; selected=null; historyShowing=true;
+      try {
+        const result=await request('/api/development/attention?observation=true');
+        const records=Array.isArray(result.attention)?result.attention:[];
+        const history=records.filter(item=>item.state!=='needs_tanner').slice(-64).reverse();
+        panel.replaceChildren(element('h2','Permission history — read only'));
+        const close=element('button','Back to console');close.type='button';close.onclick=()=>{panel.hidden=true;historyShowing=false;lastRender=null;};panel.append(close);
+        panel.append(element('p','A decision receipt and its operation outcome are separate. Opening history never submits a decision.'));
+        if(!history.length)panel.append(element('p','No resolved permission records were returned.'));
+        for(const item of history) {
+          const card=element('details','');
+          card.append(element('summary',`${item.campaign_id||'Unknown campaign'} · ${item.state||'Unknown'} · ${item.created_at||'Unknown time'}`),
+            element('p','Request: '+item.attention_id),element('p','Action: '+(item.blocked_action||'Not projected')),
+            element('p','Worker’s stated reason: '+(item.why_required||'Not recorded')),
+            element('p','Operation outcome: '+(item.approval_outcome||'Not recorded')),
+            element('p','Decision identity: '+(item.decision_id||'Consult exact owner record')));
+          panel.append(card);
+        }
+        // Force the next authoritative pending refresh to redraw its own card.
+        lastRender=null;
+      }catch(error){panel.replaceChildren(element('p','Permission history unavailable: '+error.message));
+        const close=element('button','Back to console');close.type='button';close.onclick=()=>{panel.hidden=true;historyShowing=false;lastRender=null;};panel.append(close);}
+    });
     // Middle/wheel gestures and the complete wake gesture must never choose a decision.
     panel.addEventListener('auxclick',e=>{e.preventDefault();e.stopPropagation();});
     panel.addEventListener('keydown',e=>{if(e.key==='ArrowLeft'||e.key==='ArrowRight')e.stopPropagation();});
     render();
     return {refreshExact,outcome:()=>outcome(current)};
   }
-  const api={attach,outcome,explainRequest};root.FawkesNativeAttention=api;
+    const api={attach,outcome,explainRequest,displayText};root.FawkesNativeAttention=api;
   if(typeof module==='object'&&module.exports)module.exports=api;
   if(root.document)attach(root.document,root.fetch.bind(root));
 })(typeof window!=='undefined'?window:globalThis);

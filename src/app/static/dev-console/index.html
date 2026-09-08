@@ -44,6 +44,11 @@
 
     <section id="page-stack" class="page-stack">
       <section class="console-page" data-page="0" aria-label="Activity Summary">
+        <div class="summary-toolbar">
+          <span id="summary-selection" class="meta">Current objective</span>
+          <button id="save-console-update" type="button" class="primary-button">Send update to PC</button>
+          <p id="update-result" aria-live="polite">Saves to Fawkes on your PC; clipboard copying happens on the device you use.</p>
+        </div>
         <div class="page-scroll" tabindex="0">
           <div class="page-intro">
             <p class="eyebrow">YOUR REQUESTED JOB</p>
@@ -54,9 +59,9 @@
           <section class="update-panel" aria-labelledby="update-heading">
             <div class="panel-heading">
               <h3 id="update-heading">Completed + working on</h3>
-              <button id="save-console-update" type="button" class="primary-button">Send update to PC</button>
             </div>
-            <p id="update-result" aria-live="polite">No update prepared in this session.</p>
+            <p>Open this console on your PC to copy to that PC's clipboard or download the same saved update.</p>
+            <button id="permission-history" type="button" class="secondary-button">Permission history</button>
             <div id="prepared-updates" class="prepared-updates"></div>
           </section>
         </div>
@@ -75,6 +80,7 @@
           <div id="campaign-empty" class="empty-state" hidden></div>
           <div id="campaign-dashboard">
             <div id="campaign-widgets" class="widget-grid" aria-label="Campaign facts"></div>
+            <div id="campaign-role-clocks" class="role-clock-grid" aria-label="Recorded Worker and Reviewer turn times"></div>
             <div class="campaign-workspace">
               <section aria-labelledby="execution-graph-heading">
                 <div class="panel-heading">
