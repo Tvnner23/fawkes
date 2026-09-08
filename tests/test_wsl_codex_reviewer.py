@@ -250,7 +250,7 @@ class WslFormalReviewerTests(unittest.TestCase):
         with patch("src.runtime.wsl_codex_reviewer.MAX_REVIEW_PACKAGE_BYTES", 1):
             with self.assertRaisesRegex(ValueError, "transported"):
                 self.invoke()
-        self.assertEqual(MAX_REVIEW_PACKAGE_BYTES, 512_000)
+        self.assertEqual(MAX_REVIEW_PACKAGE_BYTES, 1_400_000)
 
     def test_provider_projection_preserves_typed_nonregular_artifacts_and_round_trips(self):
         def node(kind, body, mode):

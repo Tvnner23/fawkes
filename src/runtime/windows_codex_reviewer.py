@@ -70,13 +70,13 @@ WINDOWS_PROMOTION_RECORD = {
     "scope": "fresh_bounded_read_only_independent_software_review_exact_evidence_transport",
     "repository_write": False, "creates_approval_or_promotion_authority": False,
 }
-MAX_REVIEW_PACKAGE_BYTES = 512_000
-MAX_REVIEW_RESOLVED_PACKAGE_BYTES = 2_000_000
+MAX_REVIEW_PACKAGE_BYTES = 1_400_000
+MAX_REVIEW_RESOLVED_PACKAGE_BYTES = 4_500_000
 # Changed source is already carried by the bounded, content-addressed package
 # transport below.  Keep an independent aggregate bound, but large enough for
 # dependency-coupled reviews whose exact UTF-8 postimages exceed the former
 # 256 KiB pre-transport ceiling.
-MAX_CHANGED_ARTIFACT_BYTES = 384_000
+MAX_CHANGED_ARTIFACT_BYTES = 1_100_000
 WINDOWS_ENVIRONMENT_ID = "windows-codex-exec:tanner-windows:fawkes-exact-package"
 
 WINDOWS_CODEX_WORKER_REFERENCE = {

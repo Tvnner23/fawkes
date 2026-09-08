@@ -39,7 +39,153 @@ WSL_ADAPTER_VERSION = "0.1"
 WSL_QUALIFICATION_CONTRACT_VERSION = "wsl-codex-exact-review-qualification-v0.1"
 WSL_ADAPTER_QUALIFIED = True
 WSL_ADAPTER_PROMOTED = True
-MAX_PROVIDER_REVIEW_EVIDENCE_BYTES = 950_000
+MAX_PROVIDER_REVIEW_EVIDENCE_BYTES = 1_400_000
+# Aggregate work limits for the versioned same-package line-copy presentation.
+MAX_PROVIDER_LINE_OPERATIONS = 200_000
+MAX_PROVIDER_BODY_BYTES = 4_500_000
+
+
+def _line_budget(budget, *, operations=0, body_bytes=0):
+    budget[0] += operations
+    budget[1] += body_bytes
+    if budget[0] > MAX_PROVIDER_LINE_OPERATIONS or budget[1] > MAX_PROVIDER_BODY_BYTES:
+        raise ValueError("provider line projection aggregate limit exceeded")
+
+
+def _line_recipe(text, source, section_id, path, budget):
+    """Linear line indexing, no matching search, patch inference or external IO."""
+    source_lines = source.splitlines(keepends=True)
+    target_lines = text.splitlines(keepends=True)
+    _line_budget(budget, operations=len(source_lines) + len(target_lines),
+                 body_bytes=len(source.encode("utf-8")) + len(text.encode("utf-8")))
+    index = {}
+    for i, line in enumerate(source_lines):
+        index.setdefault(line, i)
+    parts, literal = [], []
+    def flush():
+        if literal:
+            parts.append("".join(literal))
+            literal.clear()
+    for line in target_lines:
+        prefix = ""
+        i = index.get(line)
+        if i is None and line[:1] in ("+", "-", " "):
+            prefix, i = line[0], index.get(line[1:])
+        if i is None:
+            literal.append(line)
+        else:
+            flush()
+            if (parts and isinstance(parts[-1], list) and parts[-1][2] == prefix
+                    and parts[-1][0] + parts[-1][1] == i):
+                parts[-1][1] += 1
+            else:
+                parts.append([i, 1, prefix])
+    flush()
+    raw = text.encode("utf-8")
+    return {"encoding": "same-package-line-copies-v2", "section_id": section_id,
+            "path": path, "byte_length": len(raw), "sha256": _sha(raw), "parts": parts}
+
+
+def _resolve_line_recipe(recipe, source, section_id, path, budget):
+    if (not isinstance(recipe, dict)
+            or set(recipe) != {"encoding", "section_id", "path", "byte_length", "sha256", "parts"}
+            or recipe["encoding"] != "same-package-line-copies-v2"
+            or recipe["section_id"] != section_id or recipe["path"] != path
+            or type(recipe["byte_length"]) is not int
+            or not 0 <= recipe["byte_length"] <= MAX_PROVIDER_BODY_BYTES
+            or not isinstance(recipe["sha256"], str)
+            or len(recipe["sha256"]) != 64
+            or any(c not in "0123456789abcdef" for c in recipe["sha256"])
+            or not isinstance(recipe["parts"], list)):
+        raise ValueError("provider line reference is malformed or substituted")
+    lines = source.splitlines(keepends=True)
+    _line_budget(budget, operations=len(lines) + len(recipe["parts"]),
+                 body_bytes=len(source.encode("utf-8")) + recipe["byte_length"])
+    chunks, size = [], 0
+    for part in recipe["parts"]:
+        if isinstance(part, str):
+            chunk = part
+        elif (isinstance(part, list) and len(part) == 3
+                and type(part[0]) is int and type(part[1]) is int
+                and 0 <= part[0] < len(lines) and 0 < part[1] <= len(lines) - part[0]
+                and type(part[2]) is str and part[2] in ("", "+", "-", " ")):
+            _line_budget(budget, operations=part[1])
+            # Bound expansion before constructing the referenced text.
+            count = sum(len(line.encode("utf-8")) + len(part[2])
+                        for line in lines[part[0]:part[0] + part[1]])
+            if count + size > recipe["byte_length"]:
+                raise ValueError("provider line expansion exceeds declared length")
+            chunk = "".join(part[2] + line for line in lines[part[0]:part[0] + part[1]])
+        else:
+            raise ValueError("provider line reference is dangling or inappropriate")
+        size += len(chunk.encode("utf-8"))
+        if size > recipe["byte_length"]:
+            raise ValueError("provider line expansion exceeds declared length")
+        chunks.append(chunk)
+    text = "".join(chunks)
+    if size != recipe["byte_length"] or _sha(text.encode("utf-8")) != recipe["sha256"]:
+        raise ValueError("provider line body integrity mismatch")
+    return text
+
+
+def _project_line_bodies(projection):
+    sections = _package_sections(projection["package"], projection=True)
+    exact = sections["exact-change-evidence"]
+    changes = _exact_changes(exact)
+    artifacts = _changed_artifact_sections(sections, projection=True)
+    budget = [0, 0]
+    for change in changes:
+        if "before_body_recipe" in change or "text_diff_recipe" in change:
+            raise ValueError("canonical evidence contains a reserved projection field")
+        artifact = artifacts.get(change["path"])
+        source = artifact["body"].decode("utf-8") if artifact else ""
+        section_id = artifact["section_id"] if artifact else None
+        for field, destination in (("before_base64", "before_body_recipe"), ("text_diff", "text_diff_recipe")):
+            value = change.get(field)
+            if value is None:
+                continue
+            if not isinstance(value, str):
+                raise ValueError("canonical line body is malformed")
+            if field == "before_base64":
+                body = base64.b64decode(value, validate=True)
+                try:
+                    value = body.decode("utf-8")
+                except UnicodeDecodeError:
+                    # Already admitted non-UTF8 preimages retain exact base64.
+                    continue
+            change[destination] = _line_recipe(value, source, section_id, change["path"], budget)
+            del change[field]
+    exact["content"] = json.dumps(changes, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    projection["schema_version"] = 2
+    projection["deduplication"] = "exact-postimages-and-line-bodies-v2"
+    projection["record_sha256"] = _digest({k: v for k, v in projection.items() if k != "record_sha256"})
+    return (json.dumps(projection, sort_keys=True, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
+
+
+def _restore_line_bodies(changes, artifacts):
+    budget = [0, 0]
+    for change in changes:
+        if not isinstance(change, dict) or not isinstance(change.get("path"), str):
+            raise ValueError("provider line change is malformed")
+        artifact = artifacts.get(change["path"])
+        source = artifact["body"].decode("utf-8") if artifact else ""
+        section_id = artifact["section_id"] if artifact else None
+        for field, projected in (("before_base64", "before_body_recipe"), ("text_diff", "text_diff_recipe")):
+            if projected not in change:
+                continue
+            if field in change:
+                raise ValueError("provider line evidence is duplicated")
+            text = _resolve_line_recipe(change.pop(projected), source, section_id, change["path"], budget)
+            change[field] = base64.b64encode(text.encode("utf-8")).decode("ascii") if field == "before_base64" else text
+
+
+def _unique_projection_keys(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("provider projection has duplicate keys")
+        result[key] = value
+    return result
 WSL_QUALIFIED_CANDIDATE_SOURCE_SHA256 = "87710367f7b2d8dcede102c00a747cccc07c11caa89ed2944f8d42ef660fb188"
 WSL_QUALIFIED_SNAPSHOT_ID = "candidate-snapshot-e24491b35e552d0847d0768641ef6526520b2dd89cca1ce24943eb77574c41db"
 WSL_FIXED_CONTRACT_SHA256 = "50a11c33bb53a2508abe4505fc18b3c352680243bada567fd4641c5cfb2e7d7f"
@@ -253,8 +399,8 @@ def _changed_artifact_sections(sections, *, projection):
         header, body = content.split(_ARTIFACT_BEGIN, 1)
         body = body[:-len(_ARTIFACT_END)]
         try:
-            identity = json.loads(header)
-        except (TypeError, json.JSONDecodeError) as exc:
+            identity = json.loads(header, object_pairs_hook=_unique_projection_keys)
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
             raise ValueError("changed artifact presentation header is malformed") from exc
         encoded = body.encode("utf-8")
         path = identity.get("path") if isinstance(identity, dict) else None
@@ -288,8 +434,9 @@ def _package_sections(package, *, projection):
 
 def _exact_changes(section):
     try:
-        changes = json.loads(section["content"])
-    except (KeyError, TypeError, json.JSONDecodeError) as exc:
+        changes = json.loads(
+            section["content"], object_pairs_hook=_unique_projection_keys)
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
         raise ValueError("exact change evidence is malformed") from exc
     if not isinstance(changes, list):
         raise ValueError("exact change evidence is malformed")
@@ -346,6 +493,8 @@ def _raw_provider_package(logical, *, enforce_provider_bound):
 def _provider_review_projection(exported):
     """Deduplicate exact postimages for provider presentation, losslessly."""
     logical = bytes(exported)
+    if len(logical) > MAX_REVIEW_RESOLVED_PACKAGE_BYTES:
+        raise ValueError("canonical provider input exceeds resolved bound")
     package, canonical_sections, canonical_changes, typed = _raw_provider_package(
         logical, enforce_provider_bound=False)
     # The established small/raw route remains byte-for-byte only after its
@@ -394,6 +543,8 @@ def _provider_review_projection(exported):
     projection["record_sha256"] = _digest(projection)
     encoded = (json.dumps(projection, sort_keys=True, ensure_ascii=False,
                           separators=(",", ":")) + "\n").encode("utf-8")
+    if len(encoded) > MAX_PROVIDER_REVIEW_EVIDENCE_BYTES:
+        encoded = _project_line_bodies(projection)
     if _resolve_provider_review_projection(
             encoded, expected_canonical_sha256=_sha(logical),
             expected_canonical_byte_length=len(logical)) != logical:
@@ -408,16 +559,19 @@ def _resolve_provider_review_projection(data, *, expected_canonical_sha256,
     """Reconstruct and authenticate the exact canonical package from a projection."""
     if (not isinstance(expected_canonical_sha256, str)
             or len(expected_canonical_sha256) != 64
-            or not isinstance(expected_canonical_byte_length, int)
-            or expected_canonical_byte_length < 0):
+            or any(c not in "0123456789abcdef" for c in expected_canonical_sha256)
+            or type(expected_canonical_byte_length) is not int
+            or not 0 <= expected_canonical_byte_length <= MAX_REVIEW_RESOLVED_PACKAGE_BYTES):
         raise ValueError("independent canonical package binding is required")
     encoded = bytes(data)
     if len(encoded) > MAX_PROVIDER_REVIEW_EVIDENCE_BYTES:
         raise ValueError("provider review evidence exceeds byte limit")
     try:
-        value = json.loads(encoded.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        value = json.loads(encoded.decode("utf-8"), object_pairs_hook=_unique_projection_keys)
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
         raise ValueError("provider review package is malformed") from exc
+    if not isinstance(value, dict):
+        raise ValueError("provider review package must be an object")
     if value.get("record_type") != "worker_exchange_provider_review_projection":
         logical = encoded
         if (len(logical) != expected_canonical_byte_length
@@ -429,9 +583,15 @@ def _resolve_provider_review_projection(data, *, expected_canonical_sha256,
                                        separators=(",", ":")) + "\n").encode("utf-8")
     if encoded != canonical_projection:
         raise ValueError("provider review projection is truncated or has trailing data")
-    if (value.get("schema_version") != 1 or value.get("creates_authority") is not False
-            or value.get("deduplication") != "after-base64-to-exact-changed-artifact-v1"
+    version = value.get("schema_version")
+    if (type(version) is not int or version not in (1, 2)
+            or set(value) != {"schema_version", "record_type", "canonical_package_sha256",
+                              "canonical_package_byte_length", "deduplication", "package",
+                              "creates_authority", "record_sha256"}
+            or value.get("creates_authority") is not False
+            or value.get("deduplication") != {1: "after-base64-to-exact-changed-artifact-v1", 2: "exact-postimages-and-line-bodies-v2"}.get(version)
             or value.get("canonical_package_sha256") != expected_canonical_sha256
+            or type(value.get("canonical_package_byte_length")) is not int
             or value.get("canonical_package_byte_length") != expected_canonical_byte_length
             or value.get("record_sha256") != _digest(
                 {key: item for key, item in value.items() if key != "record_sha256"})):
@@ -443,6 +603,8 @@ def _resolve_provider_review_projection(data, *, expected_canonical_sha256,
         raise ValueError("provider review projection lacks exact change evidence")
     changes = _exact_changes(exact)
     artifacts = _changed_artifact_sections(sections, projection=True)
+    if version == 2:
+        _restore_line_bodies(changes, artifacts)
     seen_paths, consumed_artifacts = set(), set()
     for change in changes:
         path, kind, _ = _typed_postimage(change, canonical_body=False)
@@ -485,6 +647,7 @@ def _resolve_provider_review_projection(data, *, expected_canonical_sha256,
     if (len(logical) != expected_canonical_byte_length
             or _sha(logical) != expected_canonical_sha256):
         raise ValueError("provider review projection does not reconstruct canonical package")
+    _raw_provider_package(logical, enforce_provider_bound=False)
     return logical
 
 
