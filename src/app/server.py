@@ -1371,7 +1371,7 @@ class FawkesAppHandler(BaseHTTPRequestHandler):
                 self._json(503, {"error": {"code": "development_unavailable", "message": "Development observations are unavailable right now."}})
             return
         if path == "/api/development/dashboard":
-            if not self._require_auth():
+            if not self._require_auth(record_rider_activity=parse_qs(parsed.query).get("observation", ["false"])[0].lower() != "true"):
                 return
             try:
                 self._json(200, self.server.chat_service.development_dashboard())
@@ -1465,7 +1465,7 @@ class FawkesAppHandler(BaseHTTPRequestHandler):
                 self._json(503, {"error": {"code": "runtime_status_unavailable", "message": "Fawkes component status is unavailable right now."}})
             return
         if path == "/api/development/attention":
-            if not self._require_auth():
+            if not self._require_auth(record_rider_activity=parse_qs(parsed.query).get("observation", ["false"])[0].lower() != "true"):
                 return
             try:
                 query = parse_qs(parsed.query)
@@ -1937,6 +1937,7 @@ class FawkesAppHandler(BaseHTTPRequestHandler):
             "/presence-renderer-three.js": ("presence-renderer-three.js", "text/javascript; charset=utf-8"),
             "/presence-fallback.js": ("presence-fallback.js", "text/javascript; charset=utf-8"),
             "/presence-bootstrap.js": ("presence-bootstrap.js", "text/javascript; charset=utf-8"),
+            "/presence-resident.js": ("presence-resident.js", "text/javascript; charset=utf-8"),
             "/presence-three.bundle.js": ("presence-three.bundle.js", "text/javascript; charset=utf-8"),
             "/manifest.webmanifest": ("manifest.webmanifest", "application/manifest+json"),
             "/dev-console": ("dev-console/index.html", "text/html; charset=utf-8"),

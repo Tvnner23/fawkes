@@ -3,6 +3,7 @@ import subprocess
 import tempfile
 import threading
 import unittest
+from unittest import mock
 import urllib.request
 import urllib.error
 import json
@@ -26,6 +27,39 @@ class PresenceService:
 
 
 class PresenceHTTPToClientAcceptanceTests(unittest.TestCase):
+    def test_request_inbox_observation_is_authenticated_and_not_rider_activity(self):
+        if os.getenv("FAWKES_HTTP_ACCEPTANCE") != "1":
+            self.skipTest("set FAWKES_HTTP_ACCEPTANCE=1 where loopback sockets are permitted")
+        with tempfile.TemporaryDirectory() as tmp:
+            service = PresenceService(Path(tmp))
+            service.development_dashboard = lambda: {"human_review_items": []}
+            service.development_attention_projection = lambda **kw: {"attention": []}
+            token = "synthetic-observation-token"
+            server = FawkesAppServer(("127.0.0.1", 0), chat_service=service, app_token=token)
+            thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
+            try:
+                with mock.patch("src.app.server.RiderActivityStore") as activity:
+                    for endpoint in ("dashboard", "attention"):
+                        url = f"http://127.0.0.1:{server.server_port}/api/development/{endpoint}?observation=true"
+                        with self.assertRaises(urllib.error.HTTPError) as denied:
+                            urllib.request.urlopen(url, timeout=5)
+                        self.assertEqual(denied.exception.code, 401)
+                        request = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+                        with urllib.request.urlopen(request, timeout=5) as response:
+                            self.assertEqual(response.status, 200)
+                    activity.assert_not_called()
+                    asset_url = f"http://127.0.0.1:{server.server_port}/presence-resident.js"
+                    with urllib.request.urlopen(asset_url, timeout=5) as response:
+                        self.assertEqual(response.status, 200)
+                        self.assertIn("text/javascript", response.headers["Content-Type"])
+                        self.assertIn(b"export function mountResident", response.read())
+                    url = f"http://127.0.0.1:{server.server_port}/api/development/dashboard"
+                    with urllib.request.urlopen(urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"}), timeout=5) as response:
+                        self.assertEqual(response.status, 200)
+                    activity.return_value.touch.assert_called_once_with(authenticated_rider=True)
+            finally:
+                server.shutdown(); server.server_close(); thread.join(timeout=2)
+
     def test_authenticated_profile_renders_truthful_fallback_on_mobile_and_desktop(self):
         if os.getenv("FAWKES_HTTP_ACCEPTANCE") != "1":
             self.skipTest("set FAWKES_HTTP_ACCEPTANCE=1 where loopback sockets are permitted")
