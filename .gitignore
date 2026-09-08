@@ -3,11 +3,70 @@ __pycache__/
 .venv/
 .pytest_cache/
 .DS_Store
+.cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+
+# Local credentials and authentication material
+.env
+.env.*
+!.env.example
+credentials/
+secrets/
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+
+# Logs, coverage, and local tooling state
+*.log
+logs/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+.idea/
+.vscode/
+*.code-workspace
+*:*Zone.Identifier
+
+# Build, dependency, and generated distribution output
+build/
+dist/
+*.egg-info/
+node_modules/
+*.whl
+/browser_extension/*.tar.gz
+/browser_extension/*.zip
+/fawkes-*.tar.gz
+/fawkes-*.zip
+
+# Temporary and machine-local configuration
+tmp/
+temp/
+*.tmp
+*.local
+*.local.*
+.fawkes-local/
+config/local.*
+
+# Database files are runtime state unless a reviewed fixture is explicitly
+# force-added in a dedicated synthetic test-fixture directory.
+*.sqlite
+*.sqlite3
+*.db
 
 # Fawkes runtime state — keep outside source control
 /archive/
 /backups/
 /database/
+/conversations/
+/instances/
 
 # Phoenix derived runtime state — private and rebuildable where applicable
 /memory/
+/library/

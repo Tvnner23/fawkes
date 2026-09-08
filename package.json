@@ -1,0 +1,14 @@
+{
+  "name": "fawkes-presence-client",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "build:presence": "esbuild src/app/presence-three-entry.js --bundle --format=iife --global-name=FawkesThreeRuntime --platform=browser --target=es2020 --minify --outfile=src/app/static/presence-three.bundle.js"
+  },
+  "dependencies": {
+    "three": "0.185.1"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2"
+  }
+}
