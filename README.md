@@ -14,9 +14,15 @@ Experienced external reviewers should begin with
 implemented behavior from roadmap/design intent and identifies the areas where
 critical disagreement is most valuable.
 
+For focused changes, read [Contributing](CONTRIBUTING.md) and the
+[Repository layout](docs/REPOSITORY_LAYOUT.md). Implementation/status documents
+contain dated captures (including the 2026-09-08 implementation pointer); reconcile
+them with current accepted evidence before relying on phase or deployment claims.
+This contributor/navigation batch leaves the broader repository cleanup open.
+
 ## Core Architecture
 
-Long-term direction and current execution status:
+Long-term direction and dated implementation handoff:
 
 - [Project Fawkes Canonical Roadmap v1](docs/phoenix/CANONICAL_ROADMAP.md)
 - [Current Project Fawkes Implementation](docs/phoenix/CURRENT_IMPLEMENTATION.md)
