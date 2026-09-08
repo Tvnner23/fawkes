@@ -98,6 +98,7 @@
     function controls() {
       const fresh = current && Date.now() - lastSuccess < 15000;
       if (current && lastSuccess > 0) {
+        state.dataset.connection = !fresh ? "stale" : current.state;
         state.textContent = !fresh ? "Stale · retained text is last known; connection verification overdue"
           : current.state === "notLoaded" ? "History only · Worker not attached"
           : current.state === "systemError" ? "Worker error"
@@ -118,7 +119,8 @@
         const article = doc.createElement("article"); article.className = "worker-history-message";
         article.dataset.messageId = item.message_id;
         const label = doc.createElement("p"); label.className = "meta";
-        label.textContent = (item.role === "worker" ? "Worker" : "Tanner") + (item.phase === "final_answer" ? " · Final" : item.role === "worker" && item.phase === null ? " · Phase unknown" : "") + " · " + item.turn_id;
+        article.dataset.role = item.role;
+        label.textContent = (item.role === "worker" ? "WORKER" : "TANNER") + (item.phase === "final_answer" ? " // FINAL" : item.role === "worker" && item.phase === null ? " // PHASE UNKNOWN" : "") + " · " + item.turn_id;
         const body = doc.createElement("pre"); body.className = "worker-message"; body.textContent = item.text;
         article.append(label, body); container.appendChild(article);
       }
@@ -157,7 +159,8 @@
         if (!readingOlder && signature !== currentHistory) { history(value.messages, false); currentHistory = signature; olderCursor = value.next_cursor; }
         byId("worker-older").disabled = !olderCursor;
       } catch (error) {
-        lastSuccess = 0; state.textContent = "Disconnected · retained text is last known";
+        lastSuccess = 0; state.dataset.connection = "disconnected";
+        state.textContent = "Disconnected · retained text is last known";
         replyResult.textContent = error.message + (pendingReply ? " · Reply identity retained; no automatic resend." : "");
       } finally { refreshing = false; controls(); }
       // Receipt latency must not hold the projection or clipboard controls.

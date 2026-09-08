@@ -1,4 +1,35 @@
 # Pi Worker conversation and Windows handoff
+## Worker-only CRT appearance
+
+The Worker page uses a lightweight near-black/phosphor-green CRT treatment,
+with restrained amber/cyan accents and an industrial inset bezel.
+It occupies the whole screen while selected: the surrounding console header,
+tabs and footer are hidden only there. Back (top left) returns to Summary;
+existing swipe navigation remains. The single companion-bound Idle button moves
+to its compact Worker slot and back without cloning handlers or simulating taps.
+“FAWKES // WORKER LINK” labels the same conversation connection and its
+authoritative observed status; it is not the separate managed-approval feed.
+Disconnected/history-only and stale states remain explicit, not green.
+
+Complete public text is still rendered using textContent and pre-wrap. TANNER
+and WORKER labels identify the speakers; session/message identifiers remain
+available in the connection-details expansion. Conversation history starts open.
+There is no truncation, rich-HTML execution, extra summarizer or new transport.
+Send update to PC retains the exact latest completed final and Windows
+write/read-back requirement. Send reply retains the exact same-session queue,
+receipt and duplicate protection. Nothing here approves a permission request.
+
+The720×720 layout keeps the copy control above the scrollable text and the reply
+box/actions below. The touchscreen keyboard remains scrollable with48px keys.
+Effects are static CSS backgrounds/inset shadows: no canvas, video, filters,
+font downloads, flashing or overlay intercepting touch/selection. Reduced motion
+removes scanlines and title glow. Other console pages, Idle/Matrix, approvals
+and native Pi touch mapping are unchanged.
+
+Retained real G17 evidence: Tanner's Pi Send update produced the complete final
+on Windows Ctrl+V with a matching write/read-back receipt. Tanner's Pi reply was
+received by the same Worker thread. Those are transport evidence, not a claim
+that the new appearance has already been reviewed or physically inspected.
 
 The Worker page displays the explicitly bound Codex thread's public conversation
 and complete latest final answer. Summary links to Reply to Worker. This replaces

@@ -85,6 +85,11 @@ async function recoveryCases(){
   for(const options of [{fail:true},{drop:true}]){
     const store=new Map([[key,JSON.stringify({draft:'Same reply',pendingReply:null,pendingCopy:null})]]);
     const first=environment(store,options);await settle();
+    assert.equal(first.elements.get('worker-session-state').dataset.connection,'idle');
+    const history=first.elements.get('worker-conversation-history');
+    assert.equal(history.children[0].dataset.role,'worker');
+    assert.match(history.children[0].children[0].textContent,/^WORKER \/\/ FINAL/);
+    assert.equal(history.children[0].children[1].textContent,text);
     await first.elements.get('worker-reply-form').emit('submit');assert.equal(first.posts.length,0);
     assert.equal(first.elements.get('worker-send-reply').disabled,true);first.controller.stop();
     const reload=environment(store);await settle();await reload.elements.get('worker-reply-form').emit('submit');

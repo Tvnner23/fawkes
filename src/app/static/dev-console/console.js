@@ -2110,6 +2110,12 @@
 
     function showPage(page) {
       pages.forEach((item, index) => { item.hidden = index !== page; });
+      shell.dataset.workerScreen = String(page === 4);
+      // Move the ONE existing companion-bound Idle button; do not clone its
+      // handler, create a second Matrix owner, or synthesize an Idle click.
+      const idle = documentRef.getElementById("console-idle");
+      const idleSlot = documentRef.getElementById(page === 4 ? "worker-idle-slot" : "console-idle-slot");
+      if (idle && idleSlot && idle.parentNode !== idleSlot) idleSlot.appendChild(idle);
       indicators.forEach((item, index) => {
         if (index === page) item.setAttribute("aria-current", "page");
         else item.removeAttribute("aria-current");
@@ -2545,6 +2551,8 @@
     }
     if (saveUpdate) saveUpdate.addEventListener("click", () => { navigation.activity(); savePreparedUpdate(); });
     const workerEntry = documentRef.getElementById("reply-to-worker");
+    const workerBack = documentRef.getElementById("worker-back");
+    if (workerBack) workerBack.addEventListener("click", () => navigation.go(0, "worker-back"));
     if (workerEntry) workerEntry.addEventListener("click", () => {
       const target = indicators.find(item => item.dataset.pageTarget === "4");
       if (target) target.click();
