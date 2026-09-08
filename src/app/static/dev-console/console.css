@@ -635,7 +635,16 @@ body { background: radial-gradient(circle at 50% 0, #152332, var(--background) 6
 /* Distinct Worker zones: green messages, cyan input, blue keys, amber metal
    divider and neutral top controls. The single status line retains full text. */
 #worker-page .worker-toolbar { background: #3c3423; border-color: #ad9766; }
-#worker-page #worker-back { background: #55472e; border-color: #b9a577; color: #fff0c9; }
+#worker-page .worker-screen-controls { grid-template-columns: minmax(140px, 180px) minmax(0, 1fr) auto; align-items: start; }
+#worker-page #worker-menu-slot { min-width: 0; }
+#worker-page .page-menu > summary { background: #55472e; border-color: #b9a577; color: #fff0c9; padding: 4px 8px; font-size: 16px; }
+/* Native disclosure stays in flow; the bounded list scrolls without covering
+   conversation, composer or permission controls. No Worker swipe navigation. */
+#worker-page .page-menu .page-nav { grid-template-columns: 1fr 1fr; max-height: 144px; overflow-y: auto; overscroll-behavior: contain; touch-action: pan-y; }
+#worker-page .page-menu #page-indicators { grid-column: 1/-1; grid-row: 1; }
+#worker-page .page-menu .page-nav button { touch-action: pan-y; }
+#worker-page:has(#worker-keyboard:not([hidden])) .page-menu .page-nav { max-height: 48px; }
+#worker-page:has(#worker-keyboard:not([hidden])):has(#page-menu[open]) #worker-reading { padding-block: 0; visibility: hidden; }
 #worker-page #worker-reading { background: repeating-linear-gradient(0deg,transparent 0 3px,#bcffc305 3px 4px), #09180e; }
 #worker-page #worker-final-message, #worker-page .worker-history-message {
   background: #16391e; border-color: #80b279; border-left-color: #b3ed90;
@@ -683,4 +692,5 @@ body { background: radial-gradient(circle at 50% 0, #152332, var(--background) 6
   .feed-freshness .state { font-size: 12px; }
   .page-menu .page-nav { grid-template-columns: 1fr 1fr; }
   .page-menu #page-indicators { grid-column: 1/-1; grid-row: 1; }
+  #worker-page .worker-screen-controls { grid-template-columns: minmax(88px,1fr) minmax(0,1.2fr) auto; gap: 8px; }
 }

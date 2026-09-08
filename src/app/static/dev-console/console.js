@@ -2121,6 +2121,11 @@
       }
       pages.forEach((item, index) => { item.hidden = index !== page; });
       shell.dataset.workerScreen = String(page === 4);
+      // Reuse the same five-page menu and its listeners on Worker. Moving the
+      // owner preserves page identity without a second set of navigation IDs.
+      const pageMenu = documentRef.getElementById("page-menu");
+      const menuSlot = documentRef.getElementById(page === 4 ? "worker-menu-slot" : "console-menu-slot");
+      if (pageMenu && menuSlot && pageMenu.parentNode !== menuSlot) menuSlot.appendChild(pageMenu);
       // Move the ONE existing companion-bound Idle button; do not clone its
       // handler, create a second Matrix owner, or synthesize an Idle click.
       const idle = documentRef.getElementById("console-idle");
@@ -2569,8 +2574,6 @@
     }
     if (saveUpdate) saveUpdate.addEventListener("click", () => { navigation.activity(); savePreparedUpdate(); });
     const workerEntry = documentRef.getElementById("reply-to-worker");
-    const workerBack = documentRef.getElementById("worker-back");
-    if (workerBack) workerBack.addEventListener("click", () => navigation.go(0, "worker-back"));
     if (workerEntry) workerEntry.addEventListener("click", () => {
       const target = indicators.find(item => item.dataset.pageTarget === "4");
       if (target) target.click();

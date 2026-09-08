@@ -12,7 +12,7 @@
   <main id="dev-console" data-idle-seconds="60" aria-label="Fawkes developer console">
     <header class="console-header">
       <div class="brand-row">
-        <div class="brand-identity">
+        <div id="console-menu-slot" class="brand-identity">
           <details id="page-menu" class="page-menu">
             <summary aria-label="Choose console page">☰ <span id="page-title">Activity Summary</span></summary>
             <nav class="page-nav" aria-label="Console pages">
@@ -229,7 +229,7 @@
       <section id="worker-page" class="console-page" data-page="4" aria-label="Worker conversation" hidden>
         <div class="worker-toolbar">
           <div class="worker-screen-controls">
-            <button id="worker-back" type="button" class="secondary-button" aria-label="Back to Summary">‹ Back</button>
+            <div id="worker-menu-slot"></div>
             <button id="worker-send-update" type="button" class="primary-button" disabled>Send update to PC</button>
             <span id="worker-idle-slot"></span>
           </div>

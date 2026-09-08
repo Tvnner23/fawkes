@@ -30,6 +30,9 @@ const html=fs.readFileSync('src/app/static/dev-console/index.html','utf8');
 assert(!html.includes('id="save-console-update"'));
 assert(!html.includes('id="reply-to-worker"'));
 assert(html.includes('id="page-menu"') && html.includes('data-page-target="4"'));
+assert(!html.includes('id="worker-back"'));
+assert.equal((html.match(/id="page-menu"/g)||[]).length,1);
+assert(html.includes('id="console-menu-slot"') && html.includes('id="worker-menu-slot"'));
 assert(html.indexOf('id="worker-send-update"')>html.indexOf('id="worker-page"'));
 assert(html.includes('id="worker-reply-form"')&&html.includes('id="worker-keyboard"'));
 assert.equal(load('console.js').PAGE_TITLES.length,5);
@@ -152,6 +155,7 @@ async function recoveryCases(){
   const fixture=fakeDocument();const page=new FakeElement('section');page.className='console-page';page.dataset.page='4';fixture.pages.push(page);
   const button=new FakeElement('button');button.dataset.pageTarget='4';fixture.indicators.push(button);
   const menus=new Map(['page-menu','connection-details'].map(id=>[id,new FakeElement('details',id)]));
+  for(const id of ['console-menu-slot','worker-menu-slot']) menus.set(id,new FakeElement('div',id));
   const originalById=fixture.document.getElementById.bind(fixture.document);
   fixture.document.getElementById=id=>menus.get(id)||originalById(id);
   const boot=consoleApi.boot({document:fixture.document,fetch:async()=>({ok:true,status:200,json:async()=>rawProjection}),scheduler:new Scheduler(),projectionScheduler:new Scheduler(),baseUrl:'https://localhost:8791/',pollIntervalMs:0,disableUpdateRefresh:true});
@@ -161,6 +165,7 @@ async function recoveryCases(){
   // native disclosures on transitions instead of leaving content covered.
   assert.equal(fixture.shell.dataset.page,'4');
   const pageMenu=fixture.document.getElementById('page-menu');
+  assert.equal(pageMenu.parentNode,menus.get('worker-menu-slot'));
   const connectionDetails=fixture.document.getElementById('connection-details');
   pageMenu.open=true; connectionDetails.open=true;
   await button.emit('click',{});
@@ -169,8 +174,11 @@ async function recoveryCases(){
   pageMenu.open=true; connectionDetails.open=true;
   boot.navigation.go(3);
   assert.equal(fixture.shell.dataset.page,'3');
+  assert.equal(pageMenu.parentNode,menus.get('console-menu-slot'));
   assert.equal(pageMenu.open,false); assert.equal(connectionDetails.open,false);
   boot.navigation.go(4);
+  assert.equal(pageMenu.parentNode,menus.get('worker-menu-slot'));
+  assert.equal(fixture.document.getElementById('page-menu'),pageMenu);
   const input=new FakeElement('textarea','worker-reply');const original=input.matches.bind(input);
   input.matches=selector=>selector==='textarea'||original(selector);
   for(const key of ['ArrowLeft','ArrowRight']){

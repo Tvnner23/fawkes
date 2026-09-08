@@ -1,4 +1,20 @@
 # Pi Worker conversation and Windows handoff
+## Shared page menu on Worker
+
+Tanner's G22 amendment replaces Worker's Back button with the same hamburger
+page menu used elsewhere. It includes Summary, Campaign, Repo, System map and
+Worker. The existing menu node, page identifiers and listeners move between
+header slots; they are not duplicated. The closed top strip contains only this
+menu, Send update to PC and the one existing Idle button. Selecting any page,
+including the current page, closes the disclosure. Its bounded list scrolls in
+layout instead of covering the composer or permission controls. While both menu
+and keyboard are open, the list shows one scrollable row and temporarily hides
+the reading pane to keep every input key above permission notices. Closing the
+menu restores the same messages and reading position; no history is removed.
+Drafts, native
+scrolling, keyboard behavior and disabled Worker swipe-navigation are preserved.
+This supersedes Back-button references below; historical evidence is retained.
+
 ## Shared console TV theme and compact chrome
 
 Tanner's G21 amendment applies the Worker-sized compact header and TV framing
