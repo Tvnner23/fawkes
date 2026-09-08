@@ -144,48 +144,245 @@ _ARTIFACT_BEGIN = "\n----- BEGIN EXACT UTF-8 ARTIFACT -----\n"
 _ARTIFACT_END = "\n----- END EXACT UTF-8 ARTIFACT -----"
 
 
-def _provider_review_projection(exported):
-    """Deduplicate exact postimages for provider presentation, losslessly."""
-    logical = bytes(exported)
-    if len(logical) <= MAX_PROVIDER_REVIEW_EVIDENCE_BYTES:
-        return logical
-    package = json.loads(logical.decode("utf-8"))
-    projected = json.loads(json.dumps(package))
-    sections = {item["section_id"]: item for item in projected["included_sections"]}
-    exact = sections.get("exact-change-evidence")
-    if not exact:
-        return logical
-    changes = json.loads(exact["content"])
+_NODE_SCHEMA = "fawkes.filesystem_node.v1"
+_EMPTY_BODY_SHA256 = _sha(b"")
+_TYPED_POSTIMAGE_IDENTITY_FIELDS = (
+    "after_type", "after_mode", "after_node_binding",
+)
+_TYPED_POSTIMAGE_FIELDS = _TYPED_POSTIMAGE_IDENTITY_FIELDS + (
+    "after_symlink_target",
+)
+
+
+def _has_typed_postimage_marker(change):
+    """Distinguish a genuinely legacy entry from a partial typed entry.
+
+    Legacy raw packages predate the three typed identity fields.  Once any of
+    those fields appears, the entry is governed by the typed contract in full;
+    it may not fall back to the legacy raw route merely because one companion
+    field was omitted.
+    """
+    return (isinstance(change, dict)
+            and any(field in change for field in _TYPED_POSTIMAGE_IDENTITY_FIELDS))
+
+
+def _typed_postimages_required(changes):
+    """Return whether exact changes use typed evidence, failing closed on mixes."""
+    if not isinstance(changes, list):
+        raise ValueError("exact change evidence is malformed")
+    marked = []
+    for change in changes:
+        if not isinstance(change, dict):
+            raise ValueError("exact postimage entry is malformed")
+        marked.append(_has_typed_postimage_marker(change))
+    if any(marked) and not all(marked):
+        raise ValueError("exact change evidence mixes typed and legacy postimages")
+    return bool(marked) and all(marked)
+
+
+def _typed_postimage(change, *, canonical_body):
+    """Validate one immutable postimage before deduplicating its body.
+
+    Exact change evidence gives regular files a base64 postimage.  Directory,
+    symlink, and absent postimages instead carry their complete typed identity
+    in ``after_node_binding`` and deliberately have no regular-file body.
+    """
+    if not isinstance(change, dict):
+        raise ValueError("exact postimage entry is malformed")
+    path = change.get("path")
+    if not isinstance(path, str) or not path:
+        raise ValueError("exact postimage path is malformed")
+    if any(field not in change for field in _TYPED_POSTIMAGE_FIELDS):
+        raise ValueError("exact postimage metadata is incomplete")
+    kind = change["after_type"]
+    if kind not in {None, "regular", "directory", "symlink"}:
+        raise ValueError("exact postimage type is unsupported")
+    node = change.get("after_node_binding")
+    if not isinstance(node, dict):
+        raise ValueError("exact postimage node binding is missing")
+    expected_state = "absent" if kind is None else "present"
+    if (node.get("schema") != _NODE_SCHEMA
+            or node.get("state") != expected_state
+            or node.get("file_type") != kind
+            or node.get("mode") != change.get("after_mode")
+            or not isinstance(node.get("body_length"), int)
+            or isinstance(node.get("body_length"), bool)
+            or node["body_length"] < 0
+            or not isinstance(node.get("body_sha256"), str)
+            or len(node["body_sha256"]) != 64):
+        raise ValueError("exact postimage node binding is malformed")
+    target = change.get("after_symlink_target")
+    if kind == "regular":
+        if not canonical_body:
+            if target is not None or "after_base64" in change:
+                raise ValueError("projected regular postimage retains a raw body")
+            return path, kind, None
+        if ("after_base64" not in change or target is not None
+                or not isinstance(change.get("after_base64"), str)):
+            raise ValueError("regular postimage body is unavailable")
+        try:
+            body = base64.b64decode(change["after_base64"], validate=True)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("regular postimage body is malformed") from exc
+    else:
+        if "after_base64" not in change or change["after_base64"] is not None:
+            raise ValueError("nonregular postimage has a regular-file body")
+        if target is not None and kind != "symlink":
+            raise ValueError("non-symlink postimage has a symlink target")
+        if kind == "directory" or kind is None:
+            body = b""
+        else:
+            if not isinstance(target, str):
+                raise ValueError("symlink postimage target is malformed")
+            body = target.encode("utf-8")
+    if len(body) != node["body_length"] or _sha(body) != node["body_sha256"]:
+        raise ValueError("exact postimage body does not match its node binding")
+    return path, kind, body
+
+
+def _changed_artifact_sections(sections, *, projection):
+    """Parse bounded regular-file presentations without accepting extras."""
     artifacts = {}
     for section_id, section in sections.items():
         if not section_id.startswith("changed-artifact-"):
             continue
-        content = section["content"]
-        if _ARTIFACT_BEGIN not in content or not content.endswith(_ARTIFACT_END):
+        content = section.get("content") if isinstance(section, dict) else None
+        if (not isinstance(content, str) or _ARTIFACT_BEGIN not in content
+                or not content.endswith(_ARTIFACT_END)):
             raise ValueError("changed artifact presentation is malformed")
         header, body = content.split(_ARTIFACT_BEGIN, 1)
         body = body[:-len(_ARTIFACT_END)]
-        identity = json.loads(header)
-        encoded = body.encode("utf-8")
-        if (len(encoded) != identity.get("byte_length")
-                or _sha(encoded) != identity.get("sha256")):
-            raise ValueError("changed artifact presentation identity mismatch")
-        if identity["path"] in artifacts:
-            raise ValueError("changed artifact presentation is duplicated")
-        artifacts[identity["path"]] = (section_id, encoded)
-    for change in changes:
-        path = change.get("path")
-        section_id, body = artifacts.get(path, (None, None))
         try:
-            embedded = base64.b64decode(change["after_base64"], validate=True)
-        except (KeyError, TypeError, ValueError) as exc:
-            raise ValueError("exact postimage body is unavailable") from exc
-        if section_id is None or embedded != body:
-            raise ValueError("exact postimage and changed artifact differ")
-        change["after_body_reference"] = {"encoding": "section-content-utf8-v1",
-            "section_id": section_id, "path": path, "byte_length": len(body),
-            "sha256": _sha(body)}
-        del change["after_base64"]
+            identity = json.loads(header)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise ValueError("changed artifact presentation header is malformed") from exc
+        encoded = body.encode("utf-8")
+        path = identity.get("path") if isinstance(identity, dict) else None
+        if (not isinstance(path, str) or not path
+                or not isinstance(identity.get("byte_length"), int)
+                or isinstance(identity.get("byte_length"), bool)
+                or identity["byte_length"] < 0
+                or not isinstance(identity.get("sha256"), str)
+                or len(identity["sha256"]) != 64
+                or len(encoded) != identity["byte_length"]
+                or _sha(encoded) != identity["sha256"]):
+            raise ValueError("changed artifact presentation identity mismatch")
+        if path in artifacts:
+            raise ValueError("changed artifact presentation is duplicated")
+        artifacts[path] = {"section_id": section_id, "body": encoded}
+    return artifacts
+
+
+def _package_sections(package, *, projection):
+    included = package.get("included_sections") if isinstance(package, dict) else None
+    if not isinstance(included, list):
+        raise ValueError("provider review package sections are malformed")
+    sections = {}
+    for section in included:
+        section_id = section.get("section_id") if isinstance(section, dict) else None
+        if not isinstance(section_id, str) or not section_id or section_id in sections:
+            raise ValueError("provider review package contains duplicated sections")
+        sections[section_id] = section
+    return sections
+
+
+def _exact_changes(section):
+    try:
+        changes = json.loads(section["content"])
+    except (KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise ValueError("exact change evidence is malformed") from exc
+    if not isinstance(changes, list):
+        raise ValueError("exact change evidence is malformed")
+    return changes
+
+
+def _validated_canonical_postimages(changes, artifacts):
+    """Require each canonical regular-file body exactly once before transport."""
+    seen_paths, consumed_artifacts, regular_bodies = set(), set(), {}
+    for change in changes:
+        path, kind, body = _typed_postimage(change, canonical_body=True)
+        if path in seen_paths:
+            raise ValueError("exact change evidence is duplicated")
+        seen_paths.add(path)
+        artifact = artifacts.get(path)
+        if kind == "regular":
+            if artifact is None or body != artifact["body"]:
+                raise ValueError("exact postimage and changed artifact differ")
+            consumed_artifacts.add(path)
+            regular_bodies[path] = body
+        elif artifact is not None or "after_body_reference" in change:
+            raise ValueError("nonregular postimage has a changed artifact body")
+    if set(artifacts) != consumed_artifacts:
+        raise ValueError("changed artifact presentation is unbound")
+    return regular_bodies
+
+
+def _raw_provider_package(logical, *, enforce_provider_bound):
+    """Parse the raw route before choosing legacy or typed presentation.
+
+    Raw transport is available only for a real bounded package.  Typed exact
+    evidence is validated even when its canonical bytes fit the provider
+    limit; only records with no typed identity marker retain the historical
+    byte-for-byte legacy route.
+    """
+    if enforce_provider_bound and len(logical) > MAX_PROVIDER_REVIEW_EVIDENCE_BYTES:
+        raise ValueError("provider review evidence exceeds byte limit")
+    try:
+        package = json.loads(logical.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("raw provider review package is malformed") from exc
+    sections = _package_sections(package, projection=False)
+    exact = sections.get("exact-change-evidence")
+    if exact is None:
+        return package, sections, None, False
+    changes = _exact_changes(exact)
+    typed = _typed_postimages_required(changes)
+    if typed:
+        _validated_canonical_postimages(
+            changes, _changed_artifact_sections(sections, projection=False))
+    return package, sections, changes, typed
+
+
+def _provider_review_projection(exported):
+    """Deduplicate exact postimages for provider presentation, losslessly."""
+    logical = bytes(exported)
+    package, canonical_sections, canonical_changes, typed = _raw_provider_package(
+        logical, enforce_provider_bound=False)
+    # The established small/raw route remains byte-for-byte only after its
+    # complete package shape has been classified and, where applicable, typed
+    # evidence has been strictly validated.
+    if len(logical) <= MAX_PROVIDER_REVIEW_EVIDENCE_BYTES:
+        return logical
+    if canonical_changes is None:
+        raise ValueError("oversized provider package lacks exact change evidence")
+    if not typed:
+        raise ValueError("oversized provider package lacks typed postimage evidence")
+    projected = json.loads(json.dumps(package))
+    sections = _package_sections(projected, projection=True)
+    exact = sections.get("exact-change-evidence")
+    if not exact:
+        return logical
+    changes = _exact_changes(exact)
+    artifacts = _changed_artifact_sections(sections, projection=True)
+    seen_paths, consumed_artifacts = set(), set()
+    for change in changes:
+        path, kind, body = _typed_postimage(change, canonical_body=True)
+        if path in seen_paths:
+            raise ValueError("exact change evidence is duplicated")
+        seen_paths.add(path)
+        artifact = artifacts.get(path)
+        if kind == "regular":
+            if artifact is None or body != artifact["body"]:
+                raise ValueError("exact postimage and changed artifact differ")
+            change["after_body_reference"] = {"encoding": "section-content-utf8-v1",
+                "section_id": artifact["section_id"], "path": path,
+                "byte_length": len(body), "sha256": _sha(body)}
+            del change["after_base64"]
+            consumed_artifacts.add(path)
+        elif artifact is not None or "after_body_reference" in change:
+            raise ValueError("nonregular postimage has a changed artifact body")
+    if set(artifacts) != consumed_artifacts:
+        raise ValueError("changed artifact presentation is unbound")
     exact["content"] = json.dumps(changes, sort_keys=True, ensure_ascii=False,
                                   separators=(",", ":"))
     projection = {"schema_version": 1,
@@ -214,16 +411,23 @@ def _resolve_provider_review_projection(data, *, expected_canonical_sha256,
             or not isinstance(expected_canonical_byte_length, int)
             or expected_canonical_byte_length < 0):
         raise ValueError("independent canonical package binding is required")
-    value = json.loads(bytes(data).decode("utf-8"))
+    encoded = bytes(data)
+    if len(encoded) > MAX_PROVIDER_REVIEW_EVIDENCE_BYTES:
+        raise ValueError("provider review evidence exceeds byte limit")
+    try:
+        value = json.loads(encoded.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("provider review package is malformed") from exc
     if value.get("record_type") != "worker_exchange_provider_review_projection":
-        logical = bytes(data)
+        logical = encoded
         if (len(logical) != expected_canonical_byte_length
                 or _sha(logical) != expected_canonical_sha256):
             raise ValueError("canonical package does not match its independent binding")
+        _raw_provider_package(logical, enforce_provider_bound=True)
         return logical
     canonical_projection = (json.dumps(value, sort_keys=True, ensure_ascii=False,
                                        separators=(",", ":")) + "\n").encode("utf-8")
-    if bytes(data) != canonical_projection:
+    if encoded != canonical_projection:
         raise ValueError("provider review projection is truncated or has trailing data")
     if (value.get("schema_version") != 1 or value.get("creates_authority") is not False
             or value.get("deduplication") != "after-base64-to-exact-changed-artifact-v1"
@@ -233,24 +437,47 @@ def _resolve_provider_review_projection(data, *, expected_canonical_sha256,
                 {key: item for key, item in value.items() if key != "record_sha256"})):
         raise ValueError("provider review projection integrity mismatch")
     package = value.get("package")
-    included = package.get("included_sections", [])
-    sections = {item["section_id"]: item for item in included}
-    if len(sections) != len(included):
-        raise ValueError("provider review projection contains duplicated sections")
+    sections = _package_sections(package, projection=True)
     exact = sections.get("exact-change-evidence")
-    changes = json.loads(exact["content"])
+    if exact is None:
+        raise ValueError("provider review projection lacks exact change evidence")
+    changes = _exact_changes(exact)
+    artifacts = _changed_artifact_sections(sections, projection=True)
+    seen_paths, consumed_artifacts = set(), set()
     for change in changes:
+        path, kind, _ = _typed_postimage(change, canonical_body=False)
+        if path in seen_paths:
+            raise ValueError("provider review projection change is duplicated")
+        seen_paths.add(path)
+        if kind != "regular":
+            if "after_body_reference" in change or path in artifacts:
+                raise ValueError("nonregular projection has a changed artifact body")
+            continue
         reference = change.pop("after_body_reference", None)
-        section = sections.get((reference or {}).get("section_id"))
-        if not section or reference.get("path") != change.get("path"):
+        if (not isinstance(reference, dict)
+                or set(reference) != {"encoding", "section_id", "path", "byte_length", "sha256"}
+                or reference.get("encoding") != "section-content-utf8-v1"
+                or reference.get("path") != path
+                or not isinstance(reference.get("section_id"), str)
+                or not isinstance(reference.get("byte_length"), int)
+                or isinstance(reference.get("byte_length"), bool)
+                or reference["byte_length"] < 0
+                or not isinstance(reference.get("sha256"), str)
+                or len(reference["sha256"]) != 64):
+            raise ValueError("provider review projection reference is malformed")
+        artifact = artifacts.get(path)
+        if artifact is None or artifact["section_id"] != reference["section_id"]:
             raise ValueError("provider review projection reference is dangling")
-        content = section["content"]
-        if _ARTIFACT_BEGIN not in content or not content.endswith(_ARTIFACT_END):
-            raise ValueError("provider review projection artifact is malformed")
-        body = content.split(_ARTIFACT_BEGIN, 1)[1][:-len(_ARTIFACT_END)].encode("utf-8")
-        if (len(body) != reference.get("byte_length") or _sha(body) != reference.get("sha256")):
+        body = artifact["body"]
+        if (len(body) != reference["byte_length"] or _sha(body) != reference["sha256"]):
             raise ValueError("provider review projection artifact mismatches its reference")
+        node = change["after_node_binding"]
+        if len(body) != node["body_length"] or _sha(body) != node["body_sha256"]:
+            raise ValueError("provider review projection artifact mismatches its node binding")
         change["after_base64"] = base64.b64encode(body).decode("ascii")
+        consumed_artifacts.add(path)
+    if set(artifacts) != consumed_artifacts:
+        raise ValueError("provider review projection has an unbound changed artifact")
     exact["content"] = json.dumps(changes, sort_keys=True, ensure_ascii=False,
                                   separators=(",", ":"))
     logical = (json.dumps(package, sort_keys=True, ensure_ascii=False,

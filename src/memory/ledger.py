@@ -41,50 +41,59 @@ def _connect(path=LEDGER_PATH):
     path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(path)
     connection.row_factory = sqlite3.Row
-    connection.execute(
-        """
-        CREATE TABLE IF NOT EXISTS memory_work_items (
-            work_item_id TEXT PRIMARY KEY,
-            instance_id TEXT NOT NULL,
-            conversation_id TEXT NOT NULL,
-            message_id TEXT NOT NULL,
-            canonical_revision TEXT NOT NULL,
-            processor_version TEXT NOT NULL,
-            status TEXT NOT NULL,
-            attempt_count INTEGER NOT NULL DEFAULT 0,
-            source_archive_ids TEXT NOT NULL,
-            assessment TEXT,
-            resulting_memory_ids TEXT,
-            error TEXT,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            UNIQUE (
-                instance_id,
-                conversation_id,
-                message_id,
-                canonical_revision,
-                processor_version
+    try:
+        # Schema discovery and migration must be one SQLite write transaction.
+        # Otherwise two newly started background workers can both observe the
+        # legacy schema and race to add the same column.
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS memory_work_items (
+                work_item_id TEXT PRIMARY KEY,
+                instance_id TEXT NOT NULL,
+                conversation_id TEXT NOT NULL,
+                message_id TEXT NOT NULL,
+                canonical_revision TEXT NOT NULL,
+                processor_version TEXT NOT NULL,
+                status TEXT NOT NULL,
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                source_archive_ids TEXT NOT NULL,
+                assessment TEXT,
+                resulting_memory_ids TEXT,
+                error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE (
+                    instance_id,
+                    conversation_id,
+                    message_id,
+                    canonical_revision,
+                    processor_version
+                )
             )
+            """
         )
-        """
-    )
-    columns = {
-        row["name"]
-        for row in connection.execute(
-            "PRAGMA table_info(memory_work_items)"
-        ).fetchall()
-    }
-    for name, definition in (
-        ("candidate_content", "TEXT"),
-        ("candidate_created_at", "TEXT"),
-        ("decision", "TEXT"),
-        ("decision_reason", "TEXT"),
-    ):
-        if name not in columns:
-            connection.execute(
-                f"ALTER TABLE memory_work_items ADD COLUMN {name} {definition}"
-            )
-    connection.commit()
+        columns = {
+            row["name"]
+            for row in connection.execute(
+                "PRAGMA table_info(memory_work_items)"
+            ).fetchall()
+        }
+        for name, definition in (
+            ("candidate_content", "TEXT"),
+            ("candidate_created_at", "TEXT"),
+            ("decision", "TEXT"),
+            ("decision_reason", "TEXT"),
+        ):
+            if name not in columns:
+                connection.execute(
+                    f"ALTER TABLE memory_work_items ADD COLUMN {name} {definition}"
+                )
+        connection.commit()
+    except BaseException:
+        connection.rollback()
+        connection.close()
+        raise
     return connection
 
 

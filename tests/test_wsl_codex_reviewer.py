@@ -1,3 +1,4 @@
+import base64
 import hashlib
 import copy
 import json
@@ -27,7 +28,7 @@ from src.runtime.windows_codex_reviewer import (
     validate_windows_structured_response,
 )
 from src.runtime.wsl_codex_reviewer import (
-    FORMAL_REVIEW_ROLE, WSL_ADAPTER_ID, WSL_ADAPTER_QUALIFIED, WSL_ADAPTER_PROMOTED, WSL_ENVIRONMENT_ID,
+    FORMAL_REVIEW_ROLE, MAX_PROVIDER_REVIEW_EVIDENCE_BYTES, WSL_ADAPTER_ID, WSL_ADAPTER_QUALIFIED, WSL_ADAPTER_PROMOTED, WSL_ENVIRONMENT_ID,
     WSL_QUALIFICATION_CONTRACT, WSL_REVIEWER_REFERENCE, WSL_REVIEWER_ROLE,
     WSL_REVIEWER_WORKER_ID, WslCodexReviewAdapter, _provider_review_projection,
     _resolve_provider_review_projection, prepare_wsl_review_package,
@@ -251,66 +252,261 @@ class WslFormalReviewerTests(unittest.TestCase):
                 self.invoke()
         self.assertEqual(MAX_REVIEW_PACKAGE_BYTES, 512_000)
 
-    def test_provider_projection_deduplicates_exact_postimage_and_round_trips(self):
-        body = "z" * 600_000
-        digest = hashlib.sha256(body.encode()).hexdigest()
-        change = {"path":"src/large.py", "after_base64":__import__("base64").b64encode(
-            body.encode()).decode(), "text_diff":"+ exact body", "after_node_binding":{
-                "body_length":len(body), "body_sha256":digest}}
-        artifact = json.dumps({"path":"src/large.py", "sha256":digest,
-            "byte_length":len(body)},sort_keys=True,separators=(",", ":")) + (
-            "\n----- BEGIN EXACT UTF-8 ARTIFACT -----\n" + body +
-            "\n----- END EXACT UTF-8 ARTIFACT -----")
-        package = {"record_type":"worker_exchange_package", "included_sections":[
-            {"section_id":"exact-change-evidence", "content":json.dumps([change],
-                sort_keys=True,separators=(",", ":"))},
-            {"section_id":"changed-artifact-1", "content":artifact}]}
-        logical = (json.dumps(package,sort_keys=True,separators=(",", ":"))+"\n").encode()
+    def test_provider_projection_preserves_typed_nonregular_artifacts_and_round_trips(self):
+        def node(kind, body, mode):
+            return {"schema": "fawkes.filesystem_node.v1",
+                    "state": "absent" if kind is None else "present",
+                    "file_type": kind, "mode": mode,
+                    "body_length": len(body),
+                    "body_sha256": hashlib.sha256(body).hexdigest()}
+
+        def change(path, kind, *, body=None, mode=0o644, target=None):
+            if kind == "regular":
+                encoded = base64.b64encode(body).decode("ascii")
+                binding_body = body
+            elif kind == "symlink":
+                encoded = None; binding_body = target.encode("utf-8")
+            else:
+                encoded = None; binding_body = b""; mode = None if kind is None else mode
+            return {"path": path, "status": "added" if kind is not None else "deleted",
+                    "after_type": kind, "after_mode": mode,
+                    "after_symlink_target": target, "after_base64": encoded,
+                    "after_node_binding": node(kind, binding_body, mode)}
+
+        def artifact(section_id, path, body):
+            return {"section_id": section_id, "content": json.dumps(
+                {"path": path, "sha256": hashlib.sha256(body).hexdigest(),
+                 "byte_length": len(body)}, sort_keys=True, separators=(",", ":"))
+                + "\n----- BEGIN EXACT UTF-8 ARTIFACT -----\n" + body.decode("utf-8")
+                + "\n----- END EXACT UTF-8 ARTIFACT -----"}
+
+        def package(changes, artifacts):
+            value = {"record_type": "worker_exchange_package", "included_sections": [
+                {"section_id": "exact-change-evidence", "content": json.dumps(
+                    changes, sort_keys=True, separators=(",", ":"))}, *artifacts]}
+            return (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
+
+        large_body = b"z" * 600_000
+        changes = [
+            change("src/large.py", "regular", body=large_body),
+            change("src/empty.py", "regular", body=b""),
+            change("src/assets", "directory", mode=0o755),
+            change("src/current", "symlink", target="assets/current"),
+            change("src/removed.py", None),
+        ]
+        logical = package(changes, [
+            artifact("changed-artifact-1", "src/large.py", large_body),
+            artifact("changed-artifact-2", "src/empty.py", b""),
+        ])
+        self.assertGreater(len(logical), 950_000)
+        binding = {"expected_canonical_sha256": hashlib.sha256(logical).hexdigest(),
+                   "expected_canonical_byte_length": len(logical)}
         projection = _provider_review_projection(logical)
         self.assertLess(len(projection), len(logical))
-        binding = {"expected_canonical_sha256":hashlib.sha256(logical).hexdigest(),
-                   "expected_canonical_byte_length":len(logical)}
         self.assertEqual(_resolve_provider_review_projection(projection, **binding), logical)
         projected = json.loads(projection)
-        exact = json.loads(projected["package"]["included_sections"][0]["content"])[0]
-        self.assertNotIn("after_base64", exact)
-        self.assertEqual(exact["after_body_reference"]["sha256"], digest)
+        projected_changes = {item["path"]: item for item in json.loads(
+            projected["package"]["included_sections"][0]["content"])}
+        self.assertIsNone(projected_changes["src/assets"]["after_base64"])
+        self.assertNotIn("after_body_reference", projected_changes["src/assets"])
+        self.assertIsNone(projected_changes["src/current"]["after_base64"])
+        self.assertNotIn("after_body_reference", projected_changes["src/removed.py"])
+        self.assertEqual(projected_changes["src/empty.py"]["after_body_reference"]["byte_length"], 0)
 
-        tampered = json.loads(projection); tampered["package"]["included_sections"][1]["content"] += "x"
-        tampered["record_sha256"] = _digest({k:v for k,v in tampered.items() if k!="record_sha256"})
-        with self.assertRaisesRegex(ValueError, "mismatch|malformed|truncated|trailing"):
-            _resolve_provider_review_projection((json.dumps(tampered,sort_keys=True,separators=(",", ":"))+"\n").encode(), **binding)
+        small = package(changes[1:], [artifact("changed-artifact-1", "src/empty.py", b"")])
+        small_binding = {"expected_canonical_sha256": hashlib.sha256(small).hexdigest(),
+                         "expected_canonical_byte_length": len(small)}
+        self.assertEqual(_provider_review_projection(small), small)
+        self.assertEqual(_resolve_provider_review_projection(small, **small_binding), small)
+
+        missing = copy.deepcopy(changes); missing[0].pop("after_base64")
+        with self.assertRaisesRegex(ValueError, "regular postimage body"):
+            _provider_review_projection(package(missing, [
+                artifact("changed-artifact-1", "src/large.py", large_body),
+                artifact("changed-artifact-2", "src/empty.py", b""),
+            ]))
+        nonregular = copy.deepcopy(changes); nonregular[2]["after_base64"] = "eA=="
+        with self.assertRaisesRegex(ValueError, "nonregular postimage"):
+            _provider_review_projection(package(nonregular, [
+                artifact("changed-artifact-1", "src/large.py", large_body),
+                artifact("changed-artifact-2", "src/empty.py", b""),
+            ]))
+        type_mismatch = copy.deepcopy(changes)
+        type_mismatch[0]["after_node_binding"]["file_type"] = "directory"
+        with self.assertRaisesRegex(ValueError, "node binding"):
+            _provider_review_projection(package(type_mismatch, [
+                artifact("changed-artifact-1", "src/large.py", large_body),
+                artifact("changed-artifact-2", "src/empty.py", b""),
+            ]))
+
+        def encoded_projection(value):
+            value["record_sha256"] = _digest(
+                {key: item for key, item in value.items() if key != "record_sha256"})
+            return (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
+
+        corrupt = json.loads(projection)
+        corrupt["package"]["included_sections"][1]["content"] += "x"
+        with self.assertRaisesRegex(ValueError, "identity mismatch|mismatches|malformed"):
+            _resolve_provider_review_projection(encoded_projection(corrupt), **binding)
         dangling = json.loads(projection)
         exact = json.loads(dangling["package"]["included_sections"][0]["content"])
         exact[0]["after_body_reference"]["section_id"] = "changed-artifact-neighbor"
         dangling["package"]["included_sections"][0]["content"] = json.dumps(
-            exact,sort_keys=True,separators=(",", ":"))
-        dangling["record_sha256"] = _digest({k:v for k,v in dangling.items() if k!="record_sha256"})
+            exact, sort_keys=True, separators=(",", ":"))
         with self.assertRaisesRegex(ValueError, "dangling"):
-            _resolve_provider_review_projection((json.dumps(dangling,sort_keys=True,separators=(",", ":"))+"\n").encode(), **binding)
+            _resolve_provider_review_projection(encoded_projection(dangling), **binding)
+        directory_reference = json.loads(projection)
+        exact = json.loads(directory_reference["package"]["included_sections"][0]["content"])
+        for item in exact:
+            if item["path"] == "src/assets":
+                item["after_body_reference"] = dict(projected_changes["src/empty.py"]["after_body_reference"])
+        directory_reference["package"]["included_sections"][0]["content"] = json.dumps(
+            exact, sort_keys=True, separators=(",", ":"))
+        with self.assertRaisesRegex(ValueError, "nonregular projection"):
+            _resolve_provider_review_projection(encoded_projection(directory_reference), **binding)
 
         substituted = json.loads(logical)
         substituted["task_scope_id"] = "worker-exchange-scope-substituted"
-        substituted_bytes = (json.dumps(substituted,sort_keys=True,separators=(",", ":"))+"\n").encode()
+        substituted_bytes = (json.dumps(substituted, sort_keys=True, separators=(",", ":")) + "\n").encode()
         internally_valid = _provider_review_projection(substituted_bytes)
         with self.assertRaisesRegex(ValueError, "integrity mismatch"):
             _resolve_provider_review_projection(internally_valid, **binding)
         with self.assertRaisesRegex(ValueError, "integrity mismatch"):
             _resolve_provider_review_projection(projection,
-                expected_canonical_sha256="0"*64,
+                expected_canonical_sha256="0" * 64,
                 expected_canonical_byte_length=len(logical))
         with self.assertRaisesRegex(ValueError, "integrity mismatch"):
             _resolve_provider_review_projection(projection,
                 expected_canonical_sha256=binding["expected_canonical_sha256"],
-                expected_canonical_byte_length=len(logical)+1)
+                expected_canonical_byte_length=len(logical) + 1)
         with self.assertRaises((ValueError, json.JSONDecodeError)):
             _resolve_provider_review_projection(projection[:-1], **binding)
         with self.assertRaises((ValueError, json.JSONDecodeError)):
-            _resolve_provider_review_projection(projection+b"{}", **binding)
+            _resolve_provider_review_projection(projection + b"{}", **binding)
         with self.assertRaisesRegex(ValueError, "independent canonical package binding"):
             _resolve_provider_review_projection(projection,
                 expected_canonical_sha256=None,
                 expected_canonical_byte_length=len(logical))
+
+    def test_provider_projection_preserves_legacy_small_raw_package_byte_identically(self):
+        body = b"legacy raw fixture"
+        body_sha = hashlib.sha256(body).hexdigest()
+        package = {"record_type": "worker_exchange_package", "included_sections": [
+            {"section_id": "exact-change-evidence", "content": json.dumps([{
+                "path": "tests/legacy_raw_fixture.py",
+                "after_base64": base64.b64encode(body).decode("ascii"),
+                "text_diff": "+ legacy raw fixture\n",
+            }], sort_keys=True, separators=(",", ":"))},
+            {"section_id": "changed-artifact-1", "content": json.dumps({
+                "path": "tests/legacy_raw_fixture.py", "sha256": body_sha,
+                "byte_length": len(body),
+            }, sort_keys=True, separators=(",", ":"))
+             + "\n----- BEGIN EXACT UTF-8 ARTIFACT -----\n"
+             + body.decode("utf-8")
+             + "\n----- END EXACT UTF-8 ARTIFACT -----"},
+        ]}
+        logical = (json.dumps(package, sort_keys=True, separators=(",", ":")) + "\n").encode()
+        binding = {"expected_canonical_sha256": hashlib.sha256(logical).hexdigest(),
+                   "expected_canonical_byte_length": len(logical)}
+        self.assertLess(len(logical), 950_000)
+        self.assertEqual(_provider_review_projection(logical), logical)
+        self.assertEqual(_resolve_provider_review_projection(logical, **binding), logical)
+
+    def test_provider_projection_classifies_typed_and_legacy_raw_routes_before_size_selection(self):
+        """Typed evidence cannot fall through to the legacy small/raw route."""
+        def node(body):
+            return {"schema": "fawkes.filesystem_node.v1", "state": "present",
+                    "file_type": "regular", "mode": 0o644,
+                    "body_length": len(body),
+                    "body_sha256": hashlib.sha256(body).hexdigest()}
+
+        def artifact(path, body):
+            return {"section_id": "changed-artifact-" + path.rsplit("/", 1)[-1],
+                    "content": json.dumps({"path": path,
+                                           "sha256": hashlib.sha256(body).hexdigest(),
+                                           "byte_length": len(body)},
+                                          sort_keys=True, separators=(",", ":"))
+                    + "\n----- BEGIN EXACT UTF-8 ARTIFACT -----\n"
+                    + body.decode("utf-8")
+                    + "\n----- END EXACT UTF-8 ARTIFACT -----"}
+
+        def encode(changes, artifacts):
+            package = {"record_type": "worker_exchange_package", "included_sections": [
+                {"section_id": "exact-change-evidence",
+                 "content": json.dumps(changes, sort_keys=True, separators=(",", ":"))},
+                *artifacts,
+            ]}
+            return (json.dumps(package, sort_keys=True, separators=(",", ":")) + "\n").encode()
+
+        def binding(logical):
+            return {"expected_canonical_sha256": hashlib.sha256(logical).hexdigest(),
+                    "expected_canonical_byte_length": len(logical)}
+
+        body = b"typed small fixture"
+        typed = {"path": "tests/typed_small_fixture.py", "status": "added",
+                 "after_type": "regular", "after_mode": 0o644,
+                 "after_symlink_target": None,
+                 "after_base64": base64.b64encode(body).decode("ascii"),
+                 "after_node_binding": node(body)}
+        valid = encode([typed], [artifact(typed["path"], body)])
+        self.assertLess(len(valid), MAX_PROVIDER_REVIEW_EVIDENCE_BYTES)
+        self.assertEqual(_provider_review_projection(valid), valid)
+        self.assertEqual(_resolve_provider_review_projection(valid, **binding(valid)), valid)
+
+        for missing in ("after_type", "after_mode", "after_node_binding",
+                        "after_symlink_target", "after_base64"):
+            malformed = copy.deepcopy(typed)
+            malformed.pop(missing)
+            logical = encode([malformed], [artifact(typed["path"], body)])
+            with self.subTest(missing=missing):
+                with self.assertRaises(ValueError):
+                    _provider_review_projection(logical)
+                with self.assertRaises(ValueError):
+                    _resolve_provider_review_projection(logical, **binding(logical))
+
+        malformed_node = copy.deepcopy(typed)
+        malformed_node["after_node_binding"]["body_sha256"] = "0" * 64
+        malformed_node_bytes = encode([malformed_node], [artifact(typed["path"], body)])
+        with self.assertRaisesRegex(ValueError, "node binding|does not match"):
+            _provider_review_projection(malformed_node_bytes)
+        with self.assertRaises(ValueError):
+            _resolve_provider_review_projection(malformed_node_bytes,
+                                                **binding(malformed_node_bytes))
+
+        legacy_body = b"legacy companion"
+        legacy = {"path": "tests/legacy_companion.py",
+                  "after_base64": base64.b64encode(legacy_body).decode("ascii")}
+        mixed = encode([typed, legacy], [artifact(typed["path"], body),
+                                         artifact(legacy["path"], legacy_body)])
+        with self.assertRaisesRegex(ValueError, "mixes typed and legacy"):
+            _provider_review_projection(mixed)
+        with self.assertRaises(ValueError):
+            _resolve_provider_review_projection(mixed, **binding(mixed))
+
+        def legacy_without_exact_change_evidence(size):
+            package = {"record_type": "worker_exchange_package", "included_sections": [
+                {"section_id": "summary", "content": ""},
+            ]}
+            initial = (json.dumps(package, sort_keys=True, separators=(",", ":")) + "\n").encode()
+            self.assertGreaterEqual(size, len(initial))
+            package["included_sections"][0]["content"] = "x" * (size - len(initial))
+            logical = (json.dumps(package, sort_keys=True, separators=(",", ":")) + "\n").encode()
+            self.assertEqual(len(logical), size)
+            return logical
+
+        for size in (MAX_PROVIDER_REVIEW_EVIDENCE_BYTES - 1,
+                     MAX_PROVIDER_REVIEW_EVIDENCE_BYTES):
+            logical = legacy_without_exact_change_evidence(size)
+            with self.subTest(legacy_size=size):
+                self.assertEqual(_provider_review_projection(logical), logical)
+                self.assertEqual(_resolve_provider_review_projection(logical, **binding(logical)),
+                                 logical)
+
+        oversized = legacy_without_exact_change_evidence(MAX_PROVIDER_REVIEW_EVIDENCE_BYTES + 1)
+        with self.assertRaisesRegex(ValueError, "lacks exact change evidence"):
+            _provider_review_projection(oversized)
+        with self.assertRaisesRegex(ValueError, "exceeds byte limit"):
+            _resolve_provider_review_projection(oversized, **binding(oversized))
 
     def test_identity_functional_role_and_zero_authority_are_distinct(self):
         self.assertEqual(WSL_REVIEWER_REFERENCE["functional_role"], FORMAL_REVIEW_ROLE)
