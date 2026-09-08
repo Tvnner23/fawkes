@@ -1,4 +1,4 @@
-from src.memory.archive_context import build_archive_context
+from src.memory.archive_context import build_archive_context, memory_learning_enabled
 from src.memory.openai_provider import OpenAISemanticMemoryProvider
 from src.memory.semantic_provider import ModelSemanticMemoryEvaluator
 from src.memory.extract import extract_memory_candidates
@@ -36,6 +36,8 @@ def process_memory_conversation(
     The canonical conversation is used as semantic context. The archive
     remains the immutable source of truth and is never modified here.
     """
+    if not memory_learning_enabled(instance_id):
+        return []
     if evaluator is None:
         if provider is None:
             provider = OpenAISemanticMemoryProvider(
@@ -50,7 +52,8 @@ def process_memory_conversation(
         matcher = provider
 
     conversation_context = build_archive_context(
-        conversation_id,instance_id=instance_id,include_unscoped=include_unscoped
+        conversation_id,instance_id=instance_id,include_unscoped=include_unscoped,
+        memory_learning_only=True,
     )
 
     candidates = extract_memory_candidates(conversation_id,instance_id=instance_id,include_unscoped=include_unscoped)

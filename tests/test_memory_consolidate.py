@@ -6,9 +6,10 @@ from unittest.mock import patch
 import src.memory.consolidate as consolidate
 import src.memory.store as store
 from src.memory.semantic import SemanticMemoryAssessment
+from tests.recording_archive_fixtures import LegacyArchiveSources
 
 
-class FawkesMemoryConsolidationTests(unittest.TestCase):
+class FawkesMemoryConsolidationTests(LegacyArchiveSources, unittest.TestCase):
     def test_non_memory_assessment_is_ignored(self):
         assessment = SemanticMemoryAssessment(
             should_remember=False,
@@ -180,7 +181,7 @@ class FakeMatcher:
             confidence=self.confidence,
         )
 
-class FawkesSemanticDuplicateConsolidationTests(unittest.TestCase):
+class FawkesSemanticDuplicateConsolidationTests(LegacyArchiveSources, unittest.TestCase):
     def test_semantic_duplicate_strengthens_existing_memory(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -239,7 +240,7 @@ class FawkesSemanticDuplicateConsolidationTests(unittest.TestCase):
                 )
 
 
-class FawkesMemoryEvolutionTests(unittest.TestCase):
+class FawkesMemoryEvolutionTests(LegacyArchiveSources, unittest.TestCase):
     def test_supporting_evidence_strengthens_existing_memory(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

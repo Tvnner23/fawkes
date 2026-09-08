@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 import hashlib
 import json
+import os
 import uuid
 
 from src.library.artifacts import require_id
@@ -12,7 +13,7 @@ from src.capabilities.core import CapabilityDefinition
 from src.capabilities.multimodal import AuthorityContract, MultimodalCapabilityContract
 
 ROOT = Path(__file__).resolve().parents[2]
-MANIFEST_ROOT = ROOT / "database/evidence_transmissions"
+MANIFEST_ROOT = Path(os.environ.get("FAWKES_RUNTIME_STATE_ROOT") or ROOT) / "database/evidence_transmissions"
 SCHEMA_VERSION = 1
 
 EVIDENCE_TRANSMISSION_DEFINITION = CapabilityDefinition(

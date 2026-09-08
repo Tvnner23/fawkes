@@ -23,6 +23,115 @@ const historyContent = document.querySelector('#history-content');
 const historySearchForm = document.querySelector('#history-search-form');
 const historyQuery = document.querySelector('#history-query');
 const historyDomain = document.querySelector('#history-domain');
+const recordingSettings = document.querySelector('#recording-settings');
+const recordingStatus = document.querySelector('#recording-status');
+const recordingCategories = [
+  ['archive_recording', 'Archive recording'], ['memory_learning', 'Memory learning'],
+  ['personal_diagnostics', 'Personal diagnostics'], ['research_records', 'Research records'],
+  ['library_retention', 'Library retention'], ['social_archive', 'Social Archive'],
+];
+let recordingPolicy = null;
+let effectiveRecording = null;
+let recordingSaving = false;
+let recordingNotice = '';
+let draftRecordingMode = null;
+function recordingShape(value, effective = false) {
+  if (!value || !['private', 'retained'].includes(value.mode)
+      || !Number.isInteger(value[effective ? 'policy_revision' : 'revision'])
+      || value[effective ? 'policy_revision' : 'revision'] < 0
+      || (effective && !['private', 'retained'].includes(value.configured_mode))
+      || !value.categories || value.categories.sensor_retention !== false
+      || recordingCategories.some(item => typeof value.categories[item[0]] !== 'boolean')) return false;
+  return !effective || value.mode !== 'private' || recordingCategories.every(item => value.categories[item[0]] === false);
+}
+function nextRecordingMode() {
+  if (recordingPolicy) return recordingPolicy.mode === 'private' || !recordingPolicy.categories.archive_recording ? 'private' : 'retained';
+  return effectiveRecording ? effectiveRecording.mode : 'private';
+}
+function renderRecordingStatus() {
+  if (!recordingStatus) return;
+  recordingStatus.dataset.mode = effectiveRecording ? effectiveRecording.mode : 'unknown';
+  let text = effectiveRecording
+    ? `Last confirmed interaction: ${readable(effectiveRecording.mode)} · policy ${effectiveRecording.policy_revision}.`
+    : 'Recording mode unavailable; a new request will ask for private mode.';
+  if (recordingPolicy) text += ` Next interaction: ${readable(nextRecordingMode())}.`;
+  if (draftRecordingMode === 'private') text += ' This draft stays private.';
+  recordingStatus.textContent = text;
+}
+function acceptEffectiveRecording(value) {
+  effectiveRecording = recordingShape(value, true) ? value : null;
+  if (effectiveRecording && recordingPolicy && effectiveRecording.policy_revision > recordingPolicy.revision) recordingPolicy = null;
+  renderRecordingStatus();
+}
+async function loadRecordingSettings(preserveNotice = false) {
+  if (!preserveNotice) recordingNotice = '';
+  try {
+    const data = await request('/api/preferences/recording');
+    if (!recordingShape(data)) throw new Error('The recording settings response was invalid. No mode was assumed.');
+    recordingPolicy = data;
+  } catch (error) {
+    recordingPolicy = null;
+    recordingNotice = error.message;
+  }
+  renderRecordingSettings(); renderRecordingStatus();
+  return recordingPolicy;
+}
+async function saveRecordingSetting(changes) {
+  if (recordingSaving || !recordingPolicy) return;
+  const expectedRevision = recordingPolicy.revision;
+  // A draft begun privately remains private even when the next default changes.
+  if ((input.value.trim() || pendingAttachments.length) && nextRecordingMode() === 'private') draftRecordingMode = 'private';
+  recordingSaving = true; recordingNotice = 'Saving for the next interaction…'; renderRecordingSettings();
+  try {
+    const data = await request('/api/preferences/recording', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ changes, expected_revision: expectedRevision }) });
+    if (!recordingShape(data) || data.revision !== expectedRevision + 1) throw new Error('Saving was not confirmed by a valid new recording revision.');
+    recordingPolicy = data;
+    recordingNotice = 'Saved for the next interaction. Existing history has not been deleted.';
+  } catch (error) {
+    recordingNotice = error.code === 'recording_policy_conflict'
+      ? 'Settings changed elsewhere. Current settings were reloaded; review them before making another change.'
+      : `Saving was not confirmed. ${error.message} Current settings were reloaded; no write was retried.`;
+    // A read reconciles a conflict or ambiguous write; never resend automatically.
+    await loadRecordingSettings(true);
+  } finally {
+    recordingSaving = false; renderRecordingSettings(); renderRecordingStatus();
+    if (attachmentTray) renderAttachmentTray();
+  }
+}
+function renderRecordingSettings() {
+  if (!recordingSettings) return;
+  clearNode(recordingSettings);
+  const card = element('section', 'settings-card');
+  card.append(element('h2', '', 'Personal recording'));
+  card.append(element('p', '', 'Changes apply to the next interaction, including after restart. They do not delete existing history. Private text is not carried into retained interactions.'));
+  card.append(element('p', 'media-disclosure', 'Private mode disables Fawkes personal-content retention. Messages may still reach configured providers. Metadata-only authority and provider receipts remain. Requests that require durable records, including Library retention and reviewable research, may be unavailable. Sensor retention is unavailable.'));
+  if (recordingPolicy) {
+    const row = element('label', 'sound-control');
+    row.append(element('strong', '', 'Default mode'));
+    const select = document.createElement('select'); select.disabled = recordingSaving; select.setAttribute('aria-label', 'Default recording mode');
+    ['retained', 'private'].forEach(mode => { const option = document.createElement('option'); option.value = mode; option.textContent = readable(mode); option.selected = recordingPolicy.mode === mode; select.append(option); });
+    select.value = recordingPolicy.mode;
+    select.addEventListener('change', () => saveRecordingSetting({ mode: select.value }));
+    row.append(select); card.append(row);
+    recordingCategories.forEach(([key, label]) => {
+      const toggle = soundToggle(label, recordingPolicy.categories[key], recordingSaving,
+        checked => saveRecordingSetting({ categories: { [key]: checked } }));
+      toggle.querySelector('input').setAttribute('aria-label', label);
+      card.append(toggle);
+    });
+    card.append(soundToggle('Sensor retention — unavailable', false, true, () => {}));
+    card.append(element('p', 'meta', `Configured revision ${recordingPolicy.revision}. Archive off or Private mode makes the next interaction private; category choices are saved for retained interactions.`));
+  }
+  if (recordingNotice) {
+    const notice = element('p', 'recording-error', recordingNotice); notice.setAttribute('role', 'status'); card.append(notice);
+  }
+  const reload = element('button', 'recording-settings-action', 'Reload current settings');
+  reload.type = 'button'; reload.disabled = recordingSaving;
+  reload.addEventListener('click', () => loadRecordingSettings());
+  card.append(reload); recordingSettings.append(card);
+}
 function clearNode(node) { while (node.firstChild) node.removeChild(node.firstChild); }
 function replaceContent(node, ...children) { clearNode(node); children.forEach(child => node.append(child)); }
 function setAuthError(message) {
@@ -184,6 +293,8 @@ function renderAttachmentTray() {
     const keepLabel = element('label', 'attachment-keep');
     const keep = document.createElement('input'); keep.type = 'checkbox';
     keep.checked = attachmentRetention.get(item) === true;
+    keep.disabled = nextRecordingMode() === 'private' || (recordingPolicy && !recordingPolicy.categories.library_retention);
+    if (keep.disabled) { keep.checked = false; attachmentRetention.set(item, false); }
     keep.addEventListener('change', () => { attachmentRetention.set(item, keep.checked); renderAttachmentTray(); });
     keepLabel.append(keep, element('span', '', 'Keep in Library'));
     chip.append(keepLabel);
@@ -734,7 +845,7 @@ function renderRetrievalClarification(node, metadata, binding) {
           ambiguity_set_id: model.ambiguitySetId,
           choice_id: choice.choiceId,
           original_query: binding.originalQuery,
-        });
+        }, binding.recordingMode === 'private' ? 'private' : null);
         state.consumed = true; statusNode.textContent = `Selected: ${choice.label}.`;
         buttons.forEach(item => { item.disabled = true; });
       } catch (error) {
@@ -756,6 +867,7 @@ async function loadChat(loginAttempt = false) {
     const data = await request('/api/chat');
     auth.classList.add('hidden');
     conversationId = data.conversation.conversation_id;
+    acceptEffectiveRecording(data.recording || data.conversation.recording);
     document.querySelector('#phoenix-name').textContent = data.phoenix.name;
     emitWindowEvent('fawkes:connected', { token, phoenix: data.phoenix });
     clearNode(messages);
@@ -763,7 +875,7 @@ async function loadChat(loginAttempt = false) {
     if (!data.messages.length) addMessage('empty', 'This is the same Fawkes, in a new place. Start wherever you are.');
     status.textContent = 'Present';
     const lastMessage = data.messages.length ? data.messages[data.messages.length - 1] : null;
-    if (lastMessage && lastMessage.role === 'user') recoverReply(lastMessage.message_id);
+    if (lastMessage && lastMessage.role === 'user' && effectiveRecording && effectiveRecording.mode === 'retained') recoverReply(lastMessage.message_id);
     return true;
   } catch (error) {
     status.textContent = 'Offline';
@@ -791,6 +903,10 @@ async function recoverReply(userMessageId) {
     await wait(3000);
     try {
       const data = await request('/api/chat');
+      if (data.recording && data.recording.mode !== 'retained') {
+        acceptEffectiveRecording(data.recording); send.disabled = false;
+        status.textContent = 'Pending reply not confirmed; recording mode changed.'; return;
+      }
       const index = data.messages.findIndex(message => message.message_id === userMessageId);
       const reply = index >= 0 ? data.messages[index + 1] : null;
       if (reply && reply.role === 'assistant') {
@@ -806,7 +922,7 @@ async function recoverReply(userMessageId) {
     }
   }
   if (generation === recoveryGeneration) {
-    status.textContent = 'Reply delayed — your message is preserved';
+    status.textContent = 'Reply not confirmed — check History before sending again.';
     send.disabled = false;
   }
 }
@@ -1454,8 +1570,13 @@ async function openObservation(observationId) {
   } catch (error) { replaceContent(detailContent, element('p', 'dev-empty', error.message)); }
 }
 
-async function submitChatTurn(text, media = [], retrievalClarification = null) {
+async function submitChatTurn(text, media = [], retrievalClarification = null, requestedRecordingMode = null) {
   if (chatRequestPending) { const error = new Error('Another Chat request is already in progress.'); error.code = 'request_in_progress'; throw error; }
+  const requestedMode = requestedRecordingMode === 'private' ? 'private' : nextRecordingMode();
+  if (requestedMode === 'retained' && ((effectiveRecording && effectiveRecording.mode === 'private')
+      || (typeof conversationId === 'string' && conversationId.startsWith('private-')))) {
+    conversationId = null; clearNode(messages); clearNode(detailContent); detailPanel.classList.add('hidden');
+  }
   chatRequestPending = true;
   const emptyMessage = messages.querySelector('.empty');
   if (emptyMessage) emptyMessage.remove();
@@ -1467,21 +1588,24 @@ async function submitChatTurn(text, media = [], retrievalClarification = null) {
   emitWindowEvent('fawkes:message-submitting', { message: text, occurrence_id: requestOccurrence });
   emitPresence('presence.request_processing_started', requestOccurrence);
   const slowNotice = window.setTimeout(() => {
-    if (send.disabled) status.textContent = 'Still working — research can take a minute. Your message is preserved.';
+    if (send.disabled) status.textContent = 'Still working — delivery and recording have not yet been confirmed.';
   }, 12000);
   try {
     const attachments = await Promise.all(media.map(async item => ({ name: item.name, mime_type: item.type,
       privacy: 'potentially_private', keep_in_library: attachmentRetention.get(item) === true,
       retention_title: item.name, data: await fileAsBase64(item) })));
-    const payload = { conversation_id: conversationId, message: text, attachments };
+    const payload = { conversation_id: conversationId, message: text, attachments, recording_mode: requestedMode };
     if (retrievalClarification) payload.retrieval_clarification = retrievalClarification;
     const data = await request('/api/chat/messages', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    acceptEffectiveRecording(data.recording);
+    if (typeof data.conversation_id === 'string') conversationId = data.conversation_id;
     pending.classList.remove('pending'); addMessageTimestamp(pending, data.user_message_created_at);
     const assistant = addMessage('assistant', data.message.content, '', data.message.presentation, data.message.created_at);
     renderMediaLifecycle(assistant, data.media);
     renderContextInspector(assistant, data.message);
     renderRetrievalClarification(assistant, data.retrieval_clarification, {
       originatingResponseMessageId: data.message.message_id, originalQuery: text,
+      recordingMode: effectiveRecording ? effectiveRecording.mode : 'private',
     });
     status.textContent = 'Present'; emitPresence('presence.response_displayed', data.message.message_id);
     if (!eventAudio.preferences) await loadSoundSettings();
@@ -1513,8 +1637,9 @@ composer.addEventListener('submit', async event => {
   event.preventDefault(); const text = input.value.trim(); if (!text || send.disabled) return;
   const media = pendingAttachments; pendingAttachments = []; renderAttachmentTray();
   input.value = '';
+  const requestedMode = draftRecordingMode; draftRecordingMode = null;
   try {
-    await submitChatTurn(text, media);
+    await submitChatTurn(text, media, null, requestedMode);
   } catch (error) { showError(error.message); }
 });
 if (attachmentInput) attachmentInput.addEventListener('change', () => {
@@ -1531,6 +1656,11 @@ input.addEventListener('keydown', event => {
     else composer.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
   }
 });
+input.addEventListener('input', () => {
+  if (!input.value.trim()) draftRecordingMode = null;
+  else if (nextRecordingMode() === 'private') draftRecordingMode = 'private';
+  renderRecordingStatus();
+});
 document.querySelector('.app-nav').addEventListener('click', event => {
   const button = event.target.closest('[data-view]'); if (!button) return;
   document.querySelectorAll('.app-nav [data-view]').forEach(item => item.classList.toggle('active', item === button));
@@ -1540,7 +1670,7 @@ document.querySelector('.app-nav').addEventListener('click', event => {
   const libraryView = document.querySelector('#library-view'); if (libraryView) libraryView.classList.toggle('hidden', button.dataset.view !== 'library');
   const historyView = document.querySelector('#history-view'); if (historyView) historyView.classList.toggle('hidden', button.dataset.view !== 'history');
   if (button.dataset.view === 'developer') loadDeveloper();
-  else if (button.dataset.view === 'settings') { loadSoundSettings(); loadPresenceSettings(); }
+  else if (button.dataset.view === 'settings') { loadSoundSettings(); loadPresenceSettings(); loadRecordingSettings(); }
   else if (button.dataset.view === 'library') loadLibrary();
   else if (button.dataset.view === 'history') status.textContent = 'Manual history inspection';
   else status.textContent = 'Present';

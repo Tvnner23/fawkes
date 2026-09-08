@@ -1,6 +1,7 @@
 """Shared application boundary for every Fawkes chat interface."""
 
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 import re
 import shutil
@@ -36,6 +37,8 @@ from src.runtime.retrieval_replay import load_flight, record_live_flight
 from src.runtime.codex_development_handoff import run_codex_development_handoff
 from src.runtime.codex_development_campaign import CodexDevelopmentCampaign
 from src.runtime.persistence import persist_live_message
+from src.runtime.personal_recording import RecordingPolicyError, RecordingPolicyStore
+from src.capture.canonical import message_allows_memory_learning
 from src.capabilities.media_chat import (
     AUDIO_TRANSCRIPTION_DEFINITION, MEDIA_CHAT_DEFINITION,
     OpenAIAudioTranscriber,
@@ -460,6 +463,7 @@ class FawkesChatService:
         archive_index_path=None,
         archive_meta_dir=None,
         archive_raw_dir=None,
+        recording_policy_store=None,
     ):
         self.phoenix = phoenix or get_or_create_default_instance()
         self.instance_id = self.phoenix["instance_id"]
@@ -502,7 +506,13 @@ class FawkesChatService:
         self._archive_index_path = archive_index_path
         self._archive_meta_dir = archive_meta_dir
         self._archive_raw_dir = archive_raw_dir
-        self._turn_lock = threading.Lock()
+        self._recording_policy_store = recording_policy_store or RecordingPolicyStore(self.instance_id)
+        if self._recording_policy_store.instance_id != self.instance_id:
+            raise RecordingPolicyError("recording policy store belongs to another instance")
+        self._private_conversation = None
+        self._private_messages = []
+        self._private_policy = None
+        self._turn_lock = threading.RLock()
         self._memory_worker_lock = threading.Lock()
         self._memory_worker_enabled = os.getenv(
             "FAWKES_MEMORY_WORKER_ENABLED", "1"
@@ -514,6 +524,8 @@ class FawkesChatService:
         if not self._memory_worker_lock.acquire(blocking=False):
             return
         try:
+            if not self._memory_recording_enabled():
+                return
             retriever = getattr(self.runtime, "semantic_retriever", None)
             provider = getattr(retriever, "provider", None)
             if provider is None:
@@ -552,6 +564,9 @@ class FawkesChatService:
                     evaluator=ModelSemanticMemoryEvaluator(provider),
                     limit=limit,
                 )
+                if not self._memory_recording_enabled():
+                    record_provider_transmission(status="completed", **receipt_args)
+                    return
                 apply_accepted_batch(
                     instance_id=self.instance_id,
                     limit=limit,
@@ -569,7 +584,7 @@ class FawkesChatService:
             self._memory_worker_lock.release()
 
     def _schedule_memory_queue(self):
-        if not self._memory_worker_enabled:
+        if not self._memory_worker_enabled or not self._memory_recording_enabled():
             return
         retriever = getattr(self.runtime, "semantic_retriever", None)
         if getattr(retriever, "provider", None) is None:
@@ -579,6 +594,51 @@ class FawkesChatService:
             name="fawkes-memory-triage",
             daemon=True,
         ).start()
+
+    def _memory_recording_enabled(self):
+        try:
+            return self._recording_policy_store.latch().memory_learning
+        except RecordingPolicyError:
+            return False
+
+    def get_recording_policy(self):
+        return self._recording_policy_store.load().public()
+
+    def update_recording_policy(self, changes, *, expected_revision):
+        # Deliberately independent of the turn lock: a started turn keeps its
+        # immutable latch; this update governs the next interaction.
+        return self._recording_policy_store.update(
+            changes, expected_revision=expected_revision).public()
+
+    def _recording_policy(self, *, mode=None, preserve_private=False):
+        try:
+            configured = self._recording_policy_store.load()
+            if (mode is None and preserve_private and self._private_policy is not None
+                    and configured.revision == self._private_policy.policy_revision):
+                mode = "private"
+            effective = configured.effective(mode=mode)
+            if effective.instance_id != self.instance_id:
+                raise RecordingPolicyError("recording policy owner mismatch")
+            return effective
+        except RecordingPolicyError as exc:
+            raise ChatServiceError(
+                "Recording settings are unavailable or invalid. No message was recorded or sent.",
+                code="recording_policy_unavailable") from exc
+
+    def _require_personal_retention(self, category):
+        policy = self._recording_policy(preserve_private=True)
+        if not getattr(policy, category):
+            raise ChatServiceError(
+                "This capability requires personal retention that is currently disabled.",
+                code="recording_capability_bounded")
+        return policy
+
+    def _append_private_message(self, message):
+        # A bounded process-local display/context buffer, never an Archive.
+        self._private_messages.append({**message, "content": message["content"][:50_000]})
+        while (len(self._private_messages) > 20
+               or sum(len(item["content"]) for item in self._private_messages) > 100_000):
+            self._private_messages.pop(0)
 
     def _transcribe_audio(self, attachments, *, conversation_id, request_message_id):
         transcriber = self._audio_transcriber or OpenAIAudioTranscriber(
@@ -634,12 +694,19 @@ class FawkesChatService:
             enriched.append(copy)
         return tuple(enriched)
 
-    def _retain_requested_media(self, attachments, *, conversation_id, request_message_id):
+    def _retain_requested_media(self, attachments, *, conversation_id, request_message_id,
+                                recording_policy=None):
         """Promote only rider-confirmed attachments into Library.
 
         Retention and extraction are separate receipts. A successful immutable
         retention remains truthful even when rebuildable extraction fails.
         """
+        if not attachments:
+            return ()
+        policy = recording_policy or self._recording_policy(preserve_private=True)
+        if any(item.get("keep_in_library") for item in attachments) and not policy.library_retention:
+            raise ChatServiceError("Library retention is disabled for this interaction.",
+                                   code="recording_capability_bounded")
         from src.library.artifacts import lineage_edge, retention_intent
         from src.library.extraction import PypdfDocumentExtractor
         from src.library.store import (
@@ -802,6 +869,7 @@ class FawkesChatService:
 
     def research(self, payload):
         """Run authenticated, instance-scoped research outside Memory/Archive."""
+        self._require_personal_retention("research_records")
         if self._research_capability is None:
             from src.capabilities.web_research import WebResearchCapability
 
@@ -972,6 +1040,7 @@ class FawkesChatService:
 
     def library_extract(self, source_id):
         """Retry a rebuildable local extraction without changing the original."""
+        self._require_personal_retention("library_retention")
         from src.library.extraction import PypdfDocumentExtractor
         from src.library.storage import LocalImmutableBlobStore
         from src.library.store import (
@@ -1063,14 +1132,29 @@ class FawkesChatService:
             center = self._acceptance_center = AcceptanceCenter(self)
         return center
 
-    def resume(self):
-        conversation = get_latest_conversation(instance_id=self.instance_id)
-        if conversation is None:
-            conversation = create_conversation(
-                title=self.title,
-                instance_id=self.instance_id,
-            )
-        return conversation
+    def resume(self, *, recording_policy=None):
+        with self._turn_lock:
+            policy = recording_policy or self._recording_policy(preserve_private=True)
+            if policy.mode == "private":
+                if self._private_conversation is None:
+                    self._private_conversation = {
+                        "conversation_id": "private-" + str(uuid.uuid4()),
+                        "instance_id": self.instance_id, "title": "Private Fawkes Chat",
+                    }
+                self._private_policy = policy
+                return {**self._private_conversation, "recording": policy.public(),
+                        "messages": [dict(item) for item in self._private_messages]}
+            # Resuming a retained interaction cannot promote any volatile turn.
+            self._private_conversation = None
+            self._private_messages.clear()
+            self._private_policy = None
+            conversation = get_latest_conversation(instance_id=self.instance_id)
+            if conversation is None:
+                conversation = create_conversation(title=self.title, instance_id=self.instance_id)
+            if str(conversation["conversation_id"]).startswith("private-"):
+                raise ChatServiceError("A private conversation cannot become retained history.",
+                                       code="conversation_changed")
+            return {**conversation, "recording": policy.public()}
 
     def history(self, *, conversation_id=None, limit=100):
         conversation = self.resume()
@@ -1079,9 +1163,11 @@ class FawkesChatService:
                 "That conversation is not available in this session.",
                 code="conversation_not_found",
             )
-        messages = build_archive_context(
-            conversation["conversation_id"], max_messages=limit
-        )
+        private = conversation["recording"]["mode"] == "private"
+        if private:
+            messages = conversation["messages"][-min(20, limit):] if limit > 0 else []
+        else:
+            messages = build_archive_context(conversation["conversation_id"], max_messages=limit)
         rendered_messages = []
         for message in messages:
             item = {
@@ -1090,7 +1176,7 @@ class FawkesChatService:
                 "content": message["content"],
                 "created_at": message.get("created_at"),
             }
-            if message["role"] == "assistant" and message.get("message_id"):
+            if not private and message["role"] == "assistant" and message.get("message_id"):
                 receipt = load_context_receipt(message["message_id"])
                 if receipt and receipt.get("presentation"):
                     item["presentation"] = receipt["presentation"]
@@ -1103,6 +1189,7 @@ class FawkesChatService:
                     item["context_inspector_available"] = True
             rendered_messages.append(item)
         return {
+            "recording": conversation["recording"],
             "phoenix": {"name": self.phoenix["name"]},
             "conversation": {
                 "conversation_id": conversation["conversation_id"],
@@ -1131,6 +1218,7 @@ class FawkesChatService:
 
     def context_feedback(self, response_message_id, payload):
         """Record rider evidence about an exact inspected decision; apply nothing."""
+        self._require_personal_retention("personal_diagnostics")
         if not isinstance(payload, dict):
             raise ChatServiceError("Context feedback is malformed.", code="invalid_context_feedback")
         inspector = self.context_inspector(response_message_id)
@@ -1161,23 +1249,40 @@ class FawkesChatService:
             raise ChatServiceError(str(exc), code="invalid_context_feedback") from exc
 
     def send(self, text, *, conversation_id=None, attachments=None, retrieval_clarification=None,
-             source="fawkes_app"):
+             source="fawkes_app", recording_mode=None):
         if not isinstance(text, str) or not text.strip():
             raise ChatServiceError("Write a message first.", code="invalid_message")
         if source not in {"fawkes_app", "discord_dm"}:
             raise ChatServiceError("That conversation source is not permitted.", code="invalid_source")
+        if recording_mode is not None and (not isinstance(recording_mode, str)
+                                           or recording_mode not in {"private", "retained"}):
+            raise ChatServiceError("Recording mode must be private or retained.", code="invalid_recording_mode")
         text = text.strip()
         if len(text) > 50_000:
             raise ChatServiceError("That message is too long.", code="invalid_message")
 
         with self._turn_lock:
-            conversation = self.resume()
-            if conversation_id and conversation_id != conversation["conversation_id"]:
+            policy = self._recording_policy(mode=recording_mode, preserve_private=True)
+            private = policy.mode == "private"
+            if source == "discord_dm" and (private or not policy.social_archive):
+                raise ChatServiceError("Social Chat is unavailable with this recording policy.",
+                                       code="recording_capability_bounded")
+            if private and (attachments or retrieval_clarification is not None):
+                raise ChatServiceError("Private Chat currently supports text without retained clarification or media.",
+                                       code="recording_capability_bounded")
+            if not private and str(conversation_id or "").startswith("private-"):
+                raise ChatServiceError("Start a retained conversation without the private conversation ID.",
+                                       code="conversation_changed")
+            conversation = self.resume(recording_policy=policy)
+            if (conversation_id and conversation_id != conversation["conversation_id"]
+                    and (not private or str(conversation_id).startswith("private-"))):
                 raise ChatServiceError(
                     "The conversation changed. Refresh and try again.",
                     code="conversation_changed",
                 )
             conversation_id = conversation["conversation_id"]
+            ephemeral_context = tuple({"role": item["role"], "content": item["content"]}
+                                      for item in self._private_messages) if private else ()
             resolved_clarification=None
             if retrieval_clarification is not None:
                 if not isinstance(retrieval_clarification,dict):
@@ -1205,6 +1310,10 @@ class FawkesChatService:
                     attachments, instance_id=self.instance_id,
                     owner_principal_id=f"authenticated-rider:{self.instance_id}",
                 )
+                if (not policy.library_retention
+                        and any(item.get("keep_in_library") for item in media_attachments)):
+                    raise ChatServiceError("Library retention is disabled for this interaction.",
+                                           code="recording_capability_bounded")
                 if media_attachments:
                     enforce_capability_authority(
                         MEDIA_CHAT_DEFINITION,
@@ -1237,32 +1346,41 @@ class FawkesChatService:
             except ValueError as exc:
                 raise ChatServiceError(str(exc), code="invalid_media") from exc
 
+            user_archive = None
+            user_created_at = datetime.now(timezone.utc).isoformat()
             try:
-                user_archive = persist_live_message(
-                    instance_id=self.instance_id,
-                    conversation_id=conversation_id,
-                    message_id=user_message_id,
-                    role="user",
-                    text=text,
-                    model_slug=self.runtime.model,
-                    title=self.title,
-                    source=source,
-                )
-                work_item = discover_candidate(
-                    instance_id=self.instance_id,
-                    conversation_id=conversation_id,
-                    message_id=user_message_id,
-                    canonical_revision=user_archive["archive_id"],
-                    source_archive_ids=(user_archive["archive_id"],),
-                    candidate_content=text,
-                    candidate_created_at=user_archive["created_at"],
-                )
-                update_work_item(work_item["work_item_id"], status="queued")
+                if not private:
+                    user_archive = persist_live_message(
+                        instance_id=self.instance_id,
+                        conversation_id=conversation_id,
+                        message_id=user_message_id,
+                        role="user",
+                        text=text,
+                        model_slug=self.runtime.model,
+                        title=self.title,
+                        source=source, recording_policy=policy,
+                    )
+                    user_created_at = user_archive["created_at"]
+                if policy.memory_learning:
+                    work_item = discover_candidate(
+                        instance_id=self.instance_id,
+                        conversation_id=conversation_id,
+                        message_id=user_message_id,
+                        canonical_revision=user_archive["archive_id"],
+                        source_archive_ids=(user_archive["archive_id"],),
+                        candidate_content=text,
+                        candidate_created_at=user_archive["created_at"],
+                    )
+                    update_work_item(work_item["work_item_id"], status="queued")
             except Exception as exc:
                 raise ChatServiceError(
                     "I couldn't safely preserve that message, so I didn't send it.",
                     code="persistence_failed",
                 ) from exc
+
+            if private:
+                self._append_private_message({"message_id": user_message_id, "role": "user",
+                                              "content": text, "created_at": user_created_at})
 
             try:
                 chat_artifact = ephemeral_provider_artifact(
@@ -1302,9 +1420,11 @@ class FawkesChatService:
                         user_message=text,
                         conversation_id=conversation_id,
                         current_message_id=user_message_id,
-                        request_timestamp=user_archive["created_at"],
+                        request_timestamp=user_created_at,
                         media_attachments=media_attachments,
                         retrieval_clarification=resolved_clarification,
+                        recording_policy=policy,
+                        **({"ephemeral_context": ephemeral_context} if private else {}),
                     )
                     turn_elapsed_ms = round((time.monotonic() - turn_started) * 1000, 3)
                 except Exception as exc:
@@ -1365,22 +1485,27 @@ class FawkesChatService:
                         status="failed", failure_code=type(exc).__name__, **chat_receipt_args
                     )
                 raise ChatServiceError(
-                    "Fawkes is unavailable right now. Your message was preserved; try again shortly.",
+                    ("Fawkes is unavailable right now. This private message was not recorded; try again shortly."
+                     if private else "Fawkes is unavailable right now. Your message was preserved; try again shortly."),
                     code="provider_unavailable",
                 ) from exc
 
             assistant_message_id = str(uuid.uuid4())
+            assistant_archive = None
+            assistant_created_at = datetime.now(timezone.utc).isoformat()
             try:
-                assistant_archive = persist_live_message(
-                    instance_id=self.instance_id,
-                    conversation_id=conversation_id,
-                    message_id=assistant_message_id,
-                    role="assistant",
-                    text=result["text"],
-                    model_slug=self.runtime.model,
-                    title=self.title,
-                    source=source,
-                )
+                if not private:
+                    assistant_archive = persist_live_message(
+                        instance_id=self.instance_id,
+                        conversation_id=conversation_id,
+                        message_id=assistant_message_id,
+                        role="assistant",
+                        text=result["text"],
+                        model_slug=self.runtime.model,
+                        title=self.title,
+                        source=source, recording_policy=policy,
+                    )
+                    assistant_created_at = assistant_archive["created_at"]
             except Exception as exc:
                 raise ChatServiceError(
                     "Fawkes answered, but the reply could not be preserved. Refresh before continuing.",
@@ -1390,17 +1515,20 @@ class FawkesChatService:
             media_attachments = self._retain_requested_media(
                 media_attachments, conversation_id=conversation_id,
                 request_message_id=user_message_id,
+                recording_policy=policy,
             )
 
             correction_observation = None
             correction = result.get("correction")
-            if correction is not None and correction.is_correction:
+            if (policy.memory_learning and policy.personal_diagnostics
+                    and correction is not None and correction.is_correction):
                 prior_assistant_id = next(
                     (
                         message.get("message_id")
                         for message in reversed(result.get("conversation_context", ()))
                         if message.get("role") == "assistant"
                         and message.get("message_id")
+                        and message_allows_memory_learning(message)
                     ),
                     None,
                 )
@@ -1426,41 +1554,43 @@ class FawkesChatService:
                         # The reply and existing development path remain intact.
                         correction_observation = None
 
+            context_receipt = None
             try:
-                context_receipt = save_context_receipt(
-                    instance_id=self.instance_id,
-                    conversation_id=conversation_id,
-                    request_message_id=user_message_id,
-                    response_message_id=assistant_message_id,
-                    response_archive_id=assistant_archive["archive_id"],
-                    model=self.runtime.model,
-                    memories=result.get("memories", ()),
-                    archive_passages=result.get("archive_passages", ()),
-                    conversation_context=result.get("conversation_context", ()),
-                    development_sources=tuple(
-                        source
-                        for source in (
-                            result.get("development", {}).get("record", {}).get("proposal_id")
-                            if result.get("development") else None,
-                            correction_observation.get("observation_id")
-                            if correction_observation else None,
-                        )
-                        if source
-                    ),
-                    research_sources=(
-                        ({
-                            "research_session_id": result["research"]["session"]["research_session_id"],
-                            "research_ids": list(result["research"]["session"]["research_ids"]),
-                            "capability_receipt_ids": list(result["research"]["session"]["capability_receipt_ids"]),
-                            "citation_validation": result.get("citation_validation", {}),
-                        },)
-                        if result.get("research") else ()
-                    ),
-                    library_sources=result.get("library_passages", ()),
-                    media_sources=public_media_references(media_attachments),
-                    presentation=result.get("presentation"),
-                    retrieval_audit=result.get("retrieval_audit"),
-                )
+                if policy.personal_diagnostics:
+                    context_receipt = save_context_receipt(
+                        instance_id=self.instance_id,
+                        conversation_id=conversation_id,
+                        request_message_id=user_message_id,
+                        response_message_id=assistant_message_id,
+                        response_archive_id=assistant_archive["archive_id"],
+                        model=self.runtime.model,
+                        memories=result.get("memories", ()),
+                        archive_passages=result.get("archive_passages", ()),
+                        conversation_context=result.get("conversation_context", ()),
+                        development_sources=tuple(
+                            source
+                            for source in (
+                                result.get("development", {}).get("record", {}).get("proposal_id")
+                                if result.get("development") else None,
+                                correction_observation.get("observation_id")
+                                if correction_observation else None,
+                            )
+                            if source
+                        ),
+                        research_sources=(
+                            ({
+                                "research_session_id": result["research"]["session"]["research_session_id"],
+                                "research_ids": list(result["research"]["session"]["research_ids"]),
+                                "capability_receipt_ids": list(result["research"]["session"]["capability_receipt_ids"]),
+                                "citation_validation": result.get("citation_validation", {}),
+                            },)
+                            if result.get("research") else ()
+                        ),
+                        library_sources=result.get("library_passages", ()),
+                        media_sources=public_media_references(media_attachments),
+                        presentation=result.get("presentation"),
+                        retrieval_audit=result.get("retrieval_audit"),
+                    )
             except Exception:
                 # The Archive remains complete; receipt repair can be audited later.
                 context_receipt = None
@@ -1481,14 +1611,15 @@ class FawkesChatService:
                     pass
 
             response_payload = {
+                "recording": policy.public(),
                 "conversation_id": conversation_id,
                 "user_message_id": user_message_id,
-                "user_message_created_at": user_archive["created_at"],
+                "user_message_created_at": user_created_at,
                 "message": {
                     "message_id": assistant_message_id,
                     "role": "assistant",
                     "content": result["text"],
-                    "created_at": assistant_archive["created_at"],
+                    "created_at": assistant_created_at,
                     "presentation": result.get("presentation"),
                     "context_inspector_available": bool(context_receipt is not None
                         and isinstance((context_receipt.get("retrieval_audit") or {}).get("context_composition"), dict)),
@@ -1502,7 +1633,11 @@ class FawkesChatService:
                       if result.get("research") else []),
                 ],
             }
-            self._schedule_memory_queue()
+            if private:
+                self._append_private_message({"message_id": assistant_message_id,
+                    "role": "assistant", "content": result["text"], "created_at": assistant_created_at})
+            if policy.memory_learning:
+                self._schedule_memory_queue()
             return response_payload
 
     def create_observation(self, payload):

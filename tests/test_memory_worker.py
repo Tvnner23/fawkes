@@ -12,6 +12,7 @@ from src.memory.ledger import (
     update_work_item,
 )
 from src.memory.semantic import SemanticMemoryAssessment
+from tests.recording_archive_fixtures import LegacyArchiveSources
 from src.memory.worker import (
     apply_accepted_batch,
     apply_next_accepted,
@@ -68,7 +69,12 @@ class MultiMessageEvaluator:
         )
 
 
-class MemoryWorkerTests(unittest.TestCase):
+class MemoryWorkerTests(LegacyArchiveSources, unittest.TestCase):
+    archive_source_owner = "fawkes"
+    archive_source_conversation = "conversation-1"
+    archive_source_messages = (("message-1", "archive-1", "user"),
+                               ("message-context", "archive-context", "assistant"))
+
     def _queued_item(self, path):
         item = discover_candidate(
             instance_id="fawkes",

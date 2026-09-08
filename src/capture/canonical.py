@@ -22,6 +22,28 @@ def _capture_time(value):
     return parsed.astimezone(timezone.utc)
 
 
+def _memory_learning_eligible(record):
+    """Legacy captures stay eligible; a present invalid decision fails closed."""
+    if "recording_policy" not in record:
+        return True
+    policy = record["recording_policy"]
+    if not isinstance(policy, dict) or set(policy) != {
+        "schema_version", "policy_revision", "mode", "memory_learning"
+    }:
+        return False
+    return (
+        type(policy["schema_version"]) is int and policy["schema_version"] == 1
+        and type(policy["policy_revision"]) is int and policy["policy_revision"] >= 0
+        and policy["mode"] == "retained"
+        and policy["memory_learning"] is True
+    )
+
+
+def message_allows_memory_learning(message):
+    """Accept only an exact eligible flag, retaining legacy projected inputs."""
+    return message.get("memory_learning_eligible", True) is True
+
+
 def load_message_states(conversation_id: str, *, instance_id=None, include_unscoped=False,
                         raw_dir=None, meta_dir=None, strict=False):
     states = defaultdict(list)
@@ -74,6 +96,7 @@ def load_message_states(conversation_id: str, *, instance_id=None, include_unsco
                 "role": record.get("role"),
                 "text": record.get("text", ""),
                 "model_slug": record.get("model_slug"),
+                "memory_learning_eligible": _memory_learning_eligible(record),
             }
         )
 
@@ -131,6 +154,10 @@ def canonical_messages(conversation_id: str, *, instance_id=None, include_unscop
                 "source_archive_id": state["archive_id"],
                 "instance_id": state.get("instance_id"),
                 "revision_count": len(revisions),
+                # Later revisions cannot activate a previously disabled identity.
+                "memory_learning_eligible": all(
+                    revision["memory_learning_eligible"] for revision in revisions
+                ),
             }
         )
 

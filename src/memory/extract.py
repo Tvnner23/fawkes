@@ -1,4 +1,5 @@
-from src.capture.canonical import canonical_messages
+from src.capture.canonical import canonical_messages, message_allows_memory_learning
+from src.memory.archive_context import memory_learning_enabled
 
 
 def extract_memory_candidates(conversation_id: str, *, instance_id=None, include_unscoped=False):
@@ -9,11 +10,14 @@ def extract_memory_candidates(conversation_id: str, *, instance_id=None, include
     It identifies user-authored messages that may contain durable
     information and preserves their provenance for later evaluation.
     """
+    if not memory_learning_enabled(instance_id):
+        return []
     messages = canonical_messages(conversation_id,instance_id=instance_id,include_unscoped=include_unscoped)
     candidates = []
 
     for message in messages:
-        if message["role"] != "user":
+        if (message["role"] != "user" or not message_allows_memory_learning(message)
+                or not memory_learning_enabled(message.get("instance_id"))):
             continue
 
         text = message["content"].strip()
@@ -25,6 +29,7 @@ def extract_memory_candidates(conversation_id: str, *, instance_id=None, include
             {
                 "candidate_id": message["message_id"],
                 "instance_id": message.get("instance_id"),
+                "memory_learning_eligible": True,
                 "memory_type": "unclassified",
                 "content": text,
                 "importance": None,

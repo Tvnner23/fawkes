@@ -4,6 +4,7 @@ import json
 
 from src.ingest import ingest_bytes
 from src.memory.archive_retrieval import project_retained_message
+from src.runtime.personal_recording import EffectiveRecordingPolicy, RecordingPolicyError
 
 
 def persist_live_message(
@@ -16,6 +17,7 @@ def persist_live_message(
     model_slug=None,
     title="Fawkes CLI Session",
     source="fawkes_cli",
+    recording_policy=None,
 ):
     if role not in {"user", "assistant"}:
         raise ValueError("role must be user or assistant")
@@ -27,6 +29,23 @@ def persist_live_message(
         "model_slug": model_slug,
         "text": text,
     }
+    if recording_policy is not None:
+        if (not isinstance(recording_policy, EffectiveRecordingPolicy)
+                or recording_policy.instance_id != instance_id
+                or type(recording_policy.policy_revision) is not int
+                or recording_policy.policy_revision < 0
+                or type(recording_policy.memory_learning) is not bool):
+            raise RecordingPolicyError("A matching effective recording policy is required")
+        if recording_policy.archive_recording is not True or recording_policy.mode != "retained":
+            raise RecordingPolicyError("The latched policy does not allow Archive recording")
+        # The existing immutable payload digest covers this body-free decision.
+        # Future discovery must use this turn's decision, not a later setting.
+        record["recording_policy"] = {
+            "schema_version": 1,
+            "policy_revision": recording_policy.policy_revision,
+            "mode": recording_policy.mode,
+            "memory_learning": recording_policy.memory_learning,
+        }
     metadata = ingest_bytes(
         (json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n").encode(
             "utf-8"

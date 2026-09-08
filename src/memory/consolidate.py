@@ -1,5 +1,10 @@
 from dataclasses import dataclass
 
+from src.capture.canonical import message_allows_memory_learning
+from src.memory.archive_context import (
+    ArchiveContextReviewRequired, require_memory_learning, require_archive_source_learning,
+    filter_memory_learning_context,
+)
 from src.memory.semantic import SemanticMemoryAssessment
 from src.memory.store import (
     create_memory,
@@ -31,6 +36,7 @@ def consolidate_assessment(
     conversation_context=(),
     instance_id=None,
     source_work_item_ids=(),
+    include_unscoped=False,
 ):
     """
     Convert a semantic assessment into persistent Phoenix memory state.
@@ -62,6 +68,26 @@ def consolidate_assessment(
             memory_id=None,
             assessment=assessment,
         )
+
+    source_message_ids, source_archive_ids = tuple(source_message_ids), tuple(source_archive_ids)
+    def require_learning_sources():
+        require_memory_learning(instance_id)
+        require_archive_source_learning(instance_id=instance_id, source_message_ids=source_message_ids,
+                                        source_archive_ids=source_archive_ids)
+        if filter_memory_learning_context(conversation_context, instance_id=instance_id,
+                                          include_unscoped=include_unscoped) != conversation_context:
+            raise ArchiveContextReviewRequired("Learning context eligibility changed before mutation")
+        require_memory_learning(instance_id)
+    require_memory_learning(instance_id)
+    conversation_context = tuple(conversation_context)
+    if any(not message_allows_memory_learning(message)
+           and (message.get("message_id") in source_message_ids
+                or message.get("source_archive_id") in source_archive_ids)
+           for message in conversation_context):
+        raise ArchiveContextReviewRequired("Memory evidence does not allow learning")
+    conversation_context = filter_memory_learning_context(conversation_context, instance_id=instance_id,
+                                                          include_unscoped=include_unscoped)
+    require_learning_sources()
 
     # When an evaluator identifies its evidence, persistence must receive the
     # complete attribution. This prevents a multi-message conclusion from
@@ -99,6 +125,7 @@ def consolidate_assessment(
 
     if matcher is not None and existing_memories:
         for existing in existing_memories:
+            require_learning_sources()
             comparison = matcher.compare(
                 new_meaning=assessment.meaning,
                 new_memory_type=assessment.memory_type,
@@ -107,6 +134,7 @@ def consolidate_assessment(
             )
 
             if comparison.relation == "duplicate":
+                require_learning_sources()
                 strengthen_memory(
                     existing["memory_id"],
                     confidence=assessment.confidence,
@@ -122,6 +150,7 @@ def consolidate_assessment(
                 )
 
             if comparison.relation == "supports":
+                require_learning_sources()
                 strengthen_memory(
                     existing["memory_id"],
                     confidence=assessment.confidence,
@@ -137,6 +166,7 @@ def consolidate_assessment(
                 )
 
             if comparison.relation == "revises":
+                require_learning_sources()
                 revise_memory(
                     existing["memory_id"],
                     content=assessment.meaning,
@@ -155,6 +185,7 @@ def consolidate_assessment(
                 )
 
             if comparison.relation == "supersedes":
+                require_learning_sources()
                 new_memory = supersede_memory(
                     existing["memory_id"],
                     assessment.memory_type,
@@ -201,6 +232,7 @@ def consolidate_assessment(
             memory_fingerprint(existing) == candidate_fingerprint
             and existing.get("status", "active") == "active"
         ):
+            require_learning_sources()
             strengthen_memory(
                 existing["memory_id"],
                 confidence=assessment.confidence,
@@ -216,6 +248,7 @@ def consolidate_assessment(
                 assessment=assessment,
             )
 
+    require_learning_sources()
     memory = create_memory(
         assessment.memory_type,
         assessment.meaning,

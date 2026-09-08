@@ -25,6 +25,7 @@
         <span id="presence-render-host" class="presence-render-host" aria-live="polite"></span>
       </button>
       <section id="messages" class="messages" aria-live="polite" aria-label="Conversation"></section>
+      <p id="recording-status" class="recording-status" role="status" aria-live="polite">Recording mode unavailable</p>
       <form id="composer" class="composer">
         <label class="attach-button" for="attachments" aria-label="Attach image, PDF, or audio">＋</label>
         <input id="attachments" class="sr-only" type="file" accept="image/png,image/jpeg,image/webp,image/gif,application/pdf,audio/mpeg,audio/wav,audio/x-wav,audio/flac,audio/ogg,audio/webm,audio/mp4,audio/x-m4a" multiple>
@@ -64,6 +65,7 @@
       <p id="developer-build" class="meta">Build: __FAWKES_BUILD_ID__</p>
     </section>
     <section id="settings-view" class="view settings-view hidden" aria-label="Settings">
+      <div id="recording-settings" class="sound-settings" aria-live="polite"></div>
       <div class="developer-intro">
         <p class="eyebrow">Rider preferences</p>
         <h2>Sound</h2>

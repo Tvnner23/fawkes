@@ -22,6 +22,10 @@ from src.runtime.chat_service import (
 from src.runtime.autonomy_supervision import RiderActivityStore, console_timestamp
 from src.runtime.console_observation import ordered_campaigns, primary_campaign_id
 from src.runtime.windows_clipboard import ConsoleClipboardDelivery
+from src.runtime.personal_recording import (
+    EDITABLE_CATEGORIES, RecordingPolicyConflict, RecordingPolicyDurabilityError,
+    RecordingPolicyError,
+)
 
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -1064,6 +1068,24 @@ class FawkesAppHandler(BaseHTTPRequestHandler):
             "message": "A current Tanner browser session and session-bound CSRF token are required."}})
         return False
 
+    def _require_recording_settings_auth(self):
+        if not self._require_auth(record_rider_activity=False):
+            return False
+        origin = self.headers.get("Origin")
+        parsed = urlparse(origin) if origin else None
+        if (parsed and (parsed.scheme not in {"http", "https"}
+                or parsed.netloc.lower() != self.headers.get("Host", "").lower())):
+            self._json(403, {"error": {"code": "recording_settings_auth_required",
+                "message": "Recording settings require this app's authenticated browser session."}})
+            return False
+        if self.server.app_session_store.valid_csrf(
+                self._session_token(), self.headers.get("X-Fawkes-CSRF-Token", ""),
+                rider_id="tanner"):
+            return True
+        self._json(403, {"error": {"code": "recording_settings_auth_required",
+            "message": "A current browser session and session-bound CSRF token are required to change recording."}})
+        return False
+
     def _attention_decision_failure(self, status, code, message, attention_id):
         """Return an exact body-free lifecycle with a decision failure.
 
@@ -1169,6 +1191,15 @@ class FawkesAppHandler(BaseHTTPRequestHandler):
                 self._json(200, self.server.chat_service.capabilities())
             except Exception:
                 self._json(503, {"error": {"code": "capabilities_unavailable", "message": "Capability discovery is unavailable right now."}})
+            return
+        if path == "/api/preferences/recording":
+            if not self._require_auth(record_rider_activity=False):
+                return
+            try:
+                self._json(200, self.server.chat_service.get_recording_policy())
+            except Exception:
+                self._json(503, {"error": {"code": "recording_policy_unavailable",
+                    "message": "Recording settings could not be read. No recording mode has been assumed."}})
             return
         if path == "/api/preferences/sounds":
             if not self._require_auth():
@@ -1566,6 +1597,45 @@ class FawkesAppHandler(BaseHTTPRequestHandler):
             except (ValueError, ChatServiceError) as exc: self._json(400, {"error": {"code": "invalid_presence_preferences", "message": str(exc)}})
             except Exception: self._json(503, {"error": {"code": "presence_unavailable", "message": "Phoenix Presence settings are unavailable right now."}})
             return
+        if path == "/api/preferences/recording":
+            if not self._require_recording_settings_auth():
+                return
+            try:
+                if int(self.headers.get("Content-Length", "0")) > 16384:
+                    raise ValueError("Recording settings request is too large.")
+                payload = self._read_json()
+                if set(payload) != {"changes", "expected_revision"}:
+                    raise ValueError("Changes and the current revision are required.")
+                revision = payload["expected_revision"]
+                changes = payload["changes"]
+                if type(revision) is not int or revision < 0:
+                    raise ValueError("The current recording revision is required.")
+                if not isinstance(changes, dict) or set(changes) - {"mode", "categories"}:
+                    raise ValueError("Unknown recording setting.")
+                if "mode" in changes and changes["mode"] not in ("private", "retained"):
+                    raise ValueError("Recording mode must be private or retained.")
+                categories = changes.get("categories", {})
+                if (not isinstance(categories, dict)
+                        or set(categories) - set(EDITABLE_CATEGORIES)
+                        or any(type(value) is not bool for value in categories.values())):
+                    raise ValueError("Unknown, unavailable or invalid recording category.")
+                self._json(200, self.server.chat_service.update_recording_policy(
+                    changes, expected_revision=revision))
+            except RecordingPolicyConflict:
+                self._json(409, {"error": {"code": "recording_policy_conflict",
+                    "message": "Recording settings changed elsewhere. Reload them before making another change."}})
+            except RecordingPolicyDurabilityError:
+                self._json(503, {"error": {"code": "recording_policy_commit_unconfirmed",
+                    "message": "The settings replacement may be visible, but durable saving was not confirmed. Reload the current settings; do not repeat the write automatically."}})
+            except RecordingPolicyError:
+                self._json(503, {"error": {"code": "recording_policy_unavailable",
+                    "message": "Recording settings could not be safely updated. Reload the current settings before making another change."}})
+            except (ValueError, ChatServiceError) as exc:
+                self._json(400, {"error": {"code": "invalid_recording_settings", "message": str(exc)}})
+            except Exception:
+                self._json(503, {"error": {"code": "recording_policy_unavailable",
+                    "message": "Saving recording settings was not confirmed. Reload the current settings before making another change."}})
+            return
         if path == "/api/preferences/sounds":
             if not self._require_auth():
                 return
@@ -1709,11 +1779,14 @@ class FawkesAppHandler(BaseHTTPRequestHandler):
             return
         try:
             payload = self._read_json()
+            if "recording_mode" in payload and payload["recording_mode"] not in (None, "private", "retained"):
+                raise ChatServiceError("Recording mode must be private or retained.", code="invalid_recording_mode")
             result = self.server.chat_service.send(
                 payload.get("message"),
                 conversation_id=payload.get("conversation_id"),
                 attachments=payload.get("attachments"),
                 retrieval_clarification=payload.get("retrieval_clarification"),
+                **({"recording_mode": payload["recording_mode"]} if "recording_mode" in payload else {}),
             )
             self._json(201, result)
         except ChatServiceError as exc:

@@ -2,8 +2,11 @@
 
 from dataclasses import asdict
 
-from src.capture.canonical import canonical_messages
-from src.memory.archive_context import ArchiveContextReviewRequired, build_archive_context
+from src.capture.canonical import canonical_messages, message_allows_memory_learning
+from src.memory.archive_context import (
+    ArchiveContextReviewRequired, MemoryLearningPaused, build_archive_context,
+    memory_learning_enabled,
+)
 from src.memory.mutation import MemoryRecoveryRequired
 from src.memory.archive_retrieval import list_conversation_ids
 from src.memory.consolidate import consolidate_assessment
@@ -48,14 +51,18 @@ def discover_conversation(
 ):
     """Record each canonical user revision without changing the archive."""
     discovered = []
+    if not memory_learning_enabled(instance_id):
+        return discovered
     for message in canonical_messages(conversation_id,instance_id=instance_id,include_unscoped=include_unscoped):
-        if message.get("role") != "user":
+        if message.get("role") != "user" or not message_allows_memory_learning(message):
             continue
         message_instance = message.get("instance_id")
         if message_instance != instance_id and not (
             include_unscoped and message_instance is None
         ):
             continue
+        if not memory_learning_enabled(instance_id):
+            break
         item = discover_candidate(
             instance_id=instance_id,
             conversation_id=conversation_id,
@@ -78,6 +85,8 @@ def discover_history(
     *, instance_id, limit=None, include_unscoped=False, path=LEDGER_PATH
 ):
     """Incrementally discover conversations in a stable order."""
+    if not memory_learning_enabled(instance_id):
+        return []
     existing_keys = {
         (
             item["conversation_id"],
@@ -93,7 +102,7 @@ def discover_history(
         include_unscoped=include_unscoped,
     ):
         for message in canonical_messages(conversation_id,instance_id=instance_id,include_unscoped=include_unscoped):
-            if message.get("role") != "user":
+            if message.get("role") != "user" or not message_allows_memory_learning(message):
                 continue
             message_instance = message.get("instance_id")
             if message_instance != instance_id and not (
@@ -108,6 +117,8 @@ def discover_history(
             )
             if key in existing_keys:
                 continue
+            if not memory_learning_enabled(instance_id):
+                return items
             item = discover_candidate(
                 instance_id=instance_id,
                 conversation_id=conversation_id,
@@ -131,13 +142,16 @@ def _context(item):
     try:
         context = build_archive_context(
             item["conversation_id"], instance_id=item['instance_id'],
-            center_message_id=item["message_id"], before=20, after=20)
+            center_message_id=item["message_id"], before=20, after=20,
+            memory_learning_only=True)
     except ValueError as exc:
         # Invalid/ambiguous retained attribution is not transient I/O. Leave
         # genuine OSError failures on the ordinary retryable path.
         raise ArchiveContextReviewRequired(str(exc)) from exc
     if any(entry.get('instance_id') != item['instance_id'] for entry in context):
         raise EvidenceAttributionError('Archive context does not belong to the current instance')
+    if any(not message_allows_memory_learning(entry) for entry in context):
+        raise EvidenceAttributionError('Archive context does not allow Memory learning')
     if any(entry.get('message_id')==item['message_id'] and
            entry.get('source_archive_id')!=item['canonical_revision'] for entry in context):
         raise EvidenceAttributionError('Candidate Archive revision changed; explicit reevaluation is required')
@@ -151,6 +165,8 @@ def _validated_evidence(item, assessment, context):
 
     if any(entry.get('instance_id') != item['instance_id'] for entry in context):
         raise EvidenceAttributionError('Archive evidence does not belong to the current instance')
+    if any(not message_allows_memory_learning(entry) for entry in context):
+        raise EvidenceAttributionError('Archive evidence does not allow Memory learning')
 
     message_ids = tuple(dict.fromkeys(assessment.supporting_message_ids))
     archive_ids = tuple(dict.fromkeys(assessment.supporting_archive_ids))
@@ -186,6 +202,8 @@ def evaluate_next(
     *, instance_id, evaluator, exclude_work_item_ids=(), path=LEDGER_PATH
 ):
     """Evaluate one queued item and persist its disposition before mutation."""
+    if not memory_learning_enabled(instance_id):
+        return None
     item = claim_next_work_item(
         instance_id=instance_id,
         statuses=("queued", "failed_evaluation_retryable"),
@@ -199,6 +217,10 @@ def evaluate_next(
         if not content:
             raise ValueError("candidate content is missing from the ledger")
 
+        context = _context(item)
+        if not memory_learning_enabled(instance_id):
+            update_work_item(item["work_item_id"], status="queued", path=path)
+            return None
         if looks_like_artifact(content):
             assessment = SemanticMemoryAssessment(
                 should_remember=False,
@@ -209,13 +231,15 @@ def evaluate_next(
                 reasoning="Deterministic artifact gate rejected the candidate.",
             )
         else:
-            context = _context(item)
             assessment = evaluate_semantically(
                 evaluator,
                 content=content,
                 conversation_context=context,
             )
 
+        if not memory_learning_enabled(instance_id):
+            update_work_item(item["work_item_id"], status="queued", path=path)
+            return None
         if looks_like_artifact(content):
             evidence_message_ids = (item["message_id"],)
             evidence_archive_ids = tuple(item["source_archive_ids"])
@@ -316,6 +340,8 @@ def apply_next_accepted(
     include_unscoped=False, exclude_work_item_ids=(), path=LEDGER_PATH
 ):
     """Apply one explicitly accepted assessment at the persistence boundary."""
+    if not memory_learning_enabled(instance_id):
+        return None
     item = claim_next_work_item(
         instance_id=instance_id,
         statuses=("accepted", "failed_consolidation_retryable"),
@@ -365,6 +391,9 @@ def apply_next_accepted(
                 include_unscoped=include_unscoped,
             )
 
+        if not memory_learning_enabled(instance_id):
+            update_work_item(item["work_item_id"], status="accepted", path=path)
+            return None
         result = consolidate_assessment(
             assessment,
             source_message_ids=supporting_message_ids,
@@ -391,6 +420,9 @@ def apply_next_accepted(
             decision_reason=f"Consolidation result: {result.action}",
             path=path,
         )
+    except MemoryLearningPaused:
+        update_work_item(item["work_item_id"], status="accepted", path=path)
+        return None
     except (EvidenceAttributionError, ArchiveContextReviewRequired, IncompleteMemoryMutation, MemoryOwnershipReview, MemoryRecoveryRequired) as exc:
         return update_work_item(
             item["work_item_id"],

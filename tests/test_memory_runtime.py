@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import src.memory.store as store
+from tests.recording_archive_fixtures import LegacyArchiveSources
 
 
 class FawkesLiveScopedMemoryContextTests(unittest.TestCase):
@@ -259,7 +260,7 @@ if __name__ == "__main__":
     unittest.main()
 
 
-class FawkesMemoryRuntimeFlowTests(unittest.TestCase):
+class FawkesMemoryRuntimeFlowTests(LegacyArchiveSources, unittest.TestCase):
     def test_runtime_processes_conversation_through_memory_pipeline(self):
         from src.memory.runtime import process_memory_conversation
 
@@ -384,7 +385,7 @@ if __name__ == "__main__":
     unittest.main()
 
 
-class FawkesRuntimeContractTests(unittest.TestCase):
+class FawkesRuntimeContractTests(LegacyArchiveSources, unittest.TestCase):
     def test_runtime_returns_memory_results_from_conversation(self):
         from src.memory.runtime import process_memory_conversation
         from src.memory.semantic import SemanticMemoryAssessment
@@ -2697,7 +2698,7 @@ if __name__ == "__main__":
     unittest.main()
 
 
-class FawkesUserCorrectionDevelopmentTests(unittest.TestCase):
+class FawkesUserCorrectionDevelopmentTests(LegacyArchiveSources, unittest.TestCase):
     def test_user_correction_preserves_context_and_creates_proposal(self):
         from src.memory.development import propose_development
         from src.memory.development_runtime import (

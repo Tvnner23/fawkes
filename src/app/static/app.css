@@ -13,7 +13,11 @@ header { position: sticky; top: 0; z-index: 2; display: flex; gap: .8rem; align-
 h1 { margin: 0; font: 600 1.05rem Georgia, serif; letter-spacing: .02em; }
 header p { margin: .12rem 0 0; color: #99a3af; font-size: .76rem; }
 .view { min-height: 0; }
-.chat-view { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; }
+.chat-view { display: grid; grid-template-rows: auto minmax(0, 1fr) auto auto; }
+.recording-status { margin: 0; padding: .35rem 1rem; color: var(--muted); font-size: .76rem; line-height: 1.4; }
+.recording-status[data-mode="private"] { color: var(--link); }
+.recording-error { color: #ffb7aa; }
+.recording-settings-action { width: auto; height: auto; min-height: 2.75rem; padding: .55rem .9rem; font-size: .85rem; }
 .phoenix-presence { width: calc(100% - 2rem); height: clamp(7.5rem, 20vh, 11rem); margin: .7rem 1rem 0; padding: 0; overflow: hidden; border: 1px solid var(--border); border-radius: 1.15rem; background: radial-gradient(circle at 50% 70%, #47281d 0, #1a2027 48%, #11161d 100%); color: var(--text); box-shadow: inset 0 0 3rem rgba(226,112,52,.08); }
 .phoenix-presence:focus-visible { outline: 3px solid var(--link); outline-offset: 2px; }
 .presence-render-host { width: 100%; height: 100%; display: grid; place-items: center; }

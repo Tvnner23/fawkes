@@ -7,6 +7,7 @@ import src.memory.store as store
 from src.memory.pipeline import process_memory_candidate
 from src.memory.semantic import SemanticMemoryAssessment
 from src.memory.compare import MemoryComparison
+from tests.recording_archive_fixtures import LegacyArchiveSources
 
 
 class FakeEvaluator:
@@ -35,7 +36,7 @@ class FakeMatcher:
         )
 
 
-class FawkesMemoryPipelineTests(unittest.TestCase):
+class FawkesMemoryPipelineTests(LegacyArchiveSources, unittest.TestCase):
     def test_candidate_flows_through_semantic_evaluation_and_consolidation(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -138,7 +139,7 @@ class ContextCapturingEvaluator:
         )
 
 
-class FawkesMemoryPipelineContextTests(unittest.TestCase):
+class FawkesMemoryPipelineContextTests(LegacyArchiveSources, unittest.TestCase):
     def test_conversation_context_reaches_semantic_evaluation_and_comparison(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -247,7 +248,7 @@ if __name__ == "__main__":
     unittest.main()
 
 
-class FawkesEndToEndMemoryFlowTests(unittest.TestCase):
+class FawkesEndToEndMemoryFlowTests(LegacyArchiveSources, unittest.TestCase):
     def test_full_pipeline_uses_canonical_conversation_context(self):
         from src.memory.openai_provider import OpenAISemanticMemoryProvider
         from src.memory.semantic_provider import ModelSemanticMemoryEvaluator
@@ -336,7 +337,7 @@ if __name__ == "__main__":
     unittest.main()
 
 
-class FawkesConversationMemoryFlowTests(unittest.TestCase):
+class FawkesConversationMemoryFlowTests(LegacyArchiveSources, unittest.TestCase):
     def test_conversation_flow_builds_context_from_canonical_history(self):
         from unittest.mock import patch
         from src.memory.pipeline import process_conversation

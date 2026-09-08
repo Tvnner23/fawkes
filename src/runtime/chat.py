@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from openai import OpenAI
 
 from src.memory.archive_context import build_archive_context
+from src.capture.canonical import message_allows_memory_learning
 from src.memory.archive_retrieval import retrieve_archive_passages
 from src.memory.retrieval import retrieve_memories
 from src.memory.semantic_retrieval import SemanticMemoryRetriever
@@ -15,6 +16,9 @@ from src.memory.semantic_provider import ModelSemanticMemoryEvaluator
 from src.memory.development_evaluator import DevelopmentEvaluator
 from src.memory.development_similarity import DevelopmentSimilarity
 from src.runtime.paid_call import PaidCallGuard
+from src.runtime.personal_recording import (
+    EffectiveRecordingPolicy, RecordingPolicy, RecordingPolicyStore,
+)
 from src.capabilities.research_orchestrator import (
     ConversationalResearchOrchestrator,
     OpenAIResearchAssessor,
@@ -548,7 +552,25 @@ class FawkesChatRuntime:
         media_attachments=(),
         request_timestamp=None,
         retrieval_clarification=None,
+        recording_policy=None,
+        ephemeral_context=(),
     ):
+        # Latch before any provider or personal-content work. Service/CLI may
+        # supply their already-latched policy; direct scoped callers load it.
+        if recording_policy is None:
+            recording_policy = (RecordingPolicyStore(self.instance_id).latch()
+                                if self.instance_id else
+                                RecordingPolicy("legacy-unscoped-runtime").effective())
+        if (not isinstance(recording_policy, EffectiveRecordingPolicy)
+                or (self.instance_id and recording_policy.instance_id != self.instance_id)):
+            raise ValueError("Recording policy must belong to this instance")
+        private = recording_policy.mode == "private"
+        if private and (media_attachments or retrieval_clarification is not None):
+            raise PermissionError("Private chat supports text only; retained media and retrieval feedback are disabled.")
+        if private and not self.instance_id:
+            raise PermissionError("Private chat requires an explicit instance.")
+        if not private and conversation_id and conversation_id.startswith("private-"):
+            raise PermissionError("Private conversation context cannot become retained history.")
         # One authorization covers the complete Fawkes turn.
         #
         # A research-capable turn can require:
@@ -577,7 +599,26 @@ class FawkesChatRuntime:
             ),
         )
 
-        if self.retrieval_path == "planner":
+        if private:
+            # No Archive, Memory, Library, or planner call can ingest this
+            # interaction or silently pull a durable conversation behind its ID.
+            # Still use the normal composer and an empty evidence permit below.
+            recent = []
+            if not isinstance(ephemeral_context, (tuple, list)):
+                raise ValueError("Private context must be a bounded message sequence")
+            for item in ephemeral_context[-self.context_messages:]:
+                if (not isinstance(item, dict) or item.get("role") not in {"user", "assistant"}
+                        or not isinstance(item.get("content"), str)):
+                    raise ValueError("Private context message is malformed")
+                recent.append({"role": item["role"], "content": item["content"]})
+            if sum(len(item["content"].encode("utf-8")) for item in recent) > 400_000:
+                raise ValueError("Private context exceeds the bounded conversation limit")
+            context = {"memories": [], "archive_passages": [], "library_passages": [],
+                "conversation": recent, "selected_evidence": [], "retrieval_path": "planner",
+                "continuity": {"attempted": False, "status": "private_volatile_context_only"},
+                "warnings": ["Private text chat: only this volatile conversation is available; personal history and learning are disabled."],
+                "retrieval_audit": {"private_volatile_context_only": True}}
+        elif self.retrieval_path == "planner":
             try:
                 if not callable(self.planner_context_builder):
                     raise RuntimeError("planner context builder is not configured")
@@ -670,6 +711,18 @@ class FawkesChatRuntime:
                 "warnings":list(context.get("warnings",())),"media_attachments":media_attachments}
 
         capability_manifests = self.capability_context()
+        disabled = set()
+        if not recording_policy.research_records:
+            disabled.add("web.research")
+        if not recording_policy.library_retention:
+            disabled.update(("library.retain", "library.extract"))
+        if private:
+            disabled.update(("continuity.retrieve", "library.search", "media.chat_analyze"))
+        capability_manifests = [
+            {**item, "availability": "disabled",
+             "availability_reason": "Disabled by this interaction's personal-recording policy"}
+            if item.get("name") in disabled else item for item in capability_manifests
+        ]
         awareness = CapabilityAwareness(capability_manifests)
         capability_selections = awareness.select(
             user_message, attachments=media_attachments,
@@ -681,9 +734,13 @@ class FawkesChatRuntime:
         research = None
         research_failure = None
         research_selected = "web.research" in selected_ids
-        if self.research_orchestrator is not None and (
-            research_selected or likely_needs_research(user_message, local_evidence_available=bool(media_attachments))
-        ):
+        research_requested = research_selected or likely_needs_research(
+            user_message, local_evidence_available=bool(media_attachments))
+        research_status_note = ""
+        if research_requested and not recording_policy.research_records:
+            research_status_note = "Web research is disabled because its required research records are disabled for this interaction; current facts have not been verified."
+            warnings.append(research_status_note)
+        if self.research_orchestrator is not None and recording_policy.research_records and research_requested:
             try:
                 # Planner-selected evidence is authorized for the response
                 # route only. It cannot be forwarded to a separate research
@@ -722,6 +779,7 @@ class FawkesChatRuntime:
                     "Requested web research failed; answer must disclose that current "
                     f"evidence could not be verified ({type(exc).__name__})."
                 )
+                research_status_note = "Requested research failed; say current facts could not be verified."
 
         transmission = None
         composition_allocation = None
@@ -901,6 +959,9 @@ Maintain continuity naturally.
 Be direct, useful, proactive, and conversational.
 """
 
+        if private:
+            system_prompt += "\nThis is private text chat. Do not claim this conversation is saved or remembered. Only supplied volatile context is available; research and retained-source capabilities are disabled. Metadata-only permission/provider receipts still apply."
+
         legacy_user_prompt = (
             f"Relevant persistent memories:\n"
             f"{memory_text or '(none)'}\n\n"
@@ -917,17 +978,19 @@ Be direct, useful, proactive, and conversational.
             f"Approved web research evidence:\n"
             f"{research_prompt_context(research)}\n\n"
             f"Research availability note:\n"
-            f"{('Requested research failed; say current facts could not be verified.' if research_failure else '(none)')}\n\n"
+            f"{research_status_note or '(none)'}\n\n"
             f"Current user message:\n"
             f"{user_message}"
         )
         correction = None
+        learning_context = tuple(message for message in context["conversation"]
+                                 if message_allows_memory_learning(message))
         try:
             correction = evaluate_correction(
                 self.correction_evaluator,
                 user_message=user_message,
-                conversation_context=context["conversation"],
-            )
+                conversation_context=learning_context,
+            ) if recording_policy.memory_learning and recording_policy.personal_diagnostics else None
         except Exception as exc:
             warnings.append(
                 "Correction recognition failed and was skipped "
@@ -964,8 +1027,7 @@ Be direct, useful, proactive, and conversational.
                     capability_context=awareness.reasoning_context(capability_selections),
                     continuity_status=continuity_status,
                     research_context=research_prompt_context(research),
-                    research_status=("Requested research failed; say current facts could not be verified."
-                                     if research_failure else ""),
+                    research_status=research_status_note,
                     media_context=audio_context,
                     upstream_allocation=context.get("allocation", {}),
                     composition_allocation=context.get("composition_allocation"),
@@ -995,8 +1057,7 @@ Be direct, useful, proactive, and conversational.
                     capability_context=awareness.reasoning_context(capability_selections),
                     continuity_status=continuity_status,
                     research_context=research_prompt_context(research),
-                    research_status=("Requested research failed; say current facts could not be verified."
-                                     if research_failure else ""), media_context=audio_context,
+                    research_status=research_status_note, media_context=audio_context,
                     upstream_allocation=context.get("allocation", {}),
                     composition_allocation=empty_composition_allocation,
                     exclusions=context.get("exclusions", ()), warnings=warnings,
@@ -1134,13 +1195,15 @@ Be direct, useful, proactive, and conversational.
         if (
             correction is not None
             and correction.is_correction
+            and recording_policy.memory_learning
+            and recording_policy.personal_diagnostics
         ):
             try:
                 development = process_user_correction(
                     correction=user_message,
                     evaluator=self.development_evaluator,
                     similarity=self.development_similarity,
-                    conversation_context=context["conversation"],
+                    conversation_context=learning_context,
                     source_message_ids=(current_message_id,) if current_message_id else (),
                     instance_id=self.instance_id,
                 )
@@ -1152,6 +1215,7 @@ Be direct, useful, proactive, and conversational.
 
         return {
             "text": response_text,
+            "recording": recording_policy.public(),
             "presentation": prepared_presentation["presentation"],
             "usage": usage,
             "memories": context["memories"],

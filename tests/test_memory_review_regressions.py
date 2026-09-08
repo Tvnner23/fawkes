@@ -598,6 +598,7 @@ class MemoryReviewRegressions(unittest.TestCase):
         self.assertEqual(independent['confidence'],.75)
 
     def test_D6_legacy_mutation_requires_review_not_endless_retry(self):
+        self.message('archive','candidate','one','Synthetic eligible legacy evidence','2026-09-01T00:00:00+00:00')
         legacy=store.create_memory('fact','legacy memory',legacy_unscoped=True)
         item={'work_item_id':'work','instance_id':'one','message_id':'candidate','canonical_revision':'archive',
               'source_archive_ids':['archive'],'conversation_id':'conversation'}
