@@ -238,9 +238,12 @@ def campaign_console_reporting(record, managed=(), *, observed_at=None):
                 intervals=[i for i in intervals if i["stage"] != "worker"]+merged
             else:
                 intervals=[i for i in intervals if i["stage"] != "review"]+native_intervals
+    from src.runtime.console_outcome import completed_objective, blocked_objective_identity
     parents = [item.get("reference_id") for item in record.get("recovery_references", [])
                if item.get("reference_type") == "parent_campaign"]
     return {"record_sha256": record.get("record_sha256"), "observed_at": observed_at,
+        "objective_closeout": completed_objective(record),
+        "blocker_identity": blocked_objective_identity(record),
         "created_at": record.get("created_at"), "updated_at": record.get("updated_at"),
         "turns": turns, "timing_history_incomplete": len(managed) > 16
             or any(item.get("timing_history_incomplete") for item in managed)

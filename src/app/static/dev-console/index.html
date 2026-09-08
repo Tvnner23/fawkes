@@ -285,6 +285,19 @@
       <span id="last-updated">No current projection</span>
       <span>Swipe or ← → · wheel scroll · wheel click expands</span>
     </footer>
+    <dialog id="objective-outcome-dialog" class="gesture-surface" aria-labelledby="objective-outcome-title">
+      <header class="objective-outcome-header">
+        <h2 id="objective-outcome-title" tabindex="-1">Current objective</h2>
+        <button id="objective-outcome-close" type="button">Close</button>
+      </header>
+      <div class="objective-outcome-scroll gesture-surface" tabindex="0">
+        <p id="objective-outcome-objective"></p>
+        <p id="objective-outcome-result"></p>
+        <details><summary>Recorded evidence</summary><p id="objective-outcome-source"></p></details>
+        <p class="meta">Closing this notice does not complete work or grant permission. A reply goes to this same Worker conversation.</p>
+      </div>
+      <button id="objective-outcome-reply" type="button">Reply to Worker</button>
+    </dialog>
     <dialog id="worker-native-dialog" class="gesture-surface" aria-labelledby="worker-native-dialog-title">
       <header class="worker-native-dialog-header">
         <h2 id="worker-native-dialog-title" tabindex="-1">Needs your decision</h2>
@@ -306,6 +319,7 @@
   <link rel="stylesheet" href="/native-attention.css">
   <script src="/attention-binding.js"></script>
   <script src="/native-attention.js"></script>
+  <script src="/dev-console/outcome.js"></script>
   <script src="/dev-console/console.js"></script>
   <script src="/dev-console/worker.js"></script>
   <script src="/dev-console/worker-native.js"></script>

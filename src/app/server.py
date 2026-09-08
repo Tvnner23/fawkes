@@ -211,7 +211,93 @@ def _console_activity(value):
     return projected
 
 
-def _console_campaigns(payload):
+def _console_material_boundary(wrapper):
+    """Latest retained lifecycle boundary; absent/invalid evidence stays unknown."""
+    activity = wrapper.get("live_activity") or wrapper
+    reporting = wrapper.get("console_reporting") or {}
+    stamps = [wrapper.get("updated_at"), reporting.get("updated_at")]
+    events = activity.get("activity", [])
+    if not isinstance(events, list):return None
+    for event in events:
+        if not isinstance(event, dict) or not console_timestamp(event.get("created_at")):return None
+        stamps.append(event["created_at"])
+    supplied = [s for s in stamps if s is not None]
+    if not supplied or any(not console_timestamp(s) for s in supplied):return None
+    return max(console_timestamp(s) for s in supplied)
+
+
+def _console_completion_filter(projected, wrappers, attention):
+    """Check compact full-source lineage before display windows discard data.
+
+    This is a read-only disqualifier, never a creator of a closeout. Full bodies
+    and history stay with their owners; only a fixed uncertainty flag is added.
+    """
+    nodes = {}; children = {}; pending = set(); coverage = True
+    for wrapper in wrappers:
+        if not isinstance(wrapper, dict) or not isinstance(wrapper.get("live_activity"), dict):
+            coverage = False; continue
+        activity = wrapper["live_activity"]; identity = activity.get("campaign_id")
+        if not isinstance(identity, str) or not identity or identity in nodes:
+            coverage = False; continue
+        reporting = wrapper.get("console_reporting")
+        references = activity.get("recovery_references")
+        if reporting is None:reporting = {}
+        if references is None:references = []
+        if not isinstance(reporting, dict) or not isinstance(references, list):
+            coverage = False; continue
+        parents = set()
+        parent = reporting.get("parent_campaign_id")
+        if parent is not None:
+            if not isinstance(parent, str) or not parent:coverage = False
+            else:parents.add(parent)
+        for reference in references:
+            if not isinstance(reference, dict):coverage = False; continue
+            if reference.get("reference_type") == "parent_campaign":
+                parent = reference.get("reference_id")
+                if not isinstance(parent, str) or not parent:coverage = False
+                else:parents.add(parent)
+        nodes[identity] = (activity.get("status"), wrapper.get("created_at"),
+                           bool(activity.get("needs_tanner")), parents, _console_material_boundary(wrapper))
+        if activity.get("status") == "integrity_unavailable":coverage = False
+        for parent in parents:children.setdefault(parent,set()).add(identity)
+    if attention is not None:
+        if not isinstance(attention, dict) or not isinstance(attention.get("attention"), list):
+            coverage = False
+        else:
+            for item in attention["attention"]:
+                if not isinstance(item, dict) or type(item.get("actionable")) is not bool:
+                    coverage = False; continue
+                if item["actionable"]:
+                    identity = item.get("campaign_id")
+                    if not isinstance(identity, str) or not identity:coverage = False
+                    else:pending.add(identity)
+    terminal = {"succeeded","failed_safe","denied","expired","cancelled"}
+    for campaign in projected:
+        reporting = campaign.get("console_reporting") or {}
+        closeout = reporting.get("objective_closeout")
+        if not closeout:continue
+        identity=campaign["campaign_id"]; closed_at=console_timestamp(closeout.get("recorded_at"))
+        invalid = not coverage or identity not in nodes or not closed_at
+        seen=set(); todo=[identity]
+        while todo:
+            child=todo.pop()
+            if child in seen:continue
+            seen.add(child);todo.extend(children.get(child,()))
+            node=nodes.get(child)
+            if node is None:invalid=True;continue
+            status,created,needs,parents,material_at=node
+            if needs or child in pending:invalid=True
+            if child==identity:
+                if parents or status!='succeeded':invalid=True
+            elif (status not in terminal or not console_timestamp(created) or not closed_at
+                  or console_timestamp(created)>closed_at or material_at is None or material_at>closed_at):
+                invalid=True
+        if invalid:
+            reporting["objective_closeout"] = None
+            reporting["objective_closeout_unverified"] = True
+
+
+def _console_campaigns(payload, attention=None):
     if not isinstance(payload, dict) or not isinstance(payload.get("campaigns"), list):
         raise ValueError("developer console campaign source is malformed")
     result = []
@@ -271,6 +357,7 @@ def _console_campaigns(payload):
         })
         if objective_source is not None:
             result[-1]["objective_source"] = objective_source
+    _console_completion_filter(result, payload["campaigns"], attention)
     return ordered_campaigns(result)
 
 
@@ -281,8 +368,17 @@ def _console_reporting(value):
         raise ValueError("console reporting must be observational")
     result = {field: _console_text(value.get(field), field, optional=True) for field in (
         "record_sha256", "observed_at", "worker_status", "worker_task_scope_id", "review_status",
-        "application_status", "git_status", "parent_campaign_id", "created_at", "updated_at")}
+        "application_status", "git_status", "parent_campaign_id", "created_at", "updated_at", "blocker_identity")}
     result["facts"] = [_console_text(item, "job fact") for item in value.get("facts", [])[:12]]
+    closeout = value.get("objective_closeout")
+    result["objective_closeout"] = None
+    if isinstance(closeout, dict) and closeout.get("creates_authority") is False:
+        if (closeout.get("scope") == "whole_user_objective"
+                and type(closeout.get("gate_count")) is int and closeout["gate_count"] > 0):
+            result["objective_closeout"] = {
+                field: _console_text(closeout.get(field), field)
+                for field in ("event_id", "recorded_at", "result", "scope")}
+            result["objective_closeout"]["gate_count"] = closeout["gate_count"]
     recap = value.get("return_recap")
     result["return_recap"] = ({key: _console_text(recap.get(key), key, optional=True)
         for key in ("accomplished", "gained", "next", "status", "report_id", "record_sha256", "reported_at")}
@@ -557,6 +653,7 @@ def _console_jobs(campaigns, attention):
                             if item.get("actionable") is True}
     terminal_statuses = {"succeeded", "failed_safe", "denied", "expired", "cancelled"}
     jobs = []
+    parent_links = {}
     for campaign in campaigns:
         stamps = [event.get("created_at") for event in campaign.get("activity", [])]
         stamps.append(campaign.get("updated_at"))
@@ -569,7 +666,11 @@ def _console_jobs(campaigns, attention):
         actionable = campaign["campaign_id"] in actionable_campaigns
         successful = status == "succeeded"
         historical = status in terminal_statuses
-        if actionable or status == "tanner_escalation":
+        decision_needed = (campaign.get("needs_tanner") or {}).get("decision_needed")
+        blocker_identity = (campaign.get("console_reporting") or {}).get("blocker_identity")
+        retained_decision = (isinstance(decision_needed, str) and bool(decision_needed.strip())
+            and isinstance(blocker_identity, str) and re.fullmatch(r"[a-f0-9]{64}", blocker_identity) is not None)
+        if actionable or status == "tanner_escalation" or retained_decision:
             state = "needs_you"
         elif successful:
             state = "done"
@@ -580,6 +681,15 @@ def _console_jobs(campaigns, attention):
         else:
             state = "waiting"
         reporting = campaign.get("console_reporting") or {}
+        # Legacy presentations retain relationship evidence outside reporting.
+        # Preserve every documented parent for conservative descendant checks;
+        # conflicting parents are not silently resolved to a fabricated one.
+        parents = {r["reference_id"] for r in campaign.get("recovery_references", [])
+                   if isinstance(r, dict) and r.get("reference_type") == "parent_campaign"
+                   and isinstance(r.get("reference_id"), str) and r["reference_id"]}
+        if reporting.get("parent_campaign_id"):
+            parents.add(reporting["parent_campaign_id"])
+        parent_links[campaign["campaign_id"]] = parents
         if not historical and state == "waiting" and any(
                 item.get("active_verified") for item in reporting.get("turns", [])):
             state = "working"
@@ -629,11 +739,21 @@ def _console_jobs(campaigns, attention):
         }.get(status, "Unknown; no follow-on is recorded in this projection.")
         if state == "needs_you":
             next_step = (campaign.get("needs_tanner") or {}).get("decision_needed") or "Open the exact canonical Attention request."
+            current_step = "Waiting for the recorded decision; prior campaign results remain historical."
+            if historical:
+                current_step += " Recorded campaign status: " + status + "."
         recap = reporting.get("return_recap") or {}
         recorded_result = recap.get("accomplished") if recap.get("status") == "worker_reported_historical" else None
         recorded_gain = recap.get("gained") if recorded_result else None
-        if successful:
+        if successful and state != "needs_you":
             next_step = "This campaign is complete. See other open jobs for current work; no new task is authorized by this recap."
+        closeout = reporting.get("objective_closeout") if successful and state != "needs_you" and not parents else None
+        if closeout:
+            next_step = "Task complete — ready for your next task. A new message does not bypass its applicable authorization."
+        if reporting.get("objective_closeout_unverified") is True and state != "needs_you":
+            state = "unknown"
+            current_step = "Recorded campaign success; whole-objective completion is not verified."
+            next_step = "Related work or decision evidence remains unresolved or unavailable; inspect Details before starting another objective."
         accomplishment = ("Worker reported: " + recorded_result if recorded_result else
             (public_results[-1][:900] if public_results else "No detailed result was recorded."))
         accomplishment += " Current records: " + (" ".join(facts[-12:])[:800] or "No completed stage recorded.")
@@ -646,13 +766,33 @@ def _console_jobs(campaigns, attention):
             "gained": (("Worker reported at return: " + recorded_gain[:900] + " Current deployment is not established here.")
                 if recorded_gain else "No verified capability gain is recorded here; stage results are listed separately."),
             "return_recap": recap,
-            "parent_campaign_id": reporting.get("parent_campaign_id"),
+            "parent_campaign_id": next(iter(parents)) if len(parents) == 1 else None,
             "created_at": campaign.get("created_at"),
             "source_record_sha256": reporting.get("record_sha256"),
+            "blocker_identity": reporting.get("blocker_identity"),
+            "objective_closeout": closeout,
             "next": next_step,
             "creates_authority": False})
         if campaign.get("objective_source"):
             jobs[-1]["objective_source"] = dict(campaign["objective_source"])
+    # A newer or still-open child is not superseded by an older root closeout.
+    # Historical rejected attempts remain history; nothing is deleted/relabelled.
+    for job in jobs:
+        closure = job.get("objective_closeout")
+        if not closure:
+            continue
+        descendants = {job["job_id"]}
+        for _ in range(len(jobs)):
+            descendants.update(j["job_id"] for j in jobs if parent_links[j["job_id"]] & descendants)
+        closed_at = console_timestamp(closure.get("recorded_at"))
+        if any(j["job_id"] != job["job_id"] and j["job_id"] in descendants
+               and (j["state"] == "needs_you" or not j["historical"] or not console_timestamp(j.get("created_at"))
+                    or not closed_at or console_timestamp(j["created_at"]) > closed_at
+                    or _console_material_boundary(next(c for c in campaigns if c['campaign_id']==j['job_id'])) is None
+                    or _console_material_boundary(next(c for c in campaigns if c['campaign_id']==j['job_id'])) > closed_at)
+               for j in jobs):
+            job["objective_closeout"] = None
+            job["next"] = "Related work remains or began after this recorded closeout; whole-objective completion is not established."
     ordered = [item["campaign_id"] for item in ordered_campaigns(campaigns)]
     primary = primary_campaign_id(campaigns)
     jobs.sort(key=lambda job: (job["job_id"] != primary, ordered.index(job["job_id"])))
@@ -673,7 +813,7 @@ def developer_console_projection(chat_service):
         "observed_at": datetime.now(timezone.utc).isoformat(),
         "build": {field: build.get(field)
                   for field in ("mode", "release_id", "manifest_sha256")},
-        "campaigns": _console_campaigns(campaigns),
+        "campaigns": _console_campaigns(campaigns, attention),
         "attention": _console_attention(attention),
         "components": _console_components(components),
         "repository": _console_repository(repository),
@@ -1041,6 +1181,7 @@ def build_identity():
     files = [Path(__file__), STATIC_DIR / "index.html", STATIC_DIR / "app.js",
              STATIC_DIR / "app.css", STATIC_DIR / "dev-console" / "index.html",
              STATIC_DIR / "dev-console" / "console.js",
+             STATIC_DIR / "dev-console" / "outcome.js",
              STATIC_DIR / "dev-console" / "worker.js",
              STATIC_DIR / "dev-console" / "worker-native.js",
              STATIC_DIR / "dev-console" / "console.css"]
@@ -1855,6 +1996,7 @@ class FawkesAppHandler(BaseHTTPRequestHandler):
             "/dev-console/": ("dev-console/index.html", "text/html; charset=utf-8"),
             "/dev-console/index.html": ("dev-console/index.html", "text/html; charset=utf-8"),
             "/dev-console/console.js": ("dev-console/console.js", "text/javascript; charset=utf-8"),
+            "/dev-console/outcome.js": ("dev-console/outcome.js", "text/javascript; charset=utf-8"),
             "/dev-console/console.css": ("dev-console/console.css", "text/css; charset=utf-8"),
             "/dev-console/worker.js": ("dev-console/worker.js", "text/javascript; charset=utf-8"),
             "/dev-console/worker-native.js": ("dev-console/worker-native.js", "text/javascript; charset=utf-8"),
@@ -1939,7 +2081,7 @@ class FawkesConsoleApprovalHandler(FawkesAppHandler):
             return self._serve_static("/console-login")
         if path == "/preview-login.js":
             return self._serve_static(path)
-        allowed = {"/dev-console", "/dev-console/", "/dev-console/console.js",
+        allowed = {"/dev-console", "/dev-console/", "/dev-console/console.js", "/dev-console/outcome.js",
             "/dev-console/console.css", "/attention-binding.js", "/native-attention.js",
             "/native-attention.css", "/api/status", "/api/development/dev-console",
             "/api/development/console-updates", "/api/development/worker", "/dev-console/worker.js",

@@ -628,9 +628,17 @@
         public_result: safeText(raw.public_result, 500),
         parent_campaign_id: safeIdentifier(raw.parent_campaign_id, 180),
         source_record_sha256: safeIdentifier(raw.source_record_sha256, 64),
+        blocker_identity: /^[a-f0-9]{64}$/.test(raw.blocker_identity || "") ? raw.blocker_identity : null,
         next: safeText(raw.next, 500), worker: normalizeWorker(raw.worker),
         successful: raw.successful, historical: raw.historical, creates_authority: false
       };
+      const closure = raw.objective_closeout;
+      job.objective_closeout = isObject(closure) && closure.scope === "whole_user_objective"
+        && safeIdentifier(closure.event_id,180) && safeText(closure.result,1200)
+        && Number.isFinite(Date.parse(closure.recorded_at))
+        && Number.isInteger(closure.gate_count) && closure.gate_count > 0
+        ? {event_id:safeIdentifier(closure.event_id,180), result:safeText(closure.result,1200),
+           recorded_at:closure.recorded_at, gate_count:closure.gate_count} : null;
       if (!job.job_id || !job.objective || !["working", "waiting", "done", "failed", "closed", "unknown", "needs_you"].includes(job.state)
           || !job.recorded_status || typeof job.successful !== "boolean"
           || typeof job.historical !== "boolean"
@@ -2091,6 +2099,12 @@
     const shell = documentRef.getElementById("dev-console");
     if (!shell) return null;
     const stopContentScrolling=attachContentScrolling(documentRef);
+    const outcomePrompt=root.FawkesObjectiveOutcome
+      ? root.FawkesObjectiveOutcome.boot(documentRef,()=>{
+          navigation.go(4);
+          const input=documentRef.getElementById("worker-reply");
+          if(input)input.focus({preventScroll:true});
+        }) : null;
     const fetchImpl = value.fetch || (typeof root.fetch === "function" ? root.fetch.bind(root) : null);
     const pages = Array.from(documentRef.querySelectorAll(".console-page"));
     const indicators = Array.from(documentRef.querySelectorAll("[data-page-target]"));
@@ -2322,6 +2336,7 @@
         Number.isFinite(nowMs) ? nowMs : clock());
       renderAttention(documentRef, attentionSlot, visibleAttention);
       renderJobs(documentRef, activityFeed, projection.jobs || [], state);
+      if (outcomePrompt) outcomePrompt.update(projection, state);
       if (!explicitCampaignSelection || !(projection.campaigns || []).some(c => c.campaign_id === selectedCampaignId)) {
         selectedCampaignId = projection.current_campaign_id || "";
         explicitCampaignSelection = false;
@@ -2815,6 +2830,7 @@
         stopped = true;
         navigation.destroy();
         stopContentScrolling();
+        if(outcomePrompt)outcomePrompt.stop();
         if (pollTimer !== null && root.clearInterval) root.clearInterval(pollTimer);
         if (timingTimer !== null && root.clearInterval) root.clearInterval(timingTimer);
         clearProjectionTimers();
