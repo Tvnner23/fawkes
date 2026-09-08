@@ -798,16 +798,33 @@ class ConsoleUpdateStore:
         except FileNotFoundError as exc:
             raise KeyError("console update not found") from exc
 
-    def save(self, *, idempotency_key, projection, campaign_id=None):
+    def save(self, *, idempotency_key, projection, campaign_id=None, final_message=None):
         if not self._KEY.fullmatch(str(idempotency_key or "")):
             raise ValueError("console update idempotency key is malformed")
         if campaign_id is not None and (not isinstance(campaign_id, str)
                 or not any(c.get("campaign_id") == campaign_id for c in projection.get("campaigns", []))):
             raise ValueError("selected campaign is not in the authenticated observation")
         projection = dict(projection, selected_campaign_id=campaign_id or projection.get("current_campaign_id"))
+        message_binding = None
+        if final_message is not None:
+            if (not isinstance(final_message, dict) or final_message.get('role') != 'worker'
+                    or final_message.get('phase') != 'final_answer'
+                    or not isinstance(final_message.get('text'), str)):
+                raise ValueError('an actual final Worker message is required')
+            body = final_message['text'].encode('utf-8')
+            if not body or len(body) > DEV_CONSOLE_MAX_UPDATE_BYTES or '\0' in final_message['text']:
+                raise ValueError('complete final message exceeds clipboard capacity; it was not truncated')
+            if hashlib.sha256(body).hexdigest() != final_message.get('content_sha256'):
+                raise ValueError('final Worker message digest mismatch')
+            message_binding = {key: final_message.get(key) for key in
+                               ('thread_id', 'turn_id', 'message_id', 'content_sha256')}
+            if any(not isinstance(value, str) or not value or len(value) > 200 for value in message_binding.values()):
+                raise ValueError('final Worker message identity unavailable')
         def bound(record):
             if campaign_id is not None and record.get("campaign_id") != campaign_id:
                 raise ValueError("retry key is already bound to a different campaign snapshot")
+            if record.get('worker_message') != message_binding:
+                raise ValueError('retry key is already bound to a different message or update kind')
             return record
         with self._lock:
             self._prepare()
@@ -833,8 +850,8 @@ class ConsoleUpdateStore:
                             snapshot_id, expected_idempotency_sha256=key_digest))
                     else:
                         created_at = datetime.now(timezone.utc).isoformat()
-                        content = _console_update_text(
-                            projection, created_at=created_at, snapshot_id=snapshot_id)
+                        content = (final_message['text'] if final_message is not None else
+                                   _console_update_text(projection, created_at=created_at, snapshot_id=snapshot_id))
                         record = {"schema_version": "fawkes.console_update.v1",
                                   "snapshot_id": snapshot_id, "created_at": created_at,
                                   "projection_observed_at": projection.get("observed_at"),
@@ -844,6 +861,8 @@ class ConsoleUpdateStore:
                                       content.encode("utf-8")).hexdigest(),
                                   "content": content, "creates_authority": False,
                                   "creates_continuing_authority": False}
+                        if message_binding is not None:
+                            record['worker_message'] = message_binding
                         record["record_sha256"] = hashlib.sha256(self._canonical(record)).hexdigest()
                         self._write_atomic(record_path, self._canonical(record))
                     self._write_atomic(key_path, (snapshot_id + "\n").encode("ascii"))
@@ -959,6 +978,7 @@ def build_identity():
     files = [Path(__file__), STATIC_DIR / "index.html", STATIC_DIR / "app.js",
              STATIC_DIR / "app.css", STATIC_DIR / "dev-console" / "index.html",
              STATIC_DIR / "dev-console" / "console.js",
+             STATIC_DIR / "dev-console" / "worker.js",
              STATIC_DIR / "dev-console" / "console.css"]
     digest = hashlib.sha256()
     for item in files: digest.update(item.read_bytes())
@@ -1096,6 +1116,24 @@ class FawkesAppHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
         path = parsed.path
+        reply_match = re.fullmatch(r'/api/development/worker/replies/([0-9a-f-]{36})', path)
+        if path == '/api/development/worker' or reply_match:
+            if not self._require_auth(record_rider_activity=False): return
+            try:
+                worker = getattr(self.server, 'worker_conversation', None)
+                if worker is None:
+                    raise RuntimeError('The same-session Worker connection is not configured.')
+                query = parse_qs(parsed.query, keep_blank_values=True)
+                if set(query) - {'cursor'} or any(len(v) != 1 for v in query.values()):
+                    raise ValueError('invalid Worker page query')
+                value = worker.reply_status(reply_match.group(1)) if reply_match else worker.projection(query.get('cursor', [None])[0])
+                self._json(200, value)
+            except (ValueError, FileNotFoundError) as exc:
+                self._json(400, {'error': {'code': 'invalid_worker_request', 'message': str(exc)}})
+            except Exception:
+                self._json(503, {'error': {'code': 'worker_not_connected', 'message':
+                    'This Worker conversation is not available through its supported shared connection. Retained text is last known; no reply is confirmed.'}})
+            return
         if path == "/api/status":
             self._json(200, {"service": "fawkes", "state": "ready", "build": build_identity()})
             return
@@ -1319,6 +1357,36 @@ class FawkesAppHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
+        if path in {'/api/development/worker/replies', '/api/development/worker/clipboard'}:
+            if not self._require_auth(record_rider_activity=False): return
+            if not self._require_attention_decision_auth(): return
+            try:
+                from src.runtime.worker_conversation import unique
+                length = int(self.headers.get('Content-Length', '0'))
+                if length <= 0 or length > 100_000: raise ValueError('Worker input exceeds its bound')
+                request = json.loads(self.rfile.read(length), object_pairs_hook=unique)
+                if not isinstance(request, dict): raise ValueError('Worker request must be an object')
+                worker = getattr(self.server, 'worker_conversation', None)
+                if worker is None: raise RuntimeError('Worker connection is not configured')
+                if path.endswith('/replies'):
+                    if set(request) != {'thread_id', 'reply_id', 'text'}:
+                        raise ValueError('only reply text and exact identities are accepted')
+                    value = worker.send_reply(**request)
+                else:
+                    if set(request) != {'thread_id', 'message_id', 'content_sha256', 'idempotency_key'}:
+                        raise ValueError('only the displayed final message identity is accepted')
+                    final = worker.exact_final(**{k:v for k,v in request.items() if k != 'idempotency_key'})
+                    projection = developer_console_projection(self.server.chat_service)
+                    value = self.server.console_clipboard_delivery.send(
+                        idempotency_key=request['idempotency_key'], projection=projection,
+                        campaign_id=projection.get('current_campaign_id'), final_message=final)
+                self._json(201, value)
+            except (ValueError, ChatServiceError) as exc:
+                self._json(400, {'error': {'code': 'invalid_worker_request', 'message': str(exc)}})
+            except Exception:
+                self._json(503, {'error': {'code': 'worker_delivery_unconfirmed', 'message':
+                    'Delivery is not confirmed. Preserve this request identity; do not send a duplicate. Saved updates and replies remain available.'}})
+            return
         if path == "/api/session":
             try:
                 credential = self._read_json().get("credential", "")
@@ -1676,6 +1744,7 @@ class FawkesAppHandler(BaseHTTPRequestHandler):
             "/dev-console/index.html": ("dev-console/index.html", "text/html; charset=utf-8"),
             "/dev-console/console.js": ("dev-console/console.js", "text/javascript; charset=utf-8"),
             "/dev-console/console.css": ("dev-console/console.css", "text/css; charset=utf-8"),
+            "/dev-console/worker.js": ("dev-console/worker.js", "text/javascript; charset=utf-8"),
         }
         if path.startswith("/assets/presence/"):
             filename = path.removeprefix("/assets/presence/")
@@ -1760,7 +1829,7 @@ class FawkesConsoleApprovalHandler(FawkesAppHandler):
         allowed = {"/dev-console", "/dev-console/", "/dev-console/console.js",
             "/dev-console/console.css", "/attention-binding.js", "/native-attention.js",
             "/native-attention.css", "/api/status", "/api/development/dev-console",
-            "/api/development/console-updates"}
+            "/api/development/console-updates", "/api/development/worker", "/dev-console/worker.js"}
         exact = path.startswith("/api/development/attention/") and path.count("/") == 4
         # The console history uses the passive owner only. Never expose the
         # collection's lifecycle-maintenance branch through this narrow surface.
@@ -1768,7 +1837,8 @@ class FawkesConsoleApprovalHandler(FawkesAppHandler):
             parse_qs(urlparse(self.path).query, keep_blank_values=True) == {"observation": ["true"]})
         update = bool(re.fullmatch(
             r"/api/development/console-updates/console-update-[a-f0-9]{64}(?:\.txt)?", path))
-        if path in allowed or exact or update or history:
+        worker_reply = bool(re.fullmatch(r'/api/development/worker/replies/[0-9a-f-]{36}', path))
+        if path in allowed or exact or update or history or worker_reply:
             return super().do_GET()
         self._json(404, {"error": {"code": "unavailable_in_console"}})
 
@@ -1788,7 +1858,8 @@ class FawkesConsoleApprovalHandler(FawkesAppHandler):
                     and "/attention/" in path and path.endswith("/decision")
                     and path.count("/") == 7)
         if path in {"/api/session", "/api/session/logout",
-                    "/api/development/console-updates"} or decision:
+                    "/api/development/console-updates", "/api/development/worker/replies",
+                    "/api/development/worker/clipboard"} or decision:
             return super().do_POST()
         self._json(405, {"error": {"code": "unavailable_in_console"},
                          "creates_authority": False, "creates_continuing_authority": False})
@@ -1798,10 +1869,11 @@ class FawkesAppServer(ThreadingHTTPServer):
     daemon_threads = True
 
     def __init__(self, address, *, chat_service, app_token, app_session_store=None,
-                 console_update_store=None, console_clipboard_writer=None):
+                 console_update_store=None, console_clipboard_writer=None, worker_conversation=None):
         super().__init__(address, FawkesAppHandler)
         self.chat_service = chat_service
         self.app_token = app_token
+        self.worker_conversation = worker_conversation
         state_root = Path(os.environ.get("FAWKES_DEVELOPMENT_ROOT", Path.cwd()))
         self.app_session_store = app_session_store or BrowserSessionStore(
             os.environ.get("FAWKES_APP_SESSION_ROOT", state_root / "database" / "app_sessions"))

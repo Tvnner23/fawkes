@@ -37,6 +37,7 @@
           <li><button type="button" data-page-target="1" aria-label="Campaign Status">Campaign</button></li>
           <li><button type="button" data-page-target="2" aria-label="Repository View">Repo</button></li>
           <li><button type="button" data-page-target="3" aria-label="Architecture View">System map</button></li>
+          <li><button type="button" data-page-target="4" aria-label="Worker conversation">Worker</button></li>
         </ol>
         <button id="next-page" type="button" aria-label="Next page">›</button>
       </nav>
@@ -46,8 +47,8 @@
       <section class="console-page" data-page="0" aria-label="Activity Summary">
         <div class="summary-toolbar">
           <span id="summary-selection" class="meta">Current objective</span>
-          <button id="save-console-update" type="button" class="primary-button">Send update to PC</button>
-          <p id="update-result" aria-live="polite">Send saves the current update and copies it to your Windows clipboard. Wait for Windows confirmation, then press Ctrl+V on your PC.</p>
+          <button id="reply-to-worker" type="button" class="primary-button">Reply to Worker</button>
+          <p id="update-result" aria-live="polite">Open Worker for the full conversation, replies and Send update to PC. Historical updates remain below.</p>
         </div>
         <div class="page-scroll" tabindex="0">
           <div class="page-intro">
@@ -227,6 +228,36 @@
           </div>
         </div>
       </section>
+      <section id="worker-page" class="console-page" data-page="4" aria-label="Worker conversation" hidden>
+        <div class="worker-toolbar">
+          <span id="worker-session-state" class="meta" aria-live="polite">Worker connection not verified</span>
+          <button id="worker-send-update" type="button" class="primary-button" disabled>Send update to PC</button>
+          <p id="worker-copy-result" aria-live="polite">Copies the latest complete final message to Windows, verbatim. Wait for Windows confirmation before Ctrl+V.</p>
+        </div>
+        <div id="worker-reading" class="page-scroll" tabindex="0">
+          <p id="worker-session-identity" class="meta"></p>
+          <p class="meta">This conversation connection is separate from the approval-managed execution feed in the header. Existing permission controls remain unchanged.</p>
+          <h2>Latest final message</h2>
+          <p id="worker-final-identity" class="meta">No verified final message</p>
+          <pre id="worker-final-message" class="worker-message" tabindex="0">The actual Worker conversation is not available yet.</pre>
+          <details id="worker-conversation-details">
+            <summary>Our conversation</summary>
+            <div id="worker-conversation-history"></div>
+            <button id="worker-older" type="button" class="secondary-button" disabled>Earlier messages</button>
+            <button id="worker-newest" type="button" class="secondary-button">Latest conversation</button>
+          </details>
+        </div>
+        <form id="worker-reply-form" class="worker-reply-form">
+          <label for="worker-reply">Reply to this Worker</label>
+          <textarea id="worker-reply" rows="2" maxlength="16000" spellcheck="true" placeholder="Type your reply. Sending does not approve a permission request."></textarea>
+          <div class="worker-reply-actions">
+            <button id="worker-keyboard-toggle" type="button" class="secondary-button" aria-expanded="false">Keyboard</button>
+            <button id="worker-send-reply" type="submit" class="primary-button" disabled>Send reply</button>
+          </div>
+          <p id="worker-reply-result" aria-live="polite">Replies require this exact session to be connected.</p>
+          <div id="worker-keyboard" class="worker-keyboard" aria-label="Touchscreen keyboard" hidden></div>
+        </form>
+      </section>
     </section>
 
     <footer class="console-footer">
@@ -239,5 +270,6 @@
   <script src="/attention-binding.js"></script>
   <script src="/native-attention.js"></script>
   <script src="/dev-console/console.js"></script>
+  <script src="/dev-console/worker.js"></script>
 </body>
 </html>

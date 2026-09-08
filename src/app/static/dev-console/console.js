@@ -16,7 +16,8 @@
     "Activity Summary",
     "Campaign Status",
     "Repository View",
-    "Architecture View"
+    "Architecture View",
+    "Worker conversation"
   ]);
   const ATTENTION_ID = /^attention-[a-f0-9]{64}$/;
   const HEX_DIGEST = /^[a-f0-9]{64}$/;
@@ -2542,7 +2543,12 @@
         drawCombined(); navigation.activity();
       });
     }
-    saveUpdate.addEventListener("click", () => { navigation.activity(); savePreparedUpdate(); });
+    if (saveUpdate) saveUpdate.addEventListener("click", () => { navigation.activity(); savePreparedUpdate(); });
+    const workerEntry = documentRef.getElementById("reply-to-worker");
+    if (workerEntry) workerEntry.addEventListener("click", () => {
+      const target = indicators.find(item => item.dataset.pageTarget === "4");
+      if (target) target.click();
+    });
     preparedUpdates.addEventListener("click", async (event) => {
       const button = event.target.closest && event.target.closest("[data-copy-update-id]");
       if (!button || !fetchImpl) return;
@@ -2599,7 +2605,7 @@
     shell.addEventListener("keydown", (event) => {
       navigation.activity();
       if (event.target.closest && event.target.closest(
-        ".code-scroll, input, select, button, .gesture-surface")) return;
+        ".code-scroll, input, textarea, select, button, [contenteditable]:not([contenteditable='false']), .gesture-surface")) return;
       if (event.key === "ArrowLeft") { event.preventDefault(); navigation.previous(); }
       if (event.key === "ArrowRight") { event.preventDefault(); navigation.next(); }
     });
@@ -2607,7 +2613,7 @@
     stack.addEventListener("pointerdown", (event) => {
       pointerStart = {x: event.clientX, y: event.clientY,
         codeScroll: Boolean(event.target.closest
-          && event.target.closest(".code-scroll, .gesture-surface"))};
+          && event.target.closest(".code-scroll, .gesture-surface, input, textarea, select, [contenteditable]:not([contenteditable='false'])"))};
       navigation.activity();
     });
     stack.addEventListener("pointerup", (event) => {

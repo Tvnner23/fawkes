@@ -92,10 +92,10 @@ class DevConsoleStaticContractTests(unittest.TestCase):
         cls.css = CSS_PATH.read_text(encoding="utf-8")
         cls.javascript = JAVASCRIPT_PATH.read_text(encoding="utf-8")
 
-    def test_console_has_four_bounded_pages_and_defaults_to_summary(self):
+    def test_console_has_five_bounded_pages_and_defaults_to_summary(self):
         self.assertIn('id="dev-console" data-idle-seconds="60"', self.html)
         pages = re.findall(r'class="console-page" data-page="(\d)"([^>]*)', self.html)
-        self.assertEqual([value for value, _ in pages], ["0", "1", "2", "3"])
+        self.assertEqual([value for value, _ in pages], ["0", "1", "2", "3", "4"])
         self.assertNotIn("hidden", pages[0][1])
         self.assertTrue(all("hidden" in attributes for _, attributes in pages[1:]))
         for heading in (
