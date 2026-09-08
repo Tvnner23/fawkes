@@ -32,7 +32,10 @@ DEV_CONSOLE_MAX_ACTIVITY_ITEMS = 64
 DEV_CONSOLE_MAX_ATTENTION_ITEMS = 16
 DEV_CONSOLE_MAX_REPOSITORY_FILES = 32
 DEV_CONSOLE_MAX_TEXT_BYTES = 2_048
-DEV_CONSOLE_MAX_RESPONSE_BYTES = 256_000
+# Complete G15 history after integration measured 300,321 UTF-8 bytes; a full
+# 32-slot heavy-history projection measured 312,402 bytes. Keep bounded response
+# headroom without dropping campaigns, clocks, recaps or roadmap evidence.
+DEV_CONSOLE_MAX_RESPONSE_BYTES = 512_000
 DEV_CONSOLE_MAX_UPDATES = 40
 DEV_CONSOLE_MAX_UPDATE_BYTES = 96_000
 DEV_CONSOLE_COMPONENTS = (
