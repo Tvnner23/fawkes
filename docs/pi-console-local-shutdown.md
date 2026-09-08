@@ -93,3 +93,22 @@ cancel a hold, then complete one hold; confirm Pi shutdown while Windows/Worker
 remain available. Disconnect the bridge for the local-only check only after the
 accepted installation is stable. Reconnect/startup and draft recovery are checked
 after Tanner powers the Pi on again.
+# Interrupted rollout and automatic connection follow-up
+
+The first accepted shutdown rollout wrote its exact files and fixed poweroff-only
+policy, but timed out before a fresh browser observation. Its failed journal stays
+failed. The completed rollback restored notification73e4379, verified Summary,
+and withdrew that operation's exact policy. No physical shutdown was executed.
+
+A newly reviewed successor uses a new operation identity, references the failed
+installation, and requires one verified completed rollback plus matching current
+rollback files before installing. It verifies the old policy is absent before
+creating the new exact grant. Neither journal nor authoritative application is
+replayed or relabeled. Failed/stale/unverified rollout output is not success.
+
+Before PC cutover, the installer verifies the accepted bridge script/task and
+starts that existing task if stopped. Fresh bridge activity must follow cutover;
+old status-file text is not a running-process check. Rollback-mode output explicitly
+says rollback and does not claim the shutdown control is installed. The Windows
+Worker startup bundle is installed only after the Pi's accepted readiness passes.
+The real hold/cancel/offline shutdown and reboot observations remain user checks.

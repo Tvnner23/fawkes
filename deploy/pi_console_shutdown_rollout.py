@@ -42,7 +42,31 @@ def validate(payload):
  policy=decode(payload['policy'])
  if action=='install' and policy!=files['pi_console_power_policy.py']:raise ValueError('Root helper differs from accepted product')
  if action=='rollback' and not re.fullmatch('[a-f0-9]{64}',payload['linked_install_operation'] or ''):raise ValueError('Rollback requires exact install lineage')
+ if action=='install' and payload['linked_install_operation'] is not None and not re.fullmatch('[a-f0-9]{64}',payload['linked_install_operation']):raise ValueError('Recovery requires exact failed install lineage')
  return files,policy
+def recovery_lineage(payload):
+ """A new accepted successor may follow a verified completed rollback only.
+
+ Never reset/rewrite/reuse the failed journal. New payload => new operation.
+ """
+ linked=payload['linked_install_operation']
+ if payload['action']!='install' or linked is None:return None
+ path=ROOT/('power-rollout-'+linked+'.json')
+ if path.is_symlink() or not path.is_file() or path.stat().st_size>100000:raise ValueError('Exact failed journal unavailable')
+ original=path.read_bytes();old=json.loads(original)
+ if old.get('state')!='failed_retained_for_reconciliation' or old.get('action')!='install' or old.get('operation_id')!=linked:raise ValueError('Not the bound interrupted install')
+ completed=[]
+ for p in ROOT.glob('power-rollout-*.json'):
+  if p.is_symlink() or p.stat().st_size>100000:raise ValueError('Ambiguous rollout journal')
+  row=json.loads(p.read_text());result=row.get('result',{})
+  if row.get('action')=='rollback' and row.get('state')=='completed' and (result.get('policy_result') or {}).get('operation_id')==linked:
+   completed.append((p,row))
+ if len(completed)!=1:raise ValueError('Require one completed exact rollback before successor install')
+ p,row=completed[0];result=row['result']
+ if result.get('fresh_accepted_ready') is not True or result.get('policy_result',{}).get('policy_present') is not False:raise ValueError('Rollback was not verified')
+ for name in OLD_FILES:
+  if result['installed_files'].get(name)!=payload['preimages'].get(name) or sha((ROOT/name).read_bytes())!=payload['preimages'].get(name):raise ValueError('Rollback postimage changed: '+name)
+ return {'failed_operation_id':linked,'failed_journal_sha256':sha(original),'completed_rollback_operation_id':row['operation_id'],'completed_rollback_sha256':sha(p.read_bytes())}
 def policy_action(source,action,operation):
  # The root helper has one fixed path/rule and checks the actual inspected Pi.
  r=subprocess.run(['/usr/bin/sudo','-n','/usr/bin/python3','-c',source.decode('utf-8'),action,operation],capture_output=True,text=True,timeout=20)
@@ -107,6 +131,7 @@ def run(payload):
    if not active:raise RuntimeError('Previously completed rollout is not currently active')
    return {**old['result'],'companion_observation':observed,'service_active':True,'policy_result':policy_now,'duplicate_reconciled_without_restart':True}
   preimages(files,payload)
+  recovered=recovery_lineage(payload)
   backup=ROOT/('accepted-power-backup-'+time.strftime('%Y%m%dT%H%M%S')+'-'+operation[:12]);backup.mkdir(mode=0o700)
   for name in files:
    p=ROOT/name
@@ -115,13 +140,14 @@ def run(payload):
     shutil.copy2(p,backup/name)
   journal={'operation_id':operation,'state':'prepared','action':payload['action'],'snapshot':payload['snapshot'],
    'commit':payload['commit'],'acceptance_receipt':payload['acceptance_receipt'],'backup':str(backup),
-   'prior_files':{name:sha((ROOT/name).read_bytes()) if (ROOT/name).exists() else None for name in files},'policy_created':False}
+   'prior_files':{name:sha((ROOT/name).read_bytes()) if (ROOT/name).exists() else None for name in files},'policy_created':False,'recovery_lineage':recovered}
   durable(journal_path,journal)
   try:
    if payload['action']=='install':
     # Password is entered only at the remote native tty. It is never read by
     # Python, supplied in a URL/argument or retained in our evidence.
     subprocess.run(['/usr/bin/sudo','-v','-p','Pi sudo password (native terminal only):\n'],check=True,timeout=180)
+    if recovered:policy_action(policy,'verify-absent',payload['linked_install_operation'])
     result=policy_action(policy,'install',operation);journal['policy_created']=result['changed'];journal['policy_result']=result
     durable(journal_path,journal)
    else:

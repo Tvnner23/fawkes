@@ -1,0 +1,19 @@
+[Unit]
+Description=Fawkes private pinned Worker app-server
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=exec
+UMask=0077
+WorkingDirectory=/home/tvnner/fawkes
+ExecStart=/home/tvnner/fawkes/.venv/bin/python -B /home/tvnner/.local/share/fawkes-worker-link/pi_worker_link.py server
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=5
+KillMode=control-group
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

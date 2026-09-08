@@ -1,4 +1,39 @@
 # Pi Worker conversation and Windows handoff
+
+## Automatic connection recovery (September 15 successor)
+
+The reviewed Worker-link bundle replaces the old transient-only handover with
+an enabled, private systemd user service using the same pinned Codex executable
+and Unix socket. The server starts empty: startup does not send a prompt,
+approval, queued reply, or start a model turn. An exclusive native client resumes
+only thread `01a06f22-5b47-72c1-9b9c-b70157913436` with gpt-6-astra/xhigh and
+workspace-write/on-request. The same account/authentication is retained.
+
+A Windows logon task opens the supported remote TUI in an interactive terminal;
+its wrapper retries interrupted connections and waits if another native owner
+exists. It never kills an owner. Explicit `/quit` ends that wrapper rather than
+inventing new work; the next normal Windows sign-in launches it again. A current
+standalone TUI requires one initial safe `/quit` after its turn ends; the waiting
+accepted launcher then takes over the exact same conversation. It cannot hot-swap
+an executing standalone session. Keep the bridge and Worker terminal open.
+
+The server restarts on failure with a finite systemd restart-rate limit. A dead
+private socket is retained by inode under a timestamped name; a live, changed or
+foreign socket is never replaced. The installed bundle is hash-bound to its
+accepted integration, so later unrelated Git commits do not break connection
+startup. Missing credentials, changed client bytes, unexpected service ownership,
+or exhausted restart limits remain explicit failures, not fake connection success.
+Normal reconnection still requires the PC/WSL and signed-in Windows session.
+Stored history alone is not a live Worker; existing freshness and queue checks
+continue to govern the Pi's reply/approval controls. Offline tests are not a
+physical reboot or proof that an interrupted model operation was resumed.
+
+The installed 0.153.4 `--remote unix://PATH` path is retained. Official reference:
+[Codex App Server](https://learn.chatgpt.com/docs/app-server). The transport is
+experimental; no new client installation, TCP listener, account or API key is used.
+
+This section supersedes the transient/no-boot-enablement description below only
+after the independently accepted bundle is adopted. It does not erase that history.
 ## Shared page menu on Worker
 
 Tanner's G22 amendment replaces Worker's Back button with the same hamburger
