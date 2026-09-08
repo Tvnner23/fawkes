@@ -1,0 +1,122 @@
+{
+  "schema_version": 1,
+  "fixture_purpose": "synthetic disposable native Archive ambiguity acceptance; never canonical history",
+  "instance_id": "acceptance-phoenix",
+  "rider_principal_id": "rider:acceptance",
+  "cases": [
+    {
+      "case_id": "material_recent_conversations", "kind": "generation",
+      "query": "What was in that conversation?", "request_timestamp": "2026-08-31T15:00:00+00:00", "rider_timezone": "America/Chicago",
+      "records": [
+        {"evidence_id": "networking-recent", "conversation_id": "networking-thread", "created_at": "2026-08-28T15:00:00+00:00", "local_lexical_terms": ["subnet", "professor"]},
+        {"evidence_id": "lsua-recent", "conversation_id": "lsua-thread", "created_at": "2026-08-29T15:00:00+00:00", "local_lexical_terms": ["course", "schedule"]}
+      ]
+    },
+    {
+      "case_id": "material_verified_reference_targets", "kind": "generation",
+      "query": "Which one was the thing we discussed about Atlas?",
+      "records": [
+        {"evidence_id": "atlas-seed", "conversation_id": "atlas-thread", "created_at": "2026-08-20T10:00:00+00:00", "local_lexical_terms": ["atlas"],
+         "native_reference_relationships": [
+           {"relationship": "reference_to", "qualification_status": "verified", "target": {"archive_id": "acceptance-archive-atlas-person", "message_id": "acceptance-message-atlas-person"}},
+           {"relationship": "reference_to", "qualification_status": "verified", "target": {"archive_id": "acceptance-archive-atlas-course", "message_id": "acceptance-message-atlas-course"}}
+         ]},
+        {"evidence_id": "atlas-person", "conversation_id": "faculty-thread", "created_at": "2026-08-18T10:00:00+00:00", "local_lexical_terms": ["professor"]},
+        {"evidence_id": "atlas-course", "conversation_id": "course-thread", "created_at": "2026-08-19T10:00:00+00:00", "local_lexical_terms": ["course"]}
+      ]
+    },
+    {
+      "case_id": "material_repeated_project", "kind": "generation",
+      "query": "Which one was that Atlas project?",
+      "records": [
+        {"evidence_id": "atlas-home", "conversation_id": "home-project", "created_at": "2026-08-12T10:00:00+00:00", "local_lexical_terms": ["atlas", "project", "network"]},
+        {"evidence_id": "atlas-course-project", "conversation_id": "course-project", "created_at": "2026-08-13T10:00:00+00:00", "local_lexical_terms": ["atlas", "project", "course"]}
+      ]
+    },
+    {
+      "case_id": "material_same_content_different_conversations", "kind": "generation",
+      "query": "Which one had that router decision?",
+      "records": [
+        {"evidence_id": "router-lab", "conversation_id": "lab-thread", "created_at": "2026-08-14T10:00:00+00:00", "local_lexical_terms": ["router", "decision"]},
+        {"evidence_id": "router-home", "conversation_id": "home-thread", "created_at": "2026-08-15T10:00:00+00:00", "local_lexical_terms": ["router", "decision"]}
+      ]
+    },
+    {
+      "case_id": "answerable_explicit_date", "kind": "generation",
+      "query": "What did we discuss on 2026-08-28?", "request_timestamp": "2026-08-31T15:00:00+00:00", "rider_timezone": "America/Chicago",
+      "records": [
+        {"evidence_id": "dated-target", "conversation_id": "dated-thread", "created_at": "2026-08-28T15:00:00+00:00", "local_lexical_terms": ["networking"]},
+        {"evidence_id": "dated-outside", "conversation_id": "other-thread", "created_at": "2026-08-27T15:00:00+00:00", "local_lexical_terms": ["networking"]}
+      ]
+    },
+    {
+      "case_id": "answerable_yesterday", "kind": "generation",
+      "query": "What was the course item from yesterday?", "request_timestamp": "2026-08-31T15:00:00+00:00", "rider_timezone": "America/Chicago",
+      "records": [
+        {"evidence_id": "yesterday-course", "conversation_id": "course-yesterday", "created_at": "2026-08-30T15:00:00+00:00", "local_lexical_terms": ["course"]},
+        {"evidence_id": "today-course", "conversation_id": "course-today", "created_at": "2026-08-31T15:00:00+00:00", "local_lexical_terms": ["course"]}
+      ]
+    },
+    {
+      "case_id": "answerable_earlier_thread", "kind": "generation",
+      "query": "Earlier in that conversation about Atlas", "max_thread_hops": 2,
+      "records": [
+        {"evidence_id": "thread-0", "conversation_id": "one-thread", "created_at": "2026-08-21T10:00:00+00:00", "local_lexical_terms": ["context"]},
+        {"evidence_id": "thread-1", "conversation_id": "one-thread", "created_at": "2026-08-21T10:01:00+00:00", "local_lexical_terms": ["context"]},
+        {"evidence_id": "thread-2", "conversation_id": "one-thread", "created_at": "2026-08-21T10:02:00+00:00", "local_lexical_terms": ["atlas"]},
+        {"evidence_id": "thread-3", "conversation_id": "one-thread", "created_at": "2026-08-21T10:03:00+00:00", "local_lexical_terms": ["later"]}
+      ]
+    },
+    {
+      "case_id": "answerable_safe_joint_yesterday", "kind": "generation", "safe_joint_ambiguity": true,
+      "query": "Summarize the two planning notes from yesterday", "request_timestamp": "2026-08-31T15:00:00+00:00", "rider_timezone": "America/Chicago",
+      "records": [
+        {"evidence_id": "joint-morning", "conversation_id": "planning-thread", "created_at": "2026-08-30T14:00:00+00:00", "local_lexical_terms": ["planning"]},
+        {"evidence_id": "joint-evening", "conversation_id": "planning-thread", "created_at": "2026-08-30T22:00:00+00:00", "local_lexical_terms": ["planning"]}
+      ]
+    },
+    {
+      "case_id": "answerable_denied_neighbor", "kind": "generation",
+      "query": "What was next after Atlas?",
+      "records": [
+        {"evidence_id": "allowed-seed", "conversation_id": "private-thread", "created_at": "2026-08-22T10:00:00+00:00", "local_lexical_terms": ["atlas"]},
+        {"evidence_id": "restricted-next", "conversation_id": "private-thread", "created_at": "2026-08-22T10:01:00+00:00", "local_lexical_terms": ["secret"], "privacy_classification": "restricted"},
+        {"evidence_id": "allowed-later", "conversation_id": "private-thread", "created_at": "2026-08-22T10:02:00+00:00", "local_lexical_terms": ["followup"]}
+      ]
+    },
+    {
+      "case_id": "answerable_no_match", "kind": "generation",
+      "query": "unmentioned observatory",
+      "records": [
+        {"evidence_id": "lexical-noise", "conversation_id": "noise-thread", "created_at": "2026-08-23T10:00:00+00:00", "local_lexical_terms": ["router", "course", "project"]}
+      ]
+    },
+    {
+      "case_id": "verified_multihop_reference", "kind": "generation", "query": "the thing we discussed about Atlas", "max_thread_hops": 2,
+      "records": [
+        {"evidence_id": "hop-seed", "conversation_id": "hop-a", "created_at": "2026-08-24T10:00:00+00:00", "local_lexical_terms": ["atlas"], "native_reference_relationships": [{"relationship": "reference_to", "qualification_status": "verified", "target": {"archive_id": "acceptance-archive-hop-middle", "message_id": "acceptance-message-hop-middle"}}]},
+        {"evidence_id": "hop-middle", "conversation_id": "hop-b", "created_at": "2026-08-24T11:00:00+00:00", "local_lexical_terms": ["middle"], "native_reference_relationships": [{"relationship": "thread_related", "qualification_status": "verified", "target": {"archive_id": "acceptance-archive-hop-target", "message_id": "acceptance-message-hop-target"}}]},
+        {"evidence_id": "hop-target", "conversation_id": "hop-c", "created_at": "2026-08-24T12:00:00+00:00", "local_lexical_terms": ["outcome"]},
+        {"evidence_id": "unrelated-branch", "conversation_id": "hop-noise", "created_at": "2026-08-24T13:00:00+00:00", "local_lexical_terms": ["unrelated"]}
+      ]
+    },
+    {
+      "case_id": "source_original_preference", "kind": "preference", "query": "network plan",
+      "records": [
+        {"evidence_id": "original", "conversation_id": "source-thread", "created_at": "2026-08-25T10:00:00+00:00", "representation_provenance": {"representation_class": "source_original", "relationships": []}},
+        {"evidence_id": "copy", "conversation_id": "copy-thread", "created_at": "2026-08-25T11:00:00+00:00", "representation_provenance": {"representation_class": "duplicate_copy", "relationships": [{"relationship": "duplicate_of", "qualification_status": "verified", "target": {"archive_id": "acceptance-archive-original", "message_id": "acceptance-message-original"}}]}}
+      ]
+    },
+    {
+      "case_id": "duplicate_and_contradiction_projection", "kind": "projection", "query": "Which router claim was that?",
+      "records": [
+        {"evidence_id": "claim-a", "conversation_id": "claim-one", "created_at": "2026-08-26T10:00:00+00:00", "body": "The router uses wired backhaul", "contradiction_group_id": "router-claim"},
+        {"evidence_id": "claim-b", "conversation_id": "claim-two", "created_at": "2026-08-26T11:00:00+00:00", "body": "The router uses wired backhaul", "contradiction_group_id": "router-claim"}
+      ]
+    },
+    {
+      "case_id": "stale_projection", "kind": "projection", "query": "Atlas", "stale": true,
+      "records": [{"evidence_id": "stale-record", "conversation_id": "stale-thread", "created_at": "2026-08-27T10:00:00+00:00", "body": "Atlas status"}]
+    }
+  ]
+}

@@ -1010,7 +1010,10 @@ Be direct, useful, proactive, and conversational.
         # and any earlier model-assisted turn work, immediately before the call.
         if transmission is not None:
             try:
-                transmission.provider_bodies(route=route, selected_evidence=selected)
+                verified_bodies = transmission.provider_bodies(route=route, selected_evidence=selected)
+                self.context_composer.verify_transmission(composition,
+                    verified_bodies=verified_bodies, manifest_id=transmission.manifest["manifest_id"])
+                user_prompt = self.context_composer.render(composition)
             except Exception as exc:
                 if composition is None:
                     raise

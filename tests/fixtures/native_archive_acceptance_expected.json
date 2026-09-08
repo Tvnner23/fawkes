@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "annotations_are_not_runtime_input": true,
+  "thresholds": {
+    "material_ambiguity_recall_min": 0.90,
+    "false_positive_clarification_rate_max": 0.10,
+    "safe_joint_inclusion_accuracy_min": 1.0,
+    "choice_quality_min": 1.0,
+    "reference_traversal_precision_min": 0.90,
+    "temporal_interpretation_accuracy_min": 0.95,
+    "fail_closed_security_min": 1.0,
+    "determinism_min": 1.0
+  },
+  "cases": [
+    {"case_id": "material_recent_conversations", "requires_clarification": true, "expected_choice_ids": ["lsua-recent", "networking-recent"]},
+    {"case_id": "material_verified_reference_targets", "requires_clarification": true, "expected_choice_ids": ["atlas-course", "atlas-person"]},
+    {"case_id": "material_repeated_project", "requires_clarification": true, "expected_choice_ids": ["atlas-course-project", "atlas-home"]},
+    {"case_id": "material_same_content_different_conversations", "requires_clarification": true, "expected_choice_ids": ["router-home", "router-lab"]},
+    {"case_id": "answerable_explicit_date", "requires_clarification": false, "expected_generated_ids": ["dated-target"], "expected_temporal": {"kind": "on_date", "start": "2026-08-28T05:00:00+00:00", "end": "2026-08-29T04:59:59.999999+00:00"}},
+    {"case_id": "answerable_yesterday", "requires_clarification": false, "expected_generated_ids": ["yesterday-course"], "expected_temporal": {"kind": "yesterday", "start": "2026-08-30T05:00:00+00:00", "end": "2026-08-31T04:59:59.999999+00:00"}},
+    {"case_id": "answerable_earlier_thread", "requires_clarification": false, "expected_generated_ids": ["thread-0", "thread-1", "thread-2"]},
+    {"case_id": "answerable_safe_joint_yesterday", "requires_clarification": false, "safe_joint": true, "expected_generated_ids": ["joint-evening", "joint-morning"], "expected_temporal": {"kind": "yesterday", "start": "2026-08-30T05:00:00+00:00", "end": "2026-08-31T04:59:59.999999+00:00"}},
+    {"case_id": "answerable_denied_neighbor", "requires_clarification": false, "expected_generated_ids": ["allowed-seed", "allowed-later"], "forbidden_ids": ["restricted-next"]},
+    {"case_id": "answerable_no_match", "requires_clarification": false, "expected_generated_ids": []},
+    {"case_id": "verified_multihop_reference", "expected_generated_ids": ["hop-middle", "hop-seed", "hop-target"], "forbidden_ids": ["unrelated-branch"]},
+    {"case_id": "source_original_preference", "forbidden_ids": ["copy"]},
+    {"case_id": "duplicate_and_contradiction_projection"},
+    {"case_id": "stale_projection"}
+  ]
+}
