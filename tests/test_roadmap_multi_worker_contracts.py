@@ -12,6 +12,7 @@ class MultiWorkerRoadmapContractTests(unittest.TestCase):
     def setUpClass(cls):
         cls.roadmap = (DOCS / "CANONICAL_ROADMAP.md").read_text()
         cls.current = (DOCS / "CURRENT_IMPLEMENTATION.md").read_text()
+        cls.historical = (DOCS / "CURRENT_IMPLEMENTATION_2026-09-08_CAPTURE.md").read_text()
         cls.exchange = (DOCS / "PHOENIX_WORKER_EXCHANGE.md").read_text()
         cls.assurance = (DOCS / "PHOENIX_ASSURANCE.md").read_text()
         cls.recovery = (DOCS / "PHOENIX_CHECKPOINT_RECOVERY.md").read_text()
@@ -21,9 +22,13 @@ class MultiWorkerRoadmapContractTests(unittest.TestCase):
 
     def test_hybrid_roadmap_preserves_phase_status_and_order(self):
         self.assertIn("hybrid structure", self.roadmap)
-        self.assertIn("Phase 8", self.current)
-        self.assertIn("is complete", self.current)
-        self.assertIn("Phase 9 Production Context", self.current)
+        # Phase claims belong to their preserved historical slice, not a new
+        # present-tense certification by the current execution pointer.
+        self.assertIn("CURRENT_IMPLEMENTATION_2026-09-08_CAPTURE.md", self.current)
+        self.assertIn("does **not** independently", self.current)
+        self.assertIn("Phase 8", self.historical)
+        self.assertIn("is complete", self.historical)
+        self.assertIn("Phase 9 Production Context", self.historical)
         self.assertLess(
             self.roadmap.index("## Phase 9 —"),
             self.roadmap.index("## Cross-cutting integration gate — Phoenix Worker Exchange"),

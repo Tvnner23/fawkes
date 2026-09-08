@@ -24,6 +24,8 @@ def main():
     if len(sys.argv) < 2:
         print("Usage:")
         print('  python src/fawkes.py list')
+        print('  python src/fawkes.py chat')
+        print('  python src/fawkes.py app')
         print('  python src/fawkes.py search "TERM"')
         print('  python src/fawkes.py retrieve ARCHIVE_ID')
         print('  python src/fawkes.py verify ARCHIVE_ID')
@@ -42,7 +44,12 @@ def main():
     command = sys.argv[1].lower()
     args = sys.argv[2:]
 
-    if command == "list":
+    if command in {"chat", "app"}:
+        module = "src.runtime.chat_cli" if command == "chat" else "src.app.server"
+        result = subprocess.run([sys.executable, "-m", module, *args], cwd=ROOT)
+        sys.exit(result.returncode)
+
+    elif command == "list":
         run_script("list_archive.py")
 
     elif command == "search":

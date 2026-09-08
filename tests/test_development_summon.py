@@ -85,7 +85,11 @@ class DevelopmentSummonTests(unittest.TestCase):
         self.assertIn("exact_worker_bodies_remain_in_worker_exchange", board)
         self.assertIn("hidden_chain_of_thought_exposed === false", board)
         self.assertIn("const immutableIdentity=canonicalAttentionIdentity(attention)", javascript)
-        self.assertIn("function canonicalAttentionIdentity(attention)", javascript)
+        # The accepted identity owner is shared, not an inline duplicate.
+        self.assertIn("const {canonicalAttentionIdentity,", javascript)
+        self.assertIn("window.FawkesAttentionBinding || {}", javascript)
+        identity = (ROOT / "src/app/static/attention-binding.js").read_text()
+        self.assertIn("function canonicalAttentionIdentity(attention)", identity)
         self.assertIn("body:JSON.stringify({choice,identity:immutableIdentity})", javascript)
 
     @patch("src.runtime.production_control.subprocess.run")

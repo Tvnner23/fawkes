@@ -1,5 +1,28 @@
 # Current Project Fawkes Implementation
 
+## Active Alpha priority — 2026-09-17
+
+Tanner-only v0.1 Alpha is the active objective. Broad repository cleanup is
+checkpointed and deferred except for concrete Alpha dependencies. The dated
+September 13 pointer below is retained evidence, not today's task order.
+Accepted release-safety source is integrated at
+`094dfb6265b6e92dfc1df2be1443ede1a3109925`, above Workshop/privacy
+`c22f19e2685953c072e580bcac26d063079e8c97`. The release's normal non-force
+backup was verified in private `Tvnner23/fawkes` on September 17. Source
+acceptance and backup are not installation or successful live Alpha use.
+
+The operating Pi remains `5f112a049b2b704bd115572c62cbae39347e3e80` with
+Worker-link repair `6a5ab48`. Tanner physically confirmed cancellation, clean
+shutdown, automatic reconnection and a reply from the moved Pi. This Alpha work
+does not reinstall the console, change its bridge or switch Worker threads.
+
+The remaining readiness changes require their own exact independent acceptance
+and integration; native Alpha installation remains separate. See
+[Alpha verification boundaries](../ALPHA_RELEASE_VERIFICATION.md) and the
+[startup/trial checklist](../ALPHA_STARTUP_TRIAL.md). Credentials, coherent
+owned-state backup/restore, live desktop/iPhone observations and the seven-day
+real-use trial are not established by synthetic source checks.
+
 ## Current execution pointer — reconciled 2026-09-13
 
 The private Pi console milestone is complete at accepted, integrated and deployed

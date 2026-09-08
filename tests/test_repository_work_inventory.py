@@ -2,6 +2,7 @@
 import hashlib
 import json
 import stat
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -20,7 +21,13 @@ def sources():
     return json.loads(raw)
 
 
-def inventory_errors(value, root, source=None):
+def inventory_errors(value, root=None, source=None):
+    """Validate immutable capture; optionally verify its original material root.
+
+    An accepted successor checkout is not the historical unfinished checkout.
+    Omitting root validates the complete source-bound capture, not preservation
+    of external original files. Material verification remains explicit.
+    """
     source = sources() if source is None else source
     errors, seen = [], set()
     if value.get("schema_version") != 1:
@@ -34,7 +41,6 @@ def inventory_errors(value, root, source=None):
     for group in value["groups"]:
         for item in group["items"]:
             relative, node = item["path"], item["node"]
-            path = root / relative
             if relative in seen:
                 errors.append("duplicate path")
             seen.add(relative)
@@ -44,6 +50,11 @@ def inventory_errors(value, root, source=None):
             elif (group["name"] != original["group"] or node != original["node"]
                   or item.get("git_state") != original["git_state"]):
                 errors.append("source classification/material mismatch: " + relative)
+            if item["independent_acceptance"] != "not established for this retained delta":
+                errors.append("unsupported acceptance claim")
+            if root is None:
+                continue
+            path = root / relative
             if path.is_symlink() or not path.is_file() or not path.resolve().is_relative_to(root.resolve()):
                 errors.append("missing or unsupported node: " + relative)
                 continue
@@ -52,8 +63,6 @@ def inventory_errors(value, root, source=None):
                       "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
             if actual != node:
                 errors.append("material drift: " + relative)
-            if item["independent_acceptance"] != "not established for this retained delta":
-                errors.append("unsupported acceptance claim")
     if len(seen) != value["path_count"]:
         errors.append("coverage mismatch")
     if seen != set(source["nodes_by_path"]):
@@ -83,10 +92,36 @@ class RepositoryWorkInventoryTests(unittest.TestCase):
         self.inventory = json.loads((DOCS / "repository-work-inventory.json").read_text())
         self.evidence = json.loads((DOCS / "repository-status-evidence.json").read_text())
 
-    def test_all_retained_nodes_match_original_bytes_types_modes(self):
-        self.assertEqual([], inventory_errors(self.inventory, ROOT))
+    def test_historical_capture_matches_all_original_source_bindings(self):
+        self.assertEqual([], inventory_errors(self.inventory))
         self.assertEqual(126, self.inventory["path_count"])
         self.assertEqual(0, self.inventory["git_staged_paths"])
+
+    def test_optional_original_material_check_detects_bytes_mode_and_missing_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "sample.txt"
+            path.write_bytes(b"retained original\n")
+            path.chmod(0o644)
+            node = {"type":"regular", "mode":0o644, "byte_length":18,
+                    "sha256":hashlib.sha256(path.read_bytes()).hexdigest()}
+            source = {"base_commit":"original", "status_sha256":"status",
+                "source_inventory_sha256":"inventory", "source_inventory_locator":"capture",
+                "git_staged_paths":0, "nodes_by_path":{"sample.txt":{
+                    "group":"fixture", "node":node, "git_state":"untracked"}}}
+            value = {key:source[key] for key in ("base_commit", "status_sha256",
+                "source_inventory_sha256", "source_inventory_locator", "git_staged_paths")}
+            value.update(schema_version=1, path_count=1, groups=[{"name":"fixture", "items":[{
+                "path":"sample.txt", "node":node, "git_state":"untracked",
+                "independent_acceptance":"not established for this retained delta"}]}])
+            self.assertEqual([], inventory_errors(value, root, source))
+            path.write_bytes(b"changed")
+            self.assertIn("material drift: sample.txt", inventory_errors(value, root, source))
+            path.write_bytes(b"retained original\n")
+            path.chmod(0o600)
+            self.assertIn("material drift: sample.txt", inventory_errors(value, root, source))
+            path.unlink()
+            self.assertIn("missing or unsupported node: sample.txt", inventory_errors(value, root, source))
 
     def test_duplicate_missing_and_changed_nodes_are_detected(self):
         value = json.loads(json.dumps(self.inventory))
