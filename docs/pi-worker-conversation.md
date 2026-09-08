@@ -37,11 +37,20 @@ Permissions, Matrix wake and native approval ownership are unchanged.
 
 ## Explicit same-session connection
 
-The console uses official Codex 0.153.4's existing `app-server proxy --sock PATH`
-against an already-running local shared app-server. Its executable and the actual
+The console uses WebSocket JSON-RPC over official Codex 0.153.4's direct
+`app-server --listen unix://PATH` listener. The old raw `app-server proxy --sock`
+does not perform that listener's HTTP/WebSocket upgrade: native qualification
+reproduced its timeout, then verified the real upgrade and read-only metadata.
+No model turn or thread resume was part of this qualification. Its executable and the actual
 Unix peer executable are pinned to SHA-256
 `56ef98ab4032d317ab26e9b5e5a175650717351edb16ed9cde0cb6d1734d62da`.
 The control directory must be owned by the same OS user and private (0700).
+The same connected socket's peer UID/PID/executable are checked before the HTTP
+upgrade; no TCP, DNS, redirect, bearer credential, or external retrieval is used.
+The existing websocket-client dependency supplies RFC framing. Independent bounds
+apply before oversized frame allocation, to fragmented messages and aggregate wire
+bytes, frame count, handshake length, outgoing bytes and the absolute RPC deadline.
+Only protocol ping/pong handling is automatic, never application approvals.
 The thread UUID and cwd are launcher configuration, never browser-selected.
 Read-only projection uses `thread/read`, `thread/items/list`, and
 `thread/turns/list`; reply submission uses experimental `thread/queue/add` with
@@ -61,15 +70,27 @@ the standalone TUI to the supported local shared server and remote TUI. Preserve
 the thread/account, gpt-6-astra/xhigh configuration, workspace-write/on-request
 profile and existing additional recovery directory. Do not run a second active
 owner of this thread. A prepared native handover must first confirm the old TUI
-has closed, then use official daemon start and `codex resume --remote unix://…`
+has closed, then use the direct listener and `codex resume --remote unix://…`
 without a prompt. This is not permission to inject terminal keys or manufacture a
 user reply. Actual reception and clipboard paste remain human acceptance gates.
 
+The npm-installed client lacks the managed standalone installation required by
+`app-server daemon start`. Do not manufacture that installation layout or silently
+install/update Codex. The reviewed handover uses a dedicated transient user unit
+`fawkes-console-worker-app-server.service`, the existing pinned executable, a
+private control directory and no automatic restart, thread load, model call or boot
+enablement. A pre-existing mismatched unit/socket is a reconciliation error.
+Socket readiness requires exact service PID/executable/arguments and a successful
+read-only protocol response, not just a socket filename. Native stderr belongs to
+the host journal; inspect only correlated bounded diagnostics on failure.
+The console remains dependent on the PC and the explicitly attached Worker.
+
 ## Bounded observation and honest limits
 
-Each proxy RPC has a 12-second deadline, 8 MB frame, 16 MB aggregate input and
-2,000-frame bound; writes are nonblocking/deadline-bound. Only the short-lived
-proxy is cleaned up. Unknown approval requests are not answered. Public history
+Each socket RPC has a 12-second absolute deadline, 8 MB frame/message,
+16 MB aggregate input, 2,000-frame, 8 KiB handshake and 500 KB aggregate output
+bound. Socket reads and writes share the remaining deadline. Only that client
+connection is closed. Unknown approval requests are not answered. Public history
 uses 20-item pages, explicit Earlier/Latest browsing and a 480 KB projection bound.
 The latest-final lookup checks eight recent turns and only completed-turn final
 items. A missing final or over-limit complete message is unavailable, never
@@ -105,7 +126,8 @@ Tanner's passed pinch, scrolling, Idle/wake and real approval evidence only wher
 unchanged. Acceptance requires independent read-only review of this exact product
 and separate launcher/handover proposal before canonical application and rollout.
 
-Rollback restores the preserved accepted G15 preview and companion binding, not
+Rollback restores the preserved accepted G17 `608553d` preview and companion
+binding; its older G15 rollback is retained too. Rollback does not reset
 Git history, clipboard contents, saved snapshots, reply intents or native touch
 configuration. Preserve any queued reply and its identity for reconciliation;
 never replay it as part of rollback. The Pi still needs the PC/bridge awake.
