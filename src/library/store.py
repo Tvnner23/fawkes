@@ -18,7 +18,10 @@ from src.library.storage import (
 
 
 ROOT = Path(__file__).resolve().parent.parent.parent
-LIBRARY_ROOT = ROOT / "library"
+# Use the verified launcher's physical state root, not the release symlink.
+# Explicit roots and stored references still pass strict symlink confinement.
+STATE_ROOT = Path(os.environ.get("FAWKES_RUNTIME_STATE_ROOT") or ROOT)
+LIBRARY_ROOT = STATE_ROOT / "library"
 ORIGINALS_DIR = LIBRARY_ROOT / "originals"
 SOURCES_DIR = LIBRARY_ROOT / "sources"
 EXTRACTIONS_DIR = LIBRARY_ROOT / "extractions"
