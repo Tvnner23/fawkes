@@ -300,6 +300,28 @@ body { background: radial-gradient(circle at 50% 0, #152332, var(--background) 6
 .mode-switch button { color: var(--ink); background: var(--panel); border: 1px solid var(--line); }
 .mode-switch button[aria-pressed="true"] { color: var(--background); background: var(--teal); border-color: var(--teal); }
 .roadmap-inventory { min-width: 0; }
+.combined-view { min-width: 0; }
+.combined-view[hidden] { display: none; }
+.combined-controls { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+.combined-controls button { min-width: 48px; min-height: 48px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel); color: var(--ink); font: inherit; }
+.combined-view label { display: block; margin: 6px 0; color: var(--muted); font-size: 0.8rem; }
+.combined-view select { width: 100%; min-height: 48px; background: var(--panel); color: var(--ink); border: 1px solid var(--line); font: inherit; }
+.combined-map { width: 100%; height: auto; display: block; background: #101b25; border: 1px solid var(--line); border-radius: 13px; touch-action: none; user-select: none; overflow: hidden; }
+.combined-node rect { fill: var(--panel); stroke: var(--line); stroke-width: 2; rx: 10; }
+.combined-node { cursor: pointer; }
+.combined-node text { fill: var(--ink); text-anchor: middle; font-size: 18px; pointer-events: none; }
+.combined-node .combined-status { font-size: 14px; fill: var(--muted); }
+.combined-node:focus-visible { outline: none; }
+.combined-node.planned rect, .combined-node.unknown rect { stroke-dasharray: 5 4; }
+.combined-node.partial rect, .combined-node.progressing rect { stroke: var(--amber); }
+.combined-node.selected rect, .combined-node:focus-visible rect { stroke: var(--teal); stroke-width: 4; }
+.combined-edge { fill: none; stroke: #87a5b9; stroke-width: 1.5; }
+.combined-edge.grouping, .combined-edge.association { stroke-dasharray: 2 5; opacity: 0.6; }
+.combined-edge.prerequisite { stroke-dasharray: 7 4; stroke: var(--amber); }
+.combined-edge-label { fill: #c5d9df; font-size: 12px; paint-order: stroke; stroke: #101b25; stroke-width: 4px; }
+.stage-timer { fill: var(--teal); text-anchor: middle; font-size: 14px; font-variant-numeric: tabular-nums; }
+.job-card.failed, .job-card.closed { border-color: var(--red); }
+.job-card.waiting { border-color: var(--amber); }
 .roadmap-toolbar { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 9px; margin-bottom: 8px; }
 .roadmap-toolbar label { color: var(--muted); font-size: 0.78rem; }
 .roadmap-toolbar input { min-height: 48px; min-width: 0; padding: 8px 10px; color: var(--ink); background: var(--panel); border: 1px solid var(--line); border-radius: 10px; font: inherit; }

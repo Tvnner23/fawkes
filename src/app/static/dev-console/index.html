@@ -191,6 +191,23 @@
                 </g>
               </svg>
             </div>
+            <section id="combined-view" class="combined-view" hidden aria-label="Connected system and capability map">
+              <details><summary>Connection legend</summary><p class="meta">Solid arrows: architectural relations. Dashed arrows: documented prerequisites. Dotted lines: topic grouping or source association, not ownership. Runtime is separate from maturity.</p></details>
+              <div id="combined-controls" class="combined-controls gesture-surface" role="group" aria-label="Combined map controls">
+                <button type="button" data-combined-control="in" aria-label="Zoom in">+</button>
+                <button type="button" data-combined-control="out" aria-label="Zoom out">−</button>
+                <button type="button" data-combined-control="left" aria-label="Pan left">←</button>
+                <button type="button" data-combined-control="right" aria-label="Pan right">→</button>
+                <button type="button" data-combined-control="up" aria-label="Pan up">↑</button>
+                <button type="button" data-combined-control="down" aria-label="Pan down">↓</button>
+                <button type="button" data-combined-control="reset">Reset zoom</button>
+              </div>
+              <label for="combined-select">Find and focus a component, phase or track</label>
+              <select id="combined-select" aria-label="Select any Combined map entity"></select>
+              <p id="combined-coverage" class="coverage-state"></p>
+              <svg id="combined-map" class="combined-map gesture-surface" viewBox="0 0 660 400"
+                   tabindex="0" role="group" aria-label="Connected map. Drag to pan, pinch or use buttons to zoom; select a group to expand it."></svg>
+            </section>
             <section id="roadmap-inventory" class="roadmap-inventory" hidden>
               <div class="roadmap-toolbar">
                 <label for="roadmap-filter">Find a capability</label>

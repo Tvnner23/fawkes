@@ -90,6 +90,140 @@ def _utc(value):
     return parsed.astimezone(timezone.utc)
 
 
+def console_timestamp(value):
+    """Accept only explicit, timezone-bound lifecycle timestamps."""
+    if not isinstance(value, str) or not re.fullmatch(
+            r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})", value):
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
+    except ValueError:
+        return None
+
+
+def campaign_console_reporting(record, managed=(), *, observed_at=None):
+    """Read-only facts and intervals; reservations never prove provider execution.
+
+    Missing start boundaries (notably legacy Reviewer, Apply and Git records)
+    deliberately remain unknown. Event order is retained, never timestamp-sorted
+    into a plausible lifecycle. No historical record is repaired here.
+    """
+    observed_at = observed_at or datetime.now(timezone.utc).isoformat()
+    now = console_timestamp(observed_at)
+    events = record.get("events", [])
+    runs = record.get("builder_runs", [])
+    reviews = record.get("reviews", [])
+    intervals = []
+
+    def interval(stage, attempt, start, end, sources, state, verified=False, valid_order=True):
+        begin, finish = console_timestamp(start), console_timestamp(end)
+        reliable = bool(valid_order and now and begin and begin <= now and
+                        ((finish and begin <= finish <= now) if end is not None else verified))
+        duration = int(((finish or now) - begin).total_seconds()) if reliable else None
+        intervals.append({"stage": stage, "attempt": attempt, "started_at": start,
+            "ended_at": end, "state": state, "duration_seconds": duration,
+            "active_verified": bool(reliable and end is None and verified),
+            "source_references": sources})
+
+    starts = [(index, event) for index, event in enumerate(events)
+              if event.get("kind") == "builder_invocation_started"]
+    for index, event in starts[-3:]:
+        attempt = (event.get("detail") or {}).get("iteration")
+        if not isinstance(attempt, int) or isinstance(attempt, bool):
+            continue
+        following = events[index + 1:]
+        boundary = next((i for i, item in enumerate(following)
+                         if item.get("kind") == "builder_invocation_started"), len(following))
+        next_start = console_timestamp(following[boundary].get("created_at")) if boundary < len(following) else None
+        following = following[:boundary]
+        run = next((item for item in runs if item.get("iteration") == attempt), {})
+        end = run.get("completed_at")
+        source = [f"events/{event['event_id']}"]
+        if run:
+            source.append(f"builder_runs/iteration={attempt}/completed_at")
+        scope = (event.get("detail") or {}).get("task_scope_id")
+        active = next((item for item in managed
+            if item.get("invocation_id") == str(scope) + "-appserver"
+            and item.get("worker_id") == (record.get("builder") or {}).get("worker_id")
+            and item.get("state") == "running"), None)
+        # The caller's managed projection checks the exact current process identity.
+        # Last prose/tool activity is not a heartbeat: a quiet live process stays live.
+        stamp = console_timestamp((active or {}).get("updated_at"))
+        verified = bool(not run and now and stamp and stamp <= now
+            and record.get("status") == "builder_in_progress"
+            and scope and record.get("active_builder_task_scope_id") == scope)
+        interval("worker", attempt, event.get("created_at"), end, source,
+                 run.get("status", "running" if verified else "unobserved"), verified,
+                 valid_order=boundary == len(events[index + 1:]) or bool(
+                     next_start and console_timestamp(end) and console_timestamp(end) <= next_start))
+        retained = next((item for item in following if item.get("kind") == "builder_return_retained"), None)
+        prepared = next((item for item in following if item.get("kind") == "logical_review_request_prepared"), None)
+        review = next((item for item in reviews if item.get("iteration") == attempt), {})
+        if retained:
+            # Queue ends at dispatch preparation, not at an inferred process launch.
+            interval("review_queue", attempt, retained.get("created_at"),
+                (prepared or {}).get("created_at"),
+                [f"events/{item['event_id']}" for item in (retained, prepared) if item],
+                "dispatched" if prepared else "waiting")
+        transports = [(number, item) for number, item in enumerate(record.get("review_transport_attempts", []))
+                      if item.get("iteration") == attempt]
+        for number, transport in transports[-4:]:
+            # Only the transport close is recorded by the current lifecycle owner.
+            interval("review", attempt, None, transport.get("created_at"),
+                [f"review_transport_attempts/{number}/created_at"], "transport_" + transport.get("status", "unknown"))
+        if review or (not transports and retained):
+            interval("review", attempt, None, review.get("received_at"),
+                [f"reviews/iteration={attempt}"] if review else source,
+                review.get("status", "waiting"))
+
+    for stage, field in (("application", "application_evidence"), ("git", "git_commit_evidence")):
+        evidence = record.get(field) or {}
+        if evidence:
+            interval(stage, record.get("iteration", 0), None, None, [field], evidence.get("status", "unknown"))
+    terminal = record.get("status") in {"succeeded", "failed_safe", "denied", "expired", "cancelled"}
+    # Outcome is a close event, not an interval from an invented preceding stage.
+    if terminal:
+        interval("terminal", record.get("iteration", 0), None,
+            events[-1].get("created_at") if events else None,
+            [f"events/{events[-1]['event_id']}"] if events else [], record["status"])
+
+    last_run = runs[-1] if runs else {}
+    last_review = reviews[-1] if reviews else {}
+    application = record.get("application_evidence") or {}
+    git = record.get("git_commit_evidence") or {}
+    facts = []
+    for run in runs[-3:]:
+        iteration = run.get("iteration", "?")
+        facts.append(f"Worker attempt {iteration}: {run.get('status') or 'unknown'}.")
+        failure = (run.get("failure") or {}).get("code")
+        if failure:
+            facts.append(f"Attempt {iteration} failure: {str(failure)[:120]}.")
+        checks = run.get("validation_evidence") or []
+        if checks:
+            passed = sum(item.get("exit_status") == 0 for item in checks)
+            facts.append(f"Attempt {iteration} validation: {passed}/{len(checks)} checks passed.")
+    if last_review:
+        facts.append(f"Independent review: {last_review.get('status') or 'unknown'}; "
+                     f"{len(last_review.get('acceptance_condition_ids_satisfied') or [])} conditions satisfied.")
+    if application:
+        facts.append(f"Application: {application.get('status') or 'unknown'}; "
+                     f"{len(application.get('applied_paths') or [])} paths recorded.")
+        paths = application.get("applied_paths") or []
+        if paths:
+            facts.append("Applied paths: " + ", ".join(str(path) for path in paths[:4])[:350])
+    if git:
+        facts.append(f"Git: {git.get('status') or 'unknown'}. Recorded HEAD: {git.get('head') or 'unknown'}.")
+    return {"record_sha256": record.get("record_sha256"), "observed_at": observed_at,
+        "intervals": intervals[:24], "facts": facts[:12],
+        "worker_status": last_run.get("status"),
+        "worker_task_scope_id": last_run.get("task_scope_id"),
+        "review_status": last_review.get("status"),
+        "application_status": application.get("status"), "git_status": git.get("status"),
+        "parent_campaign_id": record.get("parent_campaign_id"),
+        "source_references": ["builder_runs", "reviews", "application_evidence", "git_commit_evidence"],
+        "creates_authority": False}
+
+
 def campaign_activity_projection(record):
     """Derive a bounded, body-free activity view from durable campaign state."""
     builder_by_iteration = {item["iteration"]: item for item in record.get("builder_runs", [])}

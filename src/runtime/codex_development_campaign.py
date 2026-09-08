@@ -2319,6 +2319,9 @@ class CodexDevelopmentCampaign:
 
     def presentation(self, campaign_id):
         record = self.store.load(campaign_id)
+        from src.runtime.autonomy_supervision import campaign_console_reporting
+        managed = self.managed_worker_activity_projection(campaign_id)
+        recap = self._console_return_recap(record)
         attempts = record.get("review_transport_attempts", [])
         observations = {"builder_invocations": len(record["builder_runs"]),
             "logical_reviews": len(record["reviews"]),
@@ -2347,9 +2350,52 @@ class CodexDevelopmentCampaign:
             },
             "operational_learning_observations": observations,
             "live_activity": campaign_activity_projection(record),
-            "managed_worker_activity": self.managed_worker_activity_projection(campaign_id),
+            "managed_worker_activity": managed,
+            "console_reporting": {**campaign_console_reporting(record, managed), "return_recap": recap},
             "automatic_promotion": False, "derived_from_campaign_record": True,
             "exact_worker_evidence_remains_in_exchange": True, "creates_authority": False}
+
+    def _console_return_recap(self, record):
+        """Read only the three public return sections, with exact package lineage.
+
+        Historical Worker statements are not present acceptance/deployment facts.
+        No authority expiry is renewed and no Exchange record is written here.
+        """
+        runs = record.get("builder_runs") or []
+        if not runs or not runs[-1].get("return_report_id"):
+            return None
+        run = runs[-1]
+        try:
+            report = self.exchange._load("reports", run["return_report_id"])
+            package = self.exchange._load("packages", run["package_id"])
+            expected_reply = {"package_id": package["package_id"],
+                "source_report_id": package["source_report_id"],
+                "source_report_sha256": package["source_report_sha256"],
+                "source_package_sha256": package["record_sha256"]}
+            if (report.get("in_reply_to") != expected_reply
+                    or report.get("task_scope_id") != run.get("task_scope_id")
+                    or package.get("task_scope_id") != run.get("task_scope_id")
+                    or report.get("sender", {}).get("worker_id") != record["builder"]["worker_id"]
+                    or package.get("recipient", {}).get("worker_id") != record["builder"]["worker_id"]):
+                raise ValueError("public return lineage mismatch")
+            fields = {}
+            for section in report.get("sections", []):
+                key = section.get("section_id")
+                if key not in {"accomplished", "gained", "next"}:
+                    continue
+                content = section.get("content")
+                if key in fields or not isinstance(content, str):
+                    raise ValueError("ambiguous public return section")
+                if hashlib.sha256(content.encode("utf-8")).hexdigest() != section.get("content_sha256"):
+                    raise ValueError("public return section digest mismatch")
+                # Presentation excerpts only; exact originals remain in Exchange.
+                encoded = content.encode("utf-8")
+                fields[key] = encoded[:900].decode("utf-8", errors="ignore") + (
+                    " … [excerpt]" if len(encoded) > 900 else "")
+            return {**fields, "report_id": report["report_id"], "record_sha256": report["record_sha256"],
+                "reported_at": report.get("created_at"), "status": "worker_reported_historical"}
+        except (KeyError, ValueError, PermissionError, OSError, TypeError):
+            return {"status": "unavailable"}
 
     def list_presentations(self):
         """Project current campaigns while retaining typed legacy-contract visibility."""

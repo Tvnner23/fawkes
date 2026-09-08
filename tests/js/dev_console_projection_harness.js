@@ -463,10 +463,18 @@ class FakeElement {
   setAttribute(name, value) {
     this.attributes[name] = String(value);
     if (name === 'class') this.className = value;
+    if (name.startsWith('data-')) this.dataset[name.slice(5).replace(/-([a-z])/g, (_, ch) => ch.toUpperCase())] = String(value);
   }
+  getBoundingClientRect() { return {left: 0, top: 0, width: 660, height: 400}; }
   removeAttribute(name) { delete this.attributes[name]; }
   matches(selector) {
     if (selector.includes(',')) return selector.split(',').some((part) => this.matches(part.trim()));
+    if (selector.startsWith('#')) return this.id === selector.slice(1);
+    if (/^\.[a-z-]+$/.test(selector)) return this.classList.contains(selector.slice(1));
+    if (/^[a-z]+\.[a-z-]+$/.test(selector)) {
+      const [tag, name] = selector.split('.'); return this.tagName === tag && this.classList.contains(name);
+    }
+    if (/^\[data-[a-z-]+\]$/.test(selector)) return this.dataset[selector.slice(6, -1).replace(/-([a-z])/g, (_, ch) => ch.toUpperCase())] !== undefined;
     if (selector === '.detail') return this.classList.contains('detail');
     if (selector === '.code-scroll') return this.classList.contains('code-scroll');
     if (selector === '.gesture-surface') return this.classList.contains('gesture-surface');
@@ -578,6 +586,15 @@ function fakeDocument() {
   const architectureOverview = make('div', 'architecture-overview');
   architectureOverview.append(architectureMap);
   const roadmapInventory = make('section', 'roadmap-inventory');
+  const combinedView = make('section', 'combined-view');
+  const combinedMap = make('svg', 'combined-map'); combinedMap.className = 'combined-map gesture-surface';
+  const combinedSelect = make('select', 'combined-select');
+  const combinedCoverage = make('p', 'combined-coverage');
+  const combinedControls = make('div', 'combined-controls');
+  for (const action of ['in', 'out', 'left', 'right', 'up', 'down', 'reset']) {
+    const button = make('button'); button.dataset.combinedControl = action; combinedControls.append(button);
+  }
+  combinedView.append(combinedControls, combinedSelect, combinedCoverage, combinedMap);
   const roadmapFilter = make('input', 'roadmap-filter');
   const roadmapCoverage = make('p', 'roadmap-coverage');
   const roadmapGroups = make('div', 'roadmap-groups');
@@ -596,7 +613,7 @@ function fakeDocument() {
   pages[1].append(campaignSelector, campaignHistory, campaignEmpty, campaignDashboard);
   pages[2].append(repositoryWidgets, repositoryBrowser, repositoryDetailView, repositoryEmpty);
   pages[3].append(architectureReset, ...architectureModes, architectureOverview,
-    roadmapInventory, architectureDetail);
+    roadmapInventory, combinedView, architectureDetail);
   stack.append(...pages);
   const indicators = Array.from({length: 4}, (_, index) => {
     const button = make('button');
@@ -942,7 +959,9 @@ async function runDomFixture() {
   overlapController.stop();
 }
 
-runDomFixture().then(() => {
+module.exports = {FakeElement, fakeDocument, textOf, consoleApi, Scheduler, rawProjection};
+
+if (require.main === module) runDomFixture().then(() => {
   process.stdout.write('dev-console-projection-ok\n');
 }).catch((error) => {
   process.stderr.write(`${error.stack || error}\n`);

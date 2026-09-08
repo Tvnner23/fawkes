@@ -311,9 +311,11 @@ class DevConsoleReadOnlyHTTPTests(unittest.TestCase):
             "needs_tanner": {"decision_needed": "historical text"}, "activity": [],
             "managed_worker_activity": []}
         closed = _console_jobs([campaign], [])[0]
-        self.assertEqual(closed["state"], "done")
+        # Terminal failure must no longer share the successful Done label.
+        self.assertEqual(closed["state"], "failed")
         self.assertFalse(closed["successful"])
-        self.assertIn("No deployed gain", closed["gained"])
+        self.assertIn("No verified capability gain", closed["gained"])
+        self.assertNotEqual(closed["next"], "historical text")
         actionable = _console_jobs([campaign], [{"campaign_id": "campaign-closed",
                                                   "actionable": True}])[0]
         self.assertEqual(actionable["state"], "needs_you")
@@ -598,7 +600,7 @@ class DevConsoleReadOnlyHTTPTests(unittest.TestCase):
             "campaign_id", "objective", "status", "current_stage", "iteration", "maximum_iterations",
             "cancelled", "builder", "reviewer", "needs_tanner", "recovery_references",
             "activity", "satisfied_condition_count",
-            "operational_learning_observations", "managed_worker_activity",
+            "operational_learning_observations", "managed_worker_activity", "console_reporting",
         })
         self.assertEqual(set(projection["campaigns"][0]["builder"]), {
             "worker_id", "role", "functional_role", "environment_id",

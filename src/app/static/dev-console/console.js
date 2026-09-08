@@ -259,6 +259,7 @@
       creates_authority: false
     };
     result.builder = normalizeWorker(value.builder);
+    result.reporting = normalizeConsoleReporting(value.console_reporting);
     result.reviewer = normalizeWorker(value.reviewer);
     result.needs_tanner = normalizeNeedsTanner(value.needs_tanner, options);
     result.recovery_references = Array.isArray(value.recovery_references)
@@ -433,6 +434,75 @@
     }};
   }
 
+  function lifecycleTime(value) {
+    const match = typeof value === "string" && value.match(
+      /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,6})?(Z|[+-]\d{2}:\d{2})$/);
+    if (!match || +match[2] < 1 || +match[2] > 12 || +match[3] < 1
+        || +match[3] > new Date(Date.UTC(+match[1], +match[2], 0)).getUTCDate()
+        || +match[4] > 23 || +match[5] > 59 || +match[6] > 59) return NaN;
+    return Date.parse(value);
+  }
+
+  function normalizeConsoleReporting(value) {
+    if (!isObject(value) || value.creates_authority !== false) return null;
+    return {observed_at: safeText(value.observed_at, 80),
+      record_sha256: safeIdentifier(value.record_sha256, 64),
+      intervals: (Array.isArray(value.intervals) ? value.intervals : []).slice(0, 24).map((item) => ({
+        stage: safeIdentifier(item.stage, 40), attempt: finiteInteger(item.attempt, 0),
+        started_at: safeText(item.started_at, 80), ended_at: safeText(item.ended_at, 80),
+        state: safeIdentifier(item.state, 80), active_verified: item.active_verified === true,
+        duration_seconds: Number.isSafeInteger(item.duration_seconds) && item.duration_seconds >= 0
+          ? item.duration_seconds : null,
+        source_references: (Array.isArray(item.source_references) ? item.source_references : [])
+          .slice(0, 8).map((source) => safeText(source, 200))
+      }))};
+  }
+
+  function formatDuration(seconds) {
+    if (!Number.isSafeInteger(seconds) || seconds < 0) return "—";
+    const pad = (number) => String(number).padStart(2, "0");
+    return (seconds >= 3600 ? pad(Math.floor(seconds / 3600)) + ":" : "")
+      + pad(Math.floor(seconds / 60) % 60) + ":" + pad(seconds % 60);
+  }
+
+  function intervalSeconds(interval, reporting, state, nowMs) {
+    const start = lifecycleTime(interval.started_at), end = lifecycleTime(interval.ended_at);
+    const observed = lifecycleTime(reporting.observed_at);
+    if (!Number.isFinite(start) || !Number.isFinite(observed) || start > observed
+        || observed > nowMs || !interval.source_references.length) return null;
+    if (interval.ended_at) {
+      const seconds = Math.floor((end - start) / 1000);
+      return Number.isFinite(end) && end >= start && end <= observed && interval.duration_seconds === seconds
+        ? seconds : null;
+    }
+    if (!interval.active_verified || interval.duration_seconds === null) return null;
+    const base = Math.floor((observed - start) / 1000);
+    if (interval.duration_seconds !== base) return null;
+    if (state === "live" && nowMs - observed <= 30000) {
+      interval.last_displayed_seconds = Math.floor((nowMs - start) / 1000);
+    }
+    return interval.last_displayed_seconds === undefined ? base : interval.last_displayed_seconds;
+  }
+
+  function updateStageTimers(graph, campaign, state, nowMs) {
+    if (!graph || !campaign) return;
+    const reporting = campaign.reporting;
+    for (const node of graph.querySelectorAll("[data-stage-timer]")) {
+      const intervals = (reporting && reporting.intervals || []).filter((item) => item.stage === node.dataset.stageTimer);
+      const latest = intervals[intervals.length - 1];
+      node.textContent = latest ? formatDuration(intervalSeconds(latest, reporting, state, nowMs)) : "—";
+      const observed = reporting ? lifecycleTime(reporting.observed_at) : NaN;
+      if (latest && latest.active_verified) {
+        const live = state === "live" && Number.isFinite(observed) && nowMs >= observed && nowMs - observed <= 30000;
+        const step = node.parentNode;
+        step.classList.toggle("current", live);
+        step.classList.toggle("waiting", !live);
+        const label = step.querySelector(".graph-node-state");
+        if (label) label.textContent = live ? "current" : "last known";
+      }
+    }
+  }
+
   function normalizeJobsResponse(payload) {
     if (!Array.isArray(payload) || payload.length > 32) return {valid: false, jobs: []};
     const jobs = [];
@@ -442,11 +512,16 @@
         job_id: safeIdentifier(raw.job_id, 180), objective: safeText(raw.objective, 500),
         state: safeIdentifier(raw.state, 32), recorded_status: safeIdentifier(raw.recorded_status, 100),
         current_step: safeText(raw.current_step, 180), last_activity_at: safeText(raw.last_activity_at, 80),
-        accomplished: safeText(raw.accomplished, 500), gained: safeText(raw.gained, 500),
+        accomplished: safeText(raw.accomplished, 1800), gained: safeText(raw.gained, 1200),
+        historical_next: safeText(raw.return_recap && raw.return_recap.next, 950),
+        result_report: safeIdentifier(raw.return_recap && raw.return_recap.report_id, 180),
+        public_result: safeText(raw.public_result, 500),
+        parent_campaign_id: safeIdentifier(raw.parent_campaign_id, 180),
+        source_record_sha256: safeIdentifier(raw.source_record_sha256, 64),
         next: safeText(raw.next, 500), worker: normalizeWorker(raw.worker),
         successful: raw.successful, historical: raw.historical, creates_authority: false
       };
-      if (!job.job_id || !job.objective || !["working", "done", "needs_you"].includes(job.state)
+      if (!job.job_id || !job.objective || !["working", "waiting", "done", "failed", "closed", "unknown", "needs_you"].includes(job.state)
           || !job.recorded_status || typeof job.successful !== "boolean"
           || typeof job.historical !== "boolean"
           || (job.last_activity_at && !Number.isFinite(Date.parse(job.last_activity_at)))) {
@@ -492,6 +567,13 @@
         || !Array.isArray(payload.expected_phase_ids)
         || payload.expected_phase_ids.join("|") !== expected.join("|")
         || payload.coverage_complete !== true) return {valid: false, roadmap: null};
+    const allIds = new Set([...phases, ...tracks].map((item) => item.id));
+    if (allIds.size !== phases.length + tracks.length
+        || phases.some((item, index) => item.number !== index)
+        || tracks.some((item) => !item.id.startsWith("track-"))
+        || [...phases, ...tracks].some((item) => item.prerequisites.some((id) => !allIds.has(id) || id === item.id))) {
+      return {valid: false, roadmap: null};
+    }
     const sourceSha = safeDigest(payload.source_sha256);
     const sourceRevision = safeGitOid(payload.source_revision);
     if (!sourceSha || !sourceRevision) return {valid: false, roadmap: null};
@@ -697,7 +779,7 @@
 
   function renderJobs(documentRef, target, jobs, projectionState) {
     target.replaceChildren();
-    const priority = {needs_you: 0, working: 1, done: 2};
+    const priority = {needs_you: 0, working: 1, waiting: 2, done: 3, failed: 3, closed: 3, unknown: 4};
     const values = Array.isArray(jobs) ? jobs.slice().sort((left, right) =>
       (priority[left.state] ?? 9) - (priority[right.state] ?? 9)
         || Date.parse(right.last_activity_at || 0) - Date.parse(left.last_activity_at || 0)) : [];
@@ -719,13 +801,16 @@
         element(documentRef, "p", "job-step", (job.state === "needs_you" ? "Needs Tanner · " : "Current step · ")
           + (job.current_step || "Unknown")),
         element(documentRef, "p", "job-time", "Last activity · " + (job.last_activity_at || "Unknown")));
-      if (job.state === "done") {
+      if (job.accomplished || job.next || job.public_result) {
         const recap = element(documentRef, "div", "job-recap");
-        recap.append(element(documentRef, "p", "", "Accomplished · " + (job.accomplished || "Recorded outcome retained.")),
-          element(documentRef, "p", "", "Gained · " + (job.gained || "No deployed gain is claimed by this record.")),
-          element(documentRef, "p", "", "Next · " + (job.next || "No next job has been started.")));
+        const short = (text) => text.length > 260 ? text.slice(0, 260) + " … (full recap in Details)" : text;
+        recap.append(element(documentRef, "p", "", "Accomplished · " + short(job.accomplished || "Recorded outcome retained.")),
+          element(documentRef, "p", "", "Gained · " + short(job.gained || "No deployed gain is claimed by this record.")),
+          element(documentRef, "p", "", "Next · " + (job.next || "Unknown")));
+        if (job.public_result) recap.appendChild(element(documentRef, "p", "", "Public Worker result · " + job.public_result));
         card.appendChild(recap);
-      } else if (job.state === "needs_you") {
+      }
+      if (job.state === "needs_you") {
         card.appendChild(element(documentRef, "p", "warning", "Supported action · "
           + (job.next || "Open the exact canonical Attention request shown above.")));
       }
@@ -733,6 +818,11 @@
       details.dataset.consoleKey = "job:" + job.job_id + ":details";
       details.append(element(documentRef, "summary", "", "Details"), detailList(documentRef, [
         ["Job identity", job.job_id], ["Recorded campaign status", job.recorded_status],
+        ["Parent job", job.parent_campaign_id || "Not recorded; no parent completion inferred"],
+        ["Source record digest", job.source_record_sha256 || "Unavailable"],
+        ["Complete accomplishment", job.accomplished], ["Complete gain", job.gained],
+        ["Worker return", job.result_report || "No typed return available"],
+        ["Historical next at Worker return (not a current instruction)", job.historical_next || "Not recorded"],
         ["Observation", projectionTruthLabel(projectionState)],
         ["Scope", "Fawkes-managed jobs only; a separately opened standalone CLI is not attached"]
       ]));
@@ -757,7 +847,7 @@
     const byId = new Map(stages.map((stage) => [stage.id, stage]));
     const kinds = new Set((campaign.activity || []).map((event) => event.kind));
     if (kinds.has("provider_action_reserved") || kinds.has("builder_return_retained")) {
-      byId.get("worker").state = kinds.has("builder_return_retained") ? "completed" : "current";
+      byId.get("worker").state = kinds.has("builder_return_retained") ? "completed" : "waiting";
       byId.get("worker").recorded = true;
     }
     if (kinds.has("builder_failed_safe")) {
@@ -784,29 +874,40 @@
     };
     const current = currentByStatus[campaign.status];
     if (current && byId.get(current).state !== "completed") {
-      byId.get(current).state = campaign.needs_tanner ? "waiting" : "current";
+      byId.get(current).state = "waiting";
       byId.get(current).recorded = true;
     }
     if (campaign.status === "succeeded") {
-      stages.forEach((stage) => {
-        stage.state = "completed";
-        stage.recorded = true;
-      });
+      byId.get("terminal").state = "completed";
+      byId.get("terminal").recorded = true;
     } else if (campaign.terminal) {
       byId.get("terminal").state = campaign.status === "failed_safe"
-        ? "failed" : campaign.status === "cancelled" ? "blocked" : "completed";
+        ? "failed" : "blocked";
       byId.get("terminal").recorded = true;
     } else if (campaign.needs_tanner) {
       const unresolved = stages.find((stage) => stage.state === "current"
         || stage.state === "waiting" || stage.state === "unknown");
       if (unresolved) unresolved.state = "waiting";
     }
+    for (const stage of stages) {
+      const intervals = (campaign.reporting && campaign.reporting.intervals || [])
+        .filter((item) => item.stage === stage.id);
+      stage.intervals = intervals;
+      if (intervals.length) {
+        const latest = intervals[intervals.length - 1];
+        stage.recorded = true;
+        stage.state = latest.active_verified ? "current"
+          : ["completed", "pass", "pass_with_caveats", "committed", "applied_verified_after_review", "succeeded"].includes(latest.state)
+            ? "completed" : /fail|exception/.test(latest.state) ? "failed"
+              : ["cancelled", "denied", "expired"].includes(latest.state) ? "blocked" : "waiting";
+      }
+    }
     const edges = stages.slice(0, -1).map((stage, index) => ({
       from: stage.id,
       to: stages[index + 1].id,
       established: stage.recorded && stages[index + 1].recorded
     }));
-    const correctionCount = finiteInteger(campaign.observations.correction_count, 0);
+    const correctionCount = finiteInteger((campaign.observations || {}).correction_count, 0);
     return {
       stages,
       edges,
@@ -915,6 +1016,9 @@
       node.append(svgElement(documentRef, "rect", {width: "88", height: "58", rx: "9"}),
         svgElement(documentRef, "text", {x: "44", y: "24", class: "graph-node-title"}, stage.label),
         svgElement(documentRef, "text", {x: "44", y: "43", class: "graph-node-state"}, stage.state));
+      const timer = svgElement(documentRef, "text", {x: "44", y: "77", class: "stage-timer"}, "—");
+      timer.dataset.stageTimer = stage.id;
+      node.appendChild(timer);
       elements.graph.appendChild(node);
     }
     elements.detail.replaceChildren(
@@ -932,6 +1036,19 @@
         ["Budget remaining", "Not projected; no percentage is inferred"]
       ])
     );
+    const attempts = (campaign.reporting && campaign.reporting.intervals || []).filter((item) =>
+      item.stage === selectedStage.id || (selectedStage.id === "review" && item.stage === "review_queue"));
+    for (const attempt of attempts) {
+      elements.detail.appendChild(element(documentRef, "p", "stage-attempt",
+        `Attempt ${attempt.attempt} · ${attempt.stage.replace("_", " ")} · ${attempt.state} · `
+        + formatDuration(intervalSeconds(attempt, campaign.reporting, "stale", Date.now()))
+        + ` · ${attempt.started_at || "Unknown start"} → ${attempt.ended_at || "No recorded close"}`
+        + ` · Source: ${attempt.source_references.join(", ")}`));
+    }
+    if (campaign.reporting) elements.detail.appendChild(element(documentRef, "p", "meta",
+      "Source record: " + (campaign.reporting.record_sha256 || "Unavailable")
+      + ". Review queue ends at dispatch preparation; a reservation does not prove Reviewer launch."));
+    updateStageTimers(elements.graph, campaign, "stale", Date.now());
     return {campaign_id: campaign.campaign_id, stage_id: selectedStage.id};
   }
 
@@ -1097,14 +1214,318 @@
     return selected;
   }
 
+  // Relations are retained from Current's source diagram, never phase numbering.
+  const COMBINED_RELATIONS = Object.freeze([
+    ["identity", "archive", "evidence"], ["archive", "memory", "learns"],
+    ["memory", "library", "supports"], ["clients", "identity", "identity"],
+    ["clients", "development", "requests"], ["development", "attention", "guards"],
+    ["development", "workers", "coordinates"], ["workers", "application_git", "returns"],
+    ["attention", "application_git", "permits"], ["development", "embodiment", "informs"],
+    ["memory", "embodiment", "continuity"]
+  ]);
+
+  // Authored topical associations to the exact phase headings, NOT implementation
+  // ownership or prerequisites. A renamed source heading visibly becomes unmapped.
+  const COMBINED_PHASE_TOPICS = Object.freeze([
+    ["Ownership, integrity", "identity"], ["Durable Library", "library"],
+    ["canonical processing ledger", "archive"], ["export staging importer", "archive"],
+    ["historical and federated search", "library"], ["Historical corpus validation", "library"],
+    ["Retrieval Flight Recorder", "library"], ["Unified Retrieval Planner", "library"],
+    ["cross-conversation continuity", "memory"], ["Context Composer", "memory"],
+    ["Improvement Workshop", "development"], ["temporal knowledge", "memory"],
+    ["Claim Ledger", "memory"], ["historical absorption", "memory"],
+    ["Decision and Outcome", "memory"], ["Relationship Memory", "memory"],
+    ["Personality development", "identity"], ["Development Orchestrator", "development"],
+    ["budget and model router", "workers"], ["video understanding", "library"],
+    ["Environmental Perception", "embodiment"], ["Temporal awareness", "development"],
+    ["Persistent self-created workflows", "development"], ["Proactive intelligence", "development"],
+    ["Safe simulation", "development"], ["Credential Authority", "attention"],
+    ["Physical Safety", "embodiment"], ["tool and action framework", "attention"],
+    ["Embodiment and Evolving", "embodiment"], ["Cross-Device Presence", "clients"],
+    ["Reading and Guided Learning", "library"], ["Realtime voice", "clients"],
+    ["event-sound experience", "clients"], ["environmental adapters", "embodiment"],
+    ["Portable Phoenix Continuity", "identity"], ["multi-Phoenix management", "identity"],
+    ["Household Identity", "identity"], ["Peer-Phoenix testimony", "memory"],
+    ["Phoenix-to-Phoenix communication", "clients"], ["Full Phoenix ecosystem", "identity"]
+  ]);
+
+  function combinedModel(roadmap) {
+    const nodes = [{id: "combined-root", name: "Fawkes system", kind: "root",
+      summary: "Explore shared components and source-bound capabilities. Grouping is not a dependency."}];
+    const edges = [], groups = [];
+    for (const [id, component] of Object.entries(ARCHITECTURE_COMPONENTS)) {
+      const node = {id, name: component.title, summary: component.owner, kind: "component",
+        maturity: component.maturity, source: component.evidence, children: []};
+      nodes.push(node); groups.push(node);
+      edges.push({from: "combined-root", to: id, kind: "grouping", label: "contains"});
+    }
+    const unmapped = new Map();
+    for (const item of [...(roadmap && roadmap.phases || []), ...(roadmap && roadmap.tracks || [])]) {
+      const topic = item.kind === "phase" && COMBINED_PHASE_TOPICS[item.number];
+      const component = topic && item.name.includes(topic[0]) ? topic[1] : item.mapped_component;
+      let group = groups.find((node) => node.id === component);
+      if (!group) {
+        const key = item.group;
+        if (!unmapped.has(key)) {
+          const node = {id: "unmapped-" + item.id, name: "Unmapped · " + key, kind: "group",
+            summary: "No component association is documented in this inventory. This is a discovery group, not a prerequisite.", children: []};
+          unmapped.set(key, node); groups.push(node); nodes.push(node);
+          edges.push({from: "combined-root", to: node.id, kind: "grouping", label: "unmapped inventory"});
+        }
+        group = unmapped.get(key);
+      }
+      group.children.push(item.id);
+      nodes.push({...item, parent: group.id,
+        association_basis: topic && component === topic[1]
+          ? "Authored topic association from the retained Phase " + item.number + " heading: " + item.name
+          : "Existing source inventory association; not a runtime owner or prerequisite."});
+      edges.push({from: group.id, to: item.id,
+        kind: group.kind === "component" ? "association" : "grouping",
+        label: group.kind === "component" ? "associated capability" : "unmapped member",
+        source: item.source, source_sha256: item.source_sha256});
+      for (const prerequisite of item.prerequisites || []) {
+        edges.push({from: prerequisite, to: item.id, kind: "prerequisite", label: "documented prerequisite",
+          source: item.source, source_sha256: item.source_sha256});
+      }
+    }
+    for (const [from, to, label] of COMBINED_RELATIONS) edges.push({from, to, label, kind: "architecture",
+      source: "src/app/static/dev-console/index.html#architecture-map"});
+    for (const group of groups) {
+      if (group.kind === "component" && group.children.some(id => {
+        const child = nodes.find(node => node.id === id);
+        return child && child.maturity !== "implemented";
+      })) group.maturity = group.maturity === "Built" ? "Foundation built; expansions planned" : group.maturity;
+    }
+    return {nodes, edges, groups};
+  }
+
+  function combinedLayout(model, expanded) {
+    const positions = new Map([["combined-root", {x: 180, y: 10, width: 300, height: 90}]]);
+    let y = 146;
+    for (let row = 0; row < model.groups.length; row += 2) {
+      let height = 90;
+      model.groups.slice(row, row + 2).forEach((group, column) => {
+        const x = 15 + column * 330;
+        positions.set(group.id, {x, y, width: 300, height: 90});
+        if (expanded.has(group.id)) group.children.forEach((id, index) => {
+          positions.set(id, {x: x + 10, y: y + 120 + index * 120, width: 280, height: 90});
+        });
+        height = Math.max(height, 90 + (expanded.has(group.id) ? group.children.length * 120 : 0));
+      });
+      y += height + 100;
+    }
+    return {positions, width: 660, height: y};
+  }
+
+  function combinedState() {
+    return {expanded: new Set(), selected: "identity", x: 0, y: 0, zoom: 1, suppressClick: false};
+  }
+
+  function transformCombined(graph, state) {
+    const layer = graph && graph.querySelector("[data-combined-layer]");
+    if (layer) layer.setAttribute("transform", `translate(${state.x} ${state.y}) scale(${state.zoom})`);
+  }
+
+  function combinedControl(state, action, layout) {
+    if (action === "fit" && layout) {
+      state.zoom = Math.min(660 / layout.width, 400 / layout.height);
+      state.x = (660 - layout.width * state.zoom) / 2; state.y = 0;
+    } else if (action === "reset") {
+      state.zoom = 1; state.x = 0; state.y = 0;
+    } else if (action === "in" || action === "out") {
+      const old = state.zoom;
+      state.zoom = Math.max(0.15, Math.min(2.5, old * (action === "in" ? 1.25 : 0.8)));
+      state.x = 330 - (330 - state.x) * state.zoom / old;
+      state.y = 200 - (200 - state.y) * state.zoom / old;
+    } else {
+      state.x += action === "left" ? 70 : action === "right" ? -70 : 0;
+      state.y += action === "up" ? 70 : action === "down" ? -70 : 0;
+    }
+  }
+
+  function focusCombined(model, state, id) {
+    const node = model.nodes.find((item) => item.id === id);
+    if (!node) return;
+    state.selected = id;
+    if (node.parent) state.expanded.add(node.parent);
+    const position = combinedLayout(model, state.expanded).positions.get(id);
+    state.zoom = Math.max(0.85, state.zoom);
+    state.x = 330 - (position.x + position.width / 2) * state.zoom;
+    state.y = 170 - (position.y + position.height / 2) * state.zoom;
+  }
+
+  function renderCombined(documentRef, elements, roadmap, state, components, projectionState) {
+    if (!elements.combinedMap) return null;
+    const model = combinedModel(roadmap), layout = combinedLayout(model, state.expanded);
+    const graph = elements.combinedMap;
+    const renderKey = JSON.stringify([model, Array.from(state.expanded), state.selected]);
+    if (graph.dataset.combinedRenderKey !== renderKey && !state.gesturing) {
+    graph.dataset.combinedRenderKey = renderKey;
+    graph.replaceChildren();
+    const defs = svgElement(documentRef, "defs");
+    const marker = svgElement(documentRef, "marker", {id: "combined-arrow", viewBox: "0 0 10 10",
+      refX: "9", refY: "5", markerWidth: "6", markerHeight: "6", orient: "auto"});
+    marker.appendChild(svgElement(documentRef, "path", {d: "M0 0 L10 5 L0 10z", fill: "#87a5b9"}));
+    defs.appendChild(marker); graph.appendChild(defs);
+    const layer = svgElement(documentRef, "g", {"data-combined-layer": "true"});
+    graph.appendChild(layer);
+    model.edges.forEach((edge, index) => {
+      const from = layout.positions.get(edge.from), to = layout.positions.get(edge.to);
+      if (!from || !to) return; // Hidden endpoints remain discoverable in details.
+      const lane = edge.from === "combined-root" ? 110 + (index % 3) * 8
+        : Math.min(from.y, to.y) - 18 - (index % 3) * 12;
+      const sx = from.x + from.width, sy = from.y + from.height / 2, ex = to.x, ey = to.y + to.height / 2;
+      const path = svgElement(documentRef, "path", {
+        d: `M${sx} ${sy} H${sx + 12} V${lane} H${ex - 12} V${ey} H${ex}`,
+        class: "combined-edge " + edge.kind, "aria-label": `${edge.from} → ${edge.to}: ${edge.label}`,
+        ...(edge.kind === "architecture" || edge.kind === "prerequisite" ? {"marker-end": "url(#combined-arrow)"} : {})});
+      path.appendChild(svgElement(documentRef, "title", {}, `${edge.kind}: ${edge.label}`));
+      layer.appendChild(path);
+      if ((edge.from === state.selected || edge.to === state.selected)
+          && ["architecture", "prerequisite"].includes(edge.kind)) {
+        layer.appendChild(svgElement(documentRef, "text", {x: ex - 10, y: ey - 9,
+          class: "combined-edge-label"}, edge.label));
+      }
+    });
+    for (const node of model.nodes) {
+      const position = layout.positions.get(node.id);
+      if (!position) continue;
+      const group = node.children && node.children.length > 0;
+      const button = svgElement(documentRef, "g", {class: "combined-node "
+        + (node.maturity || "unknown").toLowerCase().replace(/ /g, "-")
+        + (state.selected === node.id ? " selected" : ""), role: "button", tabindex: "0",
+        transform: `translate(${position.x} ${position.y})`,
+        "aria-label": node.name + (group ? `, ${node.children.length} capabilities; activate to expand or collapse` : ""),
+        ...(group ? {"aria-expanded": String(state.expanded.has(node.id))} : {})});
+      button.dataset.combinedId = node.id;
+      button.appendChild(svgElement(documentRef, "rect", {width: position.width, height: position.height}));
+      const words = node.name.split(/\s+/), lines = [""];
+      for (const word of words) {
+        if ((lines[lines.length - 1] + word).length > 27) lines.push("");
+        lines[lines.length - 1] += (lines[lines.length - 1] ? " " : "") + word;
+      }
+      lines.slice(0, 2).forEach((line, index) => button.appendChild(svgElement(documentRef, "text",
+        {x: position.width / 2, y: 23 + index * 19}, line + (index === 1 && lines.length > 2 ? "…" : ""))));
+      button.appendChild(svgElement(documentRef, "text", {x: position.width / 2, y: 77, class: "combined-status"},
+        (group ? (state.expanded.has(node.id) ? "− " : "+ ") + node.children.length + " · " : "")
+        + (String(node.maturity).startsWith("Foundation built") ? "Built + planned" : node.maturity || "group")
+        + (node.source_status === "proposed" ? " · proposed" : "")));
+      layer.appendChild(button);
+    }
+    }
+    transformCombined(graph, state);
+    if (elements.combinedCoverage) elements.combinedCoverage.textContent = roadmap
+      ? `${Object.keys(ARCHITECTURE_COMPONENTS).length} components · ${roadmap.phases.length} phases · ${roadmap.tracks.length} tracks · groups are associations, not dependencies`
+      : "Roadmap unavailable; component reference only. Coverage is unknown.";
+    if (elements.combinedSelect) {
+      const optionsKey = JSON.stringify(model.nodes.map(node => [node.id, node.name]));
+      if (elements.combinedSelect.dataset.optionsKey !== optionsKey) {
+      elements.combinedSelect.dataset.optionsKey = optionsKey;
+      elements.combinedSelect.replaceChildren();
+      for (const node of model.nodes) {
+        const option = element(documentRef, "option", "", node.id + " · " + node.name);
+        option.value = node.id; option.selected = node.id === state.selected;
+        elements.combinedSelect.appendChild(option);
+      }
+      }
+      elements.combinedSelect.value = state.selected;
+    }
+    const selected = model.nodes.find((node) => node.id === state.selected) || model.nodes[0];
+    // Preserve source-excerpt reading state when an ordinary refresh repeats selection.
+    const key = JSON.stringify([selected, projectionState, components]);
+    if (elements.detail.dataset.combinedDetailKey !== key) {
+      elements.detail.dataset.combinedDetailKey = key;
+      elements.detail.replaceChildren(element(documentRef, "h3", "", selected.name),
+        element(documentRef, "p", "", selected.summary), detailList(documentRef, [
+          ["Phase / track / component", selected.id], ["Maturity", selected.maturity || "Grouping only"],
+          ["Planning status", selected.source_status || "Component reference"],
+          ["Runtime", selected.kind === "component" ? architectureObservation(components || [], selected.id, projectionState) : "unknown"],
+          ["Source", selected.source || "Existing console inventory grouping"],
+          ["Source revision", selected.source_revision || "Not projected"],
+          ["Source digest", selected.source_sha256 || "Not projected"],
+          ["Source bytes", String(selected.source_bytes || "Not projected")],
+          ["Association basis", selected.association_basis || "Current architecture reference"],
+          ["Relations", model.edges.filter((edge) => edge.from === selected.id || edge.to === selected.id)
+            .map((edge) => `${edge.from} → ${edge.to}: ${edge.kind} · ${edge.label}`).join("; ")],
+          ["Observation", projectionTruthLabel(projectionState)]
+        ]));
+      if (selected.source_excerpt) {
+        const details = element(documentRef, "details", "roadmap-source-details");
+        details.append(element(documentRef, "summary", "", "Read retained source excerpts"),
+          element(documentRef, "pre", "detail-summary", selected.source_excerpt));
+        elements.detail.appendChild(details);
+      }
+    }
+    return {model, layout};
+  }
+
+  function bindCombinedGestures(graph, state, onActivity) {
+    if (!graph) return;
+    const pointers = new Map();
+    let previous = null, travel = 0;
+    const measure = () => {
+      const points = Array.from(pointers.values());
+      return {x: points.reduce((sum, p) => sum + p.x, 0) / points.length,
+        y: points.reduce((sum, p) => sum + p.y, 0) / points.length,
+        distance: points.length === 2 ? Math.hypot(points[0].x - points[1].x, points[0].y - points[1].y) : 0};
+    };
+    graph.addEventListener("pointerdown", (event) => {
+      if (event.button !== undefined && event.button !== 0) return;
+      if (!pointers.size) {state.suppressClick = false; travel = 0;}
+      pointers.set(event.pointerId, {x: event.clientX, y: event.clientY});
+      state.gesturing = true;
+      previous = measure();
+      if (pointers.size > 1) state.suppressClick = true;
+      // Capture the original node so stationary taps still select that node.
+      if (event.target.setPointerCapture) event.target.setPointerCapture(event.pointerId);
+      onActivity();
+    });
+    graph.addEventListener("pointermove", (event) => {
+      if (!pointers.has(event.pointerId)) return;
+      pointers.set(event.pointerId, {x: event.clientX, y: event.clientY});
+      const next = measure(), rect = graph.getBoundingClientRect();
+      const ratio = 660 / (rect.width || 660);
+      const dx = next.x - previous.x, dy = next.y - previous.y;
+      travel += Math.hypot(dx, dy);
+      if (travel > 8) state.suppressClick = true;
+      if (state.suppressClick) {
+        if (previous.distance && next.distance) {
+          const old = state.zoom;
+          state.zoom = Math.max(0.15, Math.min(2.5, old * next.distance / previous.distance));
+          const cx = (previous.x - rect.left) * ratio, cy = (previous.y - rect.top) * ratio;
+          state.x = cx - (cx - state.x) * state.zoom / old;
+          state.y = cy - (cy - state.y) * state.zoom / old;
+        }
+        state.x += dx * ratio; state.y += dy * ratio;
+        transformCombined(graph, state); event.preventDefault(); onActivity();
+      }
+      previous = next;
+    });
+    const end = (event) => {
+      pointers.delete(event.pointerId);
+      state.gesturing = pointers.size > 0;
+      if (event.type === "pointercancel") state.suppressClick = true;
+      previous = pointers.size ? measure() : null;
+    };
+    graph.addEventListener("pointerup", end); graph.addEventListener("pointercancel", end);
+    graph.addEventListener("lostpointercapture", end);
+  }
+
   function renderRoadmapInventory(documentRef, elements, roadmap, options) {
     const value = options || {};
     const mode = ["current", "roadmap", "combined"].includes(value.mode) ? value.mode : "current";
-    elements.overview.hidden = mode === "roadmap";
-    elements.inventory.hidden = mode === "current";
+    elements.overview.hidden = mode !== "current";
+    elements.inventory.hidden = mode !== "roadmap";
+    if (elements.combined) elements.combined.hidden = mode !== "combined";
     for (const button of elements.modes) {
       button.setAttribute("aria-pressed", String(button.dataset.architectureMode === mode));
     }
+    if (mode === "combined") {
+      renderCombined(documentRef, elements, roadmap, value.combinedState || elements.combinedState || combinedState(),
+        value.components || elements.components || [], value.projectionState || elements.projectionState || "unavailable");
+      return {mode, selected_id: value.selectedId || ""};
+    }
+    delete elements.detail.dataset.combinedDetailKey;
     if (!roadmap || mode === "current") return {mode, selected_id: value.selectedId || ""};
     const openGroups = new Set(Array.from(elements.groups.querySelectorAll("details.roadmap-group"))
       .filter((group) => group.open).map((group) => group.dataset.roadmapGroup));
@@ -1254,6 +1675,8 @@
       if(event.isPrimary===false)return;
       restore();gesture=null;suppressUntil=0;
       if(event.button!==0||!within(event.target))return;
+      // Combined owns its bounded canvas pan, including the existing Pi mouse mapping.
+      if(event.target.closest('.combined-map'))return;
       const selection=host.getSelection&&host.getSelection();
       const editable=event.target.closest('input, textarea, select, [contenteditable="true"]');
       gesture={id:event.pointerId,x:event.clientX,y:event.clientY,lastY:event.clientY,
@@ -1359,6 +1782,11 @@
     const architectureDetail = documentRef.getElementById("architecture-detail");
     const architectureElements = {
       map: architectureMap, detail: architectureDetail,
+      combined: documentRef.getElementById("combined-view"),
+      combinedMap: documentRef.getElementById("combined-map"),
+      combinedCoverage: documentRef.getElementById("combined-coverage"),
+      combinedSelect: documentRef.getElementById("combined-select"),
+      combinedState: combinedState(),
       overview: documentRef.getElementById("architecture-overview"),
       inventory: documentRef.getElementById("roadmap-inventory"),
       groups: documentRef.getElementById("roadmap-groups"),
@@ -1511,11 +1939,14 @@
         projection.campaigns || [], selectedCampaignId, selectedCampaignStageId);
       selectedCampaignId = campaignSelection.campaign_id;
       selectedCampaignStageId = campaignSelection.stage_id;
+      updateStageTimers(campaignElements.graph, selectCampaign(projection.campaigns, selectedCampaignId), state, clock());
       const repositorySelection = renderRepositoryDashboard(documentRef, repositoryElements,
         projection.repository, state, selectedRepositoryPath, repositoryDetailOpen);
       selectedRepositoryPath = repositorySelection.path;
       repositoryDetailOpen = repositorySelection.detail_open;
-      selectedArchitectureId = renderArchitectureDashboard(documentRef, architectureMap,
+      architectureElements.components = projection.components || [];
+      architectureElements.projectionState = state;
+      if (architectureMode === "current") selectedArchitectureId = renderArchitectureDashboard(documentRef, architectureMap,
         architectureDetail, projection.components || [], state, selectedArchitectureId);
       const roadmapSelection = renderRoadmapInventory(documentRef, architectureElements,
         projection.roadmap, {mode: architectureMode, selectedId: selectedRoadmapId,
@@ -1744,6 +2175,8 @@
           displayedProjection.roadmap, {mode: architectureMode, selectedId: selectedRoadmapId,
             filter: roadmapFilter});
         architectureMode = result.mode; selectedRoadmapId = result.selected_id;
+        if (architectureMode === "current") renderArchitectureDashboard(documentRef, architectureMap,
+          architectureDetail, displayedProjection.components || [], shell.dataset.projectionState, selectedArchitectureId);
       }
       navigation.activity();
     }));
@@ -1788,6 +2221,13 @@
       navigation.activity();
     });
     documentRef.getElementById("architecture-reset").addEventListener("click", () => {
+      if (architectureMode === "combined") {
+        const model = combinedModel(displayedProjection && displayedProjection.roadmap);
+        combinedControl(architectureElements.combinedState, "fit", combinedLayout(model, architectureElements.combinedState.expanded));
+        transformCombined(architectureElements.combinedMap, architectureElements.combinedState);
+        navigation.activity();
+        return;
+      }
       selectedArchitectureId = "development";
       selectedRoadmapId = "";
       roadmapFilter = "";
@@ -1802,6 +2242,45 @@
       }
       navigation.activity();
     });
+    function drawCombined() {
+      if (displayedProjection) renderCombined(documentRef, architectureElements, displayedProjection.roadmap,
+        architectureElements.combinedState, displayedProjection.components || [], shell.dataset.projectionState);
+    }
+    bindCombinedGestures(architectureElements.combinedMap, architectureElements.combinedState, () => navigation.activity());
+    if (architectureElements.combinedMap) {
+      const activate = (event) => {
+        if (architectureElements.combinedState.suppressClick) {event.preventDefault(); return;}
+        const node = event.target.closest && event.target.closest("[data-combined-id]");
+        if (!node || !displayedProjection) return;
+        const state = architectureElements.combinedState;
+        state.selected = node.dataset.combinedId;
+        const selected = combinedModel(displayedProjection.roadmap).groups.find((group) => group.id === state.selected);
+        if (selected) state.expanded.has(selected.id) ? state.expanded.delete(selected.id) : state.expanded.add(selected.id);
+        drawCombined(); navigation.activity();
+      };
+      architectureElements.combinedMap.addEventListener("click", activate);
+      architectureElements.combinedMap.addEventListener("keydown", (event) => {
+        if (["Enter", " "].includes(event.key)) {
+          event.preventDefault(); architectureElements.combinedState.suppressClick = false; activate(event);
+        } else {
+          const action = {ArrowLeft: "left", ArrowRight: "right", ArrowUp: "up", ArrowDown: "down", "+": "in", "-": "out", "0": "reset"}[event.key];
+          if (action) {event.preventDefault(); combinedControl(architectureElements.combinedState, action);
+            transformCombined(architectureElements.combinedMap, architectureElements.combinedState); navigation.activity();}
+        }
+      });
+      documentRef.getElementById("combined-controls").addEventListener("click", (event) => {
+        const button = event.target.closest && event.target.closest("[data-combined-control]");
+        if (!button) return;
+        combinedControl(architectureElements.combinedState, button.dataset.combinedControl);
+        transformCombined(architectureElements.combinedMap, architectureElements.combinedState); navigation.activity();
+      });
+      architectureElements.combinedSelect.addEventListener("change", () => {
+        if (!displayedProjection) return;
+        focusCombined(combinedModel(displayedProjection.roadmap), architectureElements.combinedState,
+          architectureElements.combinedSelect.value);
+        drawCombined(); navigation.activity();
+      });
+    }
     saveUpdate.addEventListener("click", () => { navigation.activity(); savePreparedUpdate(); });
     preparedUpdates.addEventListener("click", async (event) => {
       const button = event.target.closest && event.target.closest("[data-copy-update-id]");
@@ -1875,6 +2354,10 @@
     if (value.disableUpdateRefresh !== true) refreshPreparedUpdates();
     pollTimer = value.pollIntervalMs === 0 || !root.setInterval
       ? null : root.setInterval(refresh, Number.isFinite(value.pollIntervalMs) ? value.pollIntervalMs : 10000);
+    const timingTimer = root.setInterval ? root.setInterval(() => {
+      if (displayedProjection) updateStageTimers(campaignElements.graph,
+        selectCampaign(displayedProjection.campaigns, selectedCampaignId), shell.dataset.projectionState, clock());
+    }, 1000) : null;
     return {
       navigation,
       refresh,
@@ -1884,6 +2367,7 @@
         navigation.destroy();
         stopContentScrolling();
         if (pollTimer !== null && root.clearInterval) root.clearInterval(pollTimer);
+        if (timingTimer !== null && root.clearInterval) root.clearInterval(timingTimer);
         clearProjectionTimers();
       }
     };
@@ -1916,6 +2400,9 @@
     architectureObservation,
     managedFeedObservation,
     renderRoadmapInventory,
+    normalizeConsoleReporting, lifecycleTime, formatDuration, intervalSeconds, updateStageTimers,
+    combinedModel, combinedLayout, combinedState, combinedControl, focusCombined, renderCombined, bindCombinedGestures,
+    renderJobs, renderCampaignDashboard,
     ConsoleNavigation,
     attachContentScrolling,
     boot,

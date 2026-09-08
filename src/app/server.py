@@ -19,7 +19,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 from src.runtime.chat_service import (
     ChatServiceError, FawkesChatService, sanitize_development_console_diff,
 )
-from src.runtime.autonomy_supervision import RiderActivityStore
+from src.runtime.autonomy_supervision import RiderActivityStore, console_timestamp
 
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -205,7 +205,40 @@ def _console_campaigns(payload):
                 activity.get("recovery_references")),
             "activity": _console_activity(activity.get("activity", [])),
             "managed_worker_activity": _console_managed_activity(wrapper.get("managed_worker_activity", [])),
+            "console_reporting": _console_reporting(wrapper.get("console_reporting")),
         })
+    return result
+
+
+def _console_reporting(value):
+    if value is None:
+        return None
+    if not isinstance(value, dict) or value.get("creates_authority") is not False:
+        raise ValueError("console reporting must be observational")
+    result = {field: _console_text(value.get(field), field, optional=True) for field in (
+        "record_sha256", "observed_at", "worker_status", "worker_task_scope_id", "review_status",
+        "application_status", "git_status", "parent_campaign_id")}
+    result["facts"] = [_console_text(item, "job fact") for item in value.get("facts", [])[:12]]
+    recap = value.get("return_recap")
+    result["return_recap"] = ({key: _console_text(recap.get(key), key, optional=True)
+        for key in ("accomplished", "gained", "next", "status", "report_id", "record_sha256", "reported_at")}
+        if isinstance(recap, dict) else None)
+    result["source_references"] = [_console_text(item, "source reference")
+                                   for item in value.get("source_references", [])[:8]]
+    result["intervals"] = []
+    for item in value.get("intervals", [])[:24]:
+        projected = {field: _console_text(item.get(field), field, optional=True)
+                     for field in ("stage", "started_at", "ended_at", "state")}
+        for field in ("attempt", "duration_seconds"):
+            number = item.get(field)
+            if number is not None and (type(number) is not int or number < 0):
+                raise ValueError("invalid console timing number")
+            projected[field] = number
+        projected["active_verified"] = item.get("active_verified") is True
+        projected["source_references"] = [_console_text(source, "interval source")
+                                           for source in item.get("source_references", [])[:8]]
+        result["intervals"].append(projected)
+    result["creates_authority"] = False
     return result
 
 
@@ -439,34 +472,92 @@ def _console_jobs(campaigns, attention):
     for campaign in campaigns:
         stamps = [event.get("created_at") for event in campaign.get("activity", [])]
         stamps.extend(item.get("updated_at") for item in campaign.get("managed_worker_activity", []))
-        last = max((stamp for stamp in stamps if stamp), default=None)
+        now = datetime.now(timezone.utc)
+        valid_stamps = [(console_timestamp(stamp), stamp) for stamp in stamps
+                        if console_timestamp(stamp) and console_timestamp(stamp) <= now]
+        last = max(valid_stamps, default=(None, None))[1]
         status = campaign["status"]
         actionable = campaign["campaign_id"] in actionable_campaigns
         successful = status == "succeeded"
         historical = status in terminal_statuses
         if actionable or status == "tanner_escalation":
             state = "needs_you"
-        elif historical:
+        elif successful:
             state = "done"
+        elif historical:
+            state = "failed" if status == "failed_safe" else "closed"
+        elif status in {"historical_contract_unavailable", "integrity_unavailable"}:
+            state = "unknown"
         else:
+            state = "waiting"
+        reporting = campaign.get("console_reporting") or {}
+        if not historical and state == "waiting" and any(
+                item.get("active_verified") for item in reporting.get("intervals", [])):
             state = "working"
         objective = campaign.get("objective") or campaign["campaign_id"]
+        facts = list(reporting.get("facts") or [])
+        # Legacy presentations still expose exact run/review status in activity.
+        if not facts:
+            for event in campaign.get("activity", []):
+                summary = event.get("summary") or {}
+                if event.get("kind") in {"builder_return_retained", "builder_failed_safe"}:
+                    facts.append(f"Worker attempt {event.get('iteration', '?')}: {summary.get('status') or 'unknown'}.")
+                elif event.get("kind") == "independent_review_retained":
+                    facts.append(f"Independent review: {summary.get('status') or 'unknown'}.")
+        public_results = [event.get("public_message") for item in campaign.get("managed_worker_activity", [])
+                          if item.get("state") == "completed"
+                          and reporting.get("worker_task_scope_id")
+                          and item.get("invocation_id") == reporting["worker_task_scope_id"] + "-appserver"
+                          and item.get("worker_id") == (campaign.get("builder") or {}).get("worker_id")
+                          for event in item.get("events", [])
+                          if event.get("state") == "completed" and event.get("public_message")]
+        current_step = {
+            "awaiting_independent_review": "Candidate retained; independent review still required. Reviewer execution is unverified.",
+            "builder_in_progress": ("Worker execution observed." if state == "working" else
+                                    "Worker attempt open; current execution unverified."),
+            "review_accepted_application_pending": "Independent review accepted; canonical application pending.",
+            "reviewed_application_completed": "Canonical application recorded; Git integration pending.",
+            "correction_pending": "Review requires correction; next Worker attempt pending.",
+            "ready": "Campaign ready; Worker execution has not started.",
+            "succeeded": "Campaign succeeded; application and Git facts are listed separately.",
+            "failed_safe": "Campaign failed safely; retained attempts are not campaign success.",
+            "tanner_escalation": "Campaign paused for Tanner.",
+        }.get(status, status.replace("_", " "))
+        if status == "awaiting_independent_review" and any(
+                item.get("stage") == "review_queue" and item.get("state") == "dispatched"
+                for item in reporting.get("intervals", [])):
+            current_step = "Independent review dispatched; current Reviewer execution is unverified."
+        next_step = {
+            "awaiting_independent_review": "Independent review of the retained candidate.",
+            "review_accepted_application_pending": "Canonical application of the accepted candidate.",
+            "reviewed_application_completed": "Canonical Git integration of the applied candidate.",
+            "correction_pending": "A bounded correction attempt for the recorded review defects.",
+            "ready": "Start the authorized Worker attempt.",
+        }.get(status, "Unknown; no follow-on is recorded in this projection.")
+        if state == "needs_you":
+            next_step = (campaign.get("needs_tanner") or {}).get("decision_needed") or "Open the exact canonical Attention request."
+        recap = reporting.get("return_recap") or {}
+        recorded_result = recap.get("accomplished") if recap.get("status") == "worker_reported_historical" else None
+        recorded_gain = recap.get("gained") if recorded_result else None
+        if successful:
+            next_step = "This campaign is complete. See other open jobs for current work; no new task is authorized by this recap."
+        accomplishment = ("Worker reported: " + recorded_result if recorded_result else
+            (public_results[-1][:900] if public_results else "No detailed result was recorded."))
+        accomplishment += " Current records: " + (" ".join(facts[-12:])[:800] or "No completed stage recorded.")
         jobs.append({"job_id": campaign["campaign_id"], "objective": objective,
-            "state": state, "recorded_status": status, "current_step": campaign.get("current_stage") or status,
+            "state": state, "recorded_status": status, "current_step": current_step,
             "last_activity_at": last, "worker": campaign.get("builder"),
             "successful": successful, "historical": historical,
-            "accomplished": (("The canonical campaign reached its successful recorded outcome."
-                if successful else "The campaign ended without a successful outcome; its evidence remains available.")
-                if state == "done" else None),
-            "gained": (("Its recorded result is available; acceptance, application and deployment remain separately identified."
-                if successful else "No deployed gain is claimed from this unsuccessful recorded outcome.")
-                if state == "done" else None),
-            "next": ("No suggested follow-on has been started." if state == "done" else
-                ((campaign.get("needs_tanner") or {}).get("decision_needed") or
-                 "Open the exact canonical Attention request." if state == "needs_you"
-                 else "Continue the authorized current step.")),
+            "accomplished": accomplishment[:1800],
+            "public_result": public_results[-1][:500] if public_results else None,
+            "gained": (("Worker reported at return: " + recorded_gain[:900] + " Current deployment is not established here.")
+                if recorded_gain else "No verified capability gain is recorded here; stage results are listed separately."),
+            "return_recap": recap,
+            "parent_campaign_id": reporting.get("parent_campaign_id"),
+            "source_record_sha256": reporting.get("record_sha256"),
+            "next": next_step,
             "creates_authority": False})
-    priority = {"needs_you": 0, "working": 1, "done": 2}
+    priority = {"needs_you": 0, "working": 1, "waiting": 2, "done": 3, "failed": 3, "closed": 3, "unknown": 4}
     jobs.sort(key=lambda job: (priority[job["state"]],
         -(datetime.fromisoformat(job["last_activity_at"].replace("Z", "+00:00")).timestamp()
           if job["last_activity_at"] else 0)))
@@ -552,6 +643,9 @@ def _console_update_text(projection, *, created_at, snapshot_id):
             lines.append(f"  Gained: {job['gained']}")
         if job.get("next"):
             lines.append(f"  Next: {job['next']}")
+        if job.get("public_result"):
+            lines.append(f"  Public Worker result: {job['public_result']}")
+        lines.append(f"  Parent job: {job.get('parent_campaign_id') or 'Not recorded; no parent completion inferred'}")
     attention = [item for item in projection.get("attention", [])
                  if isinstance(item, dict) and item.get("actionable")]
     lines.extend(["", "BLOCKERS / DECISIONS"])
@@ -570,8 +664,6 @@ def _console_update_text(projection, *, created_at, snapshot_id):
         f"- Working-tree paths observed: {(repository.get('status_summary') or {}).get('dirty_paths', 'Unknown')}",
         f"- Console build: {build.get('release_id') or 'Unknown'} ({build.get('mode') or 'Unknown'})",
         "- Review/application/deployment: consult each job's recorded state; this export grants no authority.",
-        "- Deferred: PC-independent hosting and physical console controls remain not started.",
-        "- Suggested next job (not started): repository cleanup/professionalization after console completion.",
         "",
         "STEERING QUESTION",
         "What should Fawkes do next after any listed Needs You item and the current authorized job are resolved?",
