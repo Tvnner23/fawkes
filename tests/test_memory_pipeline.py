@@ -302,11 +302,23 @@ class FawkesEndToEndMemoryFlowTests(unittest.TestCase):
             },
         )
 
-        results = process_candidates(
-            candidates,
-            evaluator=evaluator,
-            conversation_context=context,
-        )
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        import src.memory.store as store
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            records = root / "records"
+            events = root / "events"
+
+            with patch.object(store, "MEMORY_RECORDS_DIR", records),                  patch.object(store, "MEMORY_EVENTS_DIR", events):
+
+                results = process_candidates(
+                    candidates,
+                    evaluator=evaluator,
+                    conversation_context=context,
+                )
 
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0].action, "created")

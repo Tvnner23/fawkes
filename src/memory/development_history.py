@@ -9,6 +9,7 @@ def retrieve_relevant_development(
     similarity,
     candidate_limit=20,
     result_limit=5,
+    instance_id=None,
 ):
     """
     Retrieve and semantically rank Fawkes's prior development history.
@@ -19,6 +20,7 @@ def retrieve_relevant_development(
     candidates = retrieve_development_proposals(
         experience,
         limit=candidate_limit,
+        instance_id=instance_id,
     )
 
     if not candidates:

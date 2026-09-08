@@ -27,6 +27,8 @@ def process_memory_conversation(
     model=None,
     matcher=None,
     retrieval_limit=5,
+    instance_id=None,
+    include_unscoped=False,
 ):
     """
     Run one conversation through Fawkes memory processing.
@@ -35,16 +37,23 @@ def process_memory_conversation(
     remains the immutable source of truth and is never modified here.
     """
     if evaluator is None:
-        evaluator = build_memory_evaluator(
-            provider=provider,
-            model=model,
+        if provider is None:
+            provider = OpenAISemanticMemoryProvider(
+                model=model,
+            )
+
+        evaluator = ModelSemanticMemoryEvaluator(
+            provider,
         )
 
+    if matcher is None and provider is not None:
+        matcher = provider
+
     conversation_context = build_archive_context(
-        conversation_id
+        conversation_id,instance_id=instance_id,include_unscoped=include_unscoped
     )
 
-    candidates = extract_memory_candidates(conversation_id)
+    candidates = extract_memory_candidates(conversation_id,instance_id=instance_id,include_unscoped=include_unscoped)
 
     return process_candidates(
         candidates,
@@ -52,4 +61,6 @@ def process_memory_conversation(
         matcher=matcher,
         conversation_context=conversation_context,
         retrieval_limit=retrieval_limit,
+        instance_id=instance_id,
+        include_unscoped=include_unscoped,
     )

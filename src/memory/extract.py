@@ -1,7 +1,7 @@
 from src.capture.canonical import canonical_messages
 
 
-def extract_memory_candidates(conversation_id: str):
+def extract_memory_candidates(conversation_id: str, *, instance_id=None, include_unscoped=False):
     """
     Produce potential memories from canonical conversation history.
 
@@ -9,7 +9,7 @@ def extract_memory_candidates(conversation_id: str):
     It identifies user-authored messages that may contain durable
     information and preserves their provenance for later evaluation.
     """
-    messages = canonical_messages(conversation_id)
+    messages = canonical_messages(conversation_id,instance_id=instance_id,include_unscoped=include_unscoped)
     candidates = []
 
     for message in messages:
@@ -24,6 +24,7 @@ def extract_memory_candidates(conversation_id: str):
         candidates.append(
             {
                 "candidate_id": message["message_id"],
+                "instance_id": message.get("instance_id"),
                 "memory_type": "unclassified",
                 "content": text,
                 "importance": None,

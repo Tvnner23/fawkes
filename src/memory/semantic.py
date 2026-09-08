@@ -26,6 +26,9 @@ class SemanticMemoryAssessment:
     confidence: float
     importance: float
     reasoning: str | None = None
+    supporting_message_ids: tuple[str, ...] = ()
+    supporting_archive_ids: tuple[str, ...] = ()
+    contract_version: str = "semantic-memory-v2"
 
 
 class SemanticMemoryEvaluator(Protocol):

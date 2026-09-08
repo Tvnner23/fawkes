@@ -10,6 +10,7 @@ def retrieve_development_proposals(
     query: str,
     *,
     limit=5,
+    instance_id=None,
 ):
     """
     Retrieve previously recorded development proposals using simple
@@ -38,6 +39,9 @@ def retrieve_development_proposals(
                 path.read_text(encoding="utf-8")
             )
         except (OSError, json.JSONDecodeError):
+            continue
+
+        if not isinstance(record,dict) or record.get('instance_id') != instance_id:
             continue
 
         searchable = " ".join(

@@ -10,6 +10,7 @@ def run_development_cycle(
     source_message_ids=(),
     candidate_limit=20,
     result_limit=5,
+    instance_id=None,
 ):
     """
     Run one complete developmental reasoning cycle.
@@ -22,6 +23,7 @@ def run_development_cycle(
         similarity=similarity,
         candidate_limit=candidate_limit,
         result_limit=result_limit,
+        instance_id=instance_id,
     )
 
     proposal = evaluator.evaluate(

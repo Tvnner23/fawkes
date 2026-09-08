@@ -338,25 +338,23 @@ The architecture should allow them to exist later without requiring a destructiv
 
 A memory may have multiple historical states.
 
-For example:
+Related education and career facts must not be collapsed merely because they
+share a subject area. They answer different questions and should be represented
+independently:
 
-Version 1:
-"The user plans to become a network engineer."
+- `education_institution`: where the rider studies
+- `degree`: the exact degree or credential being pursued
+- `career_direction`: the current professional field or specialization
+- `career_goal`: the broader long-term professional progression
 
-Later:
+For example, a cybersecurity degree and a networking career direction may
+support and contextualize each other, but neither supersedes nor proves the
+other. Asking for the degree must not return a career direction as if it were
+the degree.
 
-Version 2:
-"The user is pursuing cybersecurity with networking as a major career direction."
-
-Version 1 should not necessarily be destroyed.
-
-Instead:
-
-Version 1
-    ↓ superseded by
-Version 2
-
-This preserves the evolution of understanding.
+True changes within one concept should preserve evolution. A former career
+direction may be superseded by a newer career direction while the independent
+education records remain current.
 
 ---
 
@@ -545,6 +543,16 @@ A less similar memory may be much more important to the current conversation.
 
 The Phoenix should retrieve relevant memories automatically when context warrants them.
 
+Automatic recall is an intended behavior, not a feature the rider must invoke
+with phrases such as "remember" or "pick this back up." Filtering exists to
+improve the relevance of proactive recall, not to make the Phoenix passive.
+
+Current intent takes priority over weak historical similarity. Relevant prior
+experience, decisions, preferences, relationship history, and project state may
+be recalled naturally. Stale procedural commands, terminal transcripts, and
+transient development instructions require strong, intent-compatible relevance
+and must not be injected on the strength of a generic shared word.
+
 It should not dump every related memory into the conversation.
 
 Good recall should feel like:
@@ -626,6 +634,30 @@ Statement C
 stronger confidence
 
 Repeated evidence should not create unnecessary duplicate memories.
+
+### Local persistence and interrupted operations
+
+The scoped JSON store stages a record mutation and its derivation events together.
+A durable, private pending intent binds their complete preimages/postimages to
+the configured record/event directories. Store readers and writers use the same
+thread/process lock. After interruption, they finish that exact intent before
+returning state; a conflicting uncoordinated change stops recovery instead of
+being overwritten. Historical events and Archive bytes are not rewritten.
+
+Repeated source evidence does not accumulate confidence again. A new work-item
+identifier alone is not new independent evidence. Scoped mutation requires the
+explicit matching instance, including supersession, quarantine and duplicate
+retirement. Duplicate merge and supersession publish as complete units.
+
+Legacy records remain readable without migration. A historical work-item record
+without its event/retirement evidence is not proof of completed consolidation:
+it goes to review rather than inventing a recovery intent or silently retiring
+another record. New interrupted intents can be recovered without a provider.
+
+This consistency boundary is the store API over caller-owned local directories,
+not protection against an adversary controlling the same operating-system
+account. POSIX locking/crash recovery is directly qualified; Windows lock support
+is retained but is not claimed physically exercised by that qualification.
 
 ---
 
@@ -794,4 +826,52 @@ Memory contributes to personality.
 Personality develops through accumulated experience.
 
 The Archive preserves the history underneath all of it.
+## Live candidate processing visibility
 
+The live app must not merely enqueue candidates. It advances the durable,
+instance-scoped processing ledger in a bounded background worker after turns.
+The response path never waits for this work. Evaluation records confidence,
+importance, evidence, uncertainty, and disposition; consolidation may accept,
+reject, or route conflicts and ambiguous cases to review. The Developer read
+model exposes queue and review state so stalled processing cannot masquerade as
+an absence of uncertain memories. This processing never rewrites Archive.
+
+## Working context and continuity retrieval
+
+Working context is the bounded recent conversation window supplied directly to
+the model. Continuity retrieval is a separate read path over derived indexes of
+canonical interaction evidence. Memory remains the smaller set of evaluated,
+durable understanding. A historical message can therefore be stored and
+retrievable without being promoted to Memory, and it can be outside working
+context without being inaccessible.
+
+Continuity retrieval may consult older evidence from the current conversation
+or another conversation belonging to the same Phoenix. It excludes messages
+already supplied in the working window, semantically reranks a bounded local
+candidate set for referential requests, and retains a small neighbor window for
+meaning and reasons. A retrieval miss is uncertainty about the bounded search,
+not proof that the Archive lacks the interaction.
+# F05 recovery/ownership correction — source adoption boundary
+
+New work-item completion is bound to its actual mutation event. Provenance on
+a later quarantine or merge is not completion evidence. Legacy work-item
+records without an exact completion binding remain available to read but need
+explicit review before being reported recovered. Recovery synchronizes every
+affected publication directory before discarding its intent, including already
+renamed postimages. No automatic historical migration is performed.
+
+Archive context retains instance ownership; explicit instance selection occurs
+before message revision grouping and provider input. Development history follows
+that same owner before ranking/evaluation. Legacy unscoped records remain a
+separate explicit decision for mutation. Completing missing provenance does not
+constitute independently new evidence or automatically increase confidence.
+# Processing ownership and administrative listing
+
+Memory processing selects one explicit instance, or legacy unscoped records
+when the processing instance is omitted. This default is not an all-owner
+provider grant. The administrative `list_memories()` API still lists all owners;
+processing uses `list_memories_for_context()` before ranking or comparison.
+An explicit `include_unscoped` read does not authorize reassigning or mutating
+legacy records. Extracted candidates retain their known owner; mismatched
+candidate/context ownership requires review before evaluation. Low-level callers
+without retained owner metadata remain responsible for their explicit scope.

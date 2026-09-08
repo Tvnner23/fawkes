@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 import re
 
-from src.memory.store import list_memories
+from src.memory.store import list_memories_for_context
 
 
 DURABLE_MEMORY_TYPES = {
@@ -73,6 +73,8 @@ def retrieve_memories(
     query: str,
     *,
     limit: int = 5,
+    instance_id=None,
+    include_unscoped=False,
 ) -> list[dict]:
     """
     Retrieve active memories relevant to a query.
@@ -82,7 +84,11 @@ def retrieve_memories(
     Retrieval can later be replaced by embeddings or hybrid search
     without changing callers.
     """
-    memories = list_memories(status="active")
+    memories = list_memories_for_context(
+        status="active",
+        instance_id=instance_id,
+        include_unscoped=include_unscoped,
+    )
 
     ranked = []
 

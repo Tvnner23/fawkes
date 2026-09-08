@@ -107,7 +107,9 @@ class FawkesRelationshipProviderPromptTests(unittest.TestCase):
                 '"meaning": null, '
                 '"confidence": 0.5, '
                 '"importance": 0.5, '
-                '"reasoning": "test"}'
+                '"reasoning": "test", '
+                '"supporting_message_ids": [], '
+                '"supporting_archive_ids": []}'
             )
 
         class FakeResponses:
@@ -149,6 +151,15 @@ class FawkesRelationshipProviderPromptTests(unittest.TestCase):
         self.assertIn("relationship moments", prompt)
         self.assertIn("recurrence evidence", prompt)
         self.assertIn("one-off joke", prompt)
+        self.assertIn("must not silently contribute facts", prompt)
+        self.assertIn("supporting_message_ids", prompt)
+        self.assertIn("source archive ID", prompt)
+        self.assertIn("education_institution", prompt)
+        self.assertIn("degree", prompt)
+        self.assertIn("career_direction", prompt)
+        self.assertIn("career_goal", prompt)
+        self.assertIn("must not be collapsed", prompt)
+        self.assertIn("not evidence of the name of their degree", prompt)
 
 
 if __name__ == "__main__":

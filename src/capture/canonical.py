@@ -10,7 +10,7 @@ RAW_DIR = ROOT / "archive" / "raw"
 META_DIR = ROOT / "archive" / "meta"
 
 
-def load_message_states(conversation_id: str):
+def load_message_states(conversation_id: str, *, instance_id=None, include_unscoped=False):
     states = defaultdict(list)
 
     for meta_path in META_DIR.glob("*.json"):
@@ -27,6 +27,10 @@ def load_message_states(conversation_id: str):
         ):
             continue
 
+        owner=metadata.get('instance_id')
+        if instance_id is not None and owner != instance_id and not (owner is None and include_unscoped):
+            continue
+
         raw_path = RAW_DIR / metadata["raw_file"]
 
         try:
@@ -39,9 +43,10 @@ def load_message_states(conversation_id: str):
         if record.get("message_id") is None:
             continue
 
-        states[record["message_id"]].append(
+        states[(owner,record["message_id"])].append(
             {
                 "archive_id": metadata["archive_id"],
+                "instance_id": metadata.get("instance_id"),
                 "created_at": metadata["created_at"],
                 "message_id": record["message_id"],
                 "role": record.get("role"),
@@ -60,12 +65,18 @@ def choose_latest_state(states):
     )
 
 
-def canonical_messages(conversation_id: str):
-    states_by_id = load_message_states(conversation_id)
+def canonical_messages(conversation_id: str, *, instance_id=None, include_unscoped=False):
+    states_by_id = load_message_states(conversation_id,instance_id=instance_id,include_unscoped=include_unscoped)
+    owners={owner for owner,_ in states_by_id}
+    if instance_id is None and len(owners)>1:
+        raise ValueError('Explicit instance required for a shared conversation identity')
+    ids=[message_id for _,message_id in states_by_id]
+    if len(ids)!=len(set(ids)):
+        raise ValueError('Scoped and legacy message identities conflict; explicit migration decision required')
 
     messages = []
 
-    for message_id, revisions in states_by_id.items():
+    for (owner,message_id), revisions in states_by_id.items():
         state = choose_latest_state(revisions)
 
         role = state["role"]
@@ -89,6 +100,7 @@ def canonical_messages(conversation_id: str):
                 "model_slug": state["model_slug"],
                 "created_at": state["created_at"],
                 "source_archive_id": state["archive_id"],
+                "instance_id": state.get("instance_id"),
                 "revision_count": len(revisions),
             }
         )
@@ -100,8 +112,8 @@ def canonical_messages(conversation_id: str):
     return messages
 
 
-def reconstruct_canonical_conversation(conversation_id: str):
-    messages = canonical_messages(conversation_id)
+def reconstruct_canonical_conversation(conversation_id: str, **scope):
+    messages = canonical_messages(conversation_id,**scope)
 
     return {
         "schema_version": 1,

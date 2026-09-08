@@ -44,6 +44,27 @@ class FawkesMemoryRetrievalTests(unittest.TestCase):
                     unrelated.memory_id,
                 )
 
+    def test_degree_query_does_not_substitute_related_career_direction(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            records, events = self._directories(tmp)
+            with patch.object(store, "MEMORY_RECORDS_DIR", records), patch.object(
+                store, "MEMORY_EVENTS_DIR", events
+            ):
+                degree = store.create_memory(
+                    memory_type="degree",
+                    content="The rider is pursuing a B.S. in Cybersecurity Technology.",
+                )
+                career = store.create_memory(
+                    memory_type="career_direction",
+                    content="The rider chose networking as a career direction.",
+                )
+
+                results = retrieve_memories("What degree am I pursuing?")
+
+            self.assertTrue(results)
+            self.assertEqual(results[0]["memory_id"], degree.memory_id)
+            self.assertNotEqual(results[0]["memory_id"], career.memory_id)
+
     def test_retrieval_excludes_superseded_memories(self):
         with tempfile.TemporaryDirectory() as tmp:
             records, events = self._directories(tmp)

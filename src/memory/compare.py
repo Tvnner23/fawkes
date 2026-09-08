@@ -7,6 +7,14 @@ class MemoryComparison:
     """
     Semantic relationship between new evidence and an existing memory.
 
+    Valid relations:
+      duplicate   - same underlying memory; consolidate evidence
+      supports    - distinct evidence reinforcing the existing memory
+      related     - conceptually related but independently useful; keep both
+      revises     - updates/refines the existing memory
+      supersedes  - replaces the existing memory
+      contradicts - conflicts with the existing memory
+
     This is an interpretation, not persistent state.
     """
     relation: str

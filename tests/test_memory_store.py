@@ -8,6 +8,50 @@ import src.memory.store as store
 
 
 class FawkesMemoryStoreTests(unittest.TestCase):
+    def test_quarantine_removes_memory_from_active_set_without_deleting_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            records = root / "records"
+            events = root / "events"
+            with patch.object(store, "MEMORY_RECORDS_DIR", records), patch.object(
+                store, "MEMORY_EVENTS_DIR", events
+            ):
+                memory = store.create_memory(
+                    "technical_insight",
+                    "A temporary parser measurement.",
+                    source_message_ids=("message-1",),
+                    source_archive_ids=("archive-1",),
+                )
+                quarantined = store.quarantine_memory(
+                    memory.memory_id,
+                    reason="Temporary implementation detail, not personal memory.",
+                    actor="maintenance-review",
+                )
+                replayed = store.quarantine_memory(
+                    memory.memory_id,
+                    reason="Temporary implementation detail, not personal memory.",
+                    actor="maintenance-review",
+                )
+                active = store.list_memories(status="active")
+                saved = store.load_memory(memory.memory_id)
+                event_records = [
+                    json.loads(path.read_text(encoding="utf-8"))
+                    for path in events.glob("*.json")
+                ]
+
+            self.assertEqual(quarantined, replayed)
+            self.assertEqual(active, [])
+            self.assertEqual(saved["status"], "quarantined")
+            self.assertTrue((records / f"{memory.memory_id}.json").exists())
+            quarantine_events = [
+                event for event in event_records
+                if event["event_type"] == "quarantined"
+            ]
+            self.assertEqual(len(quarantine_events), 1)
+            self.assertEqual(
+                quarantine_events[0]["source_archive_ids"], ["archive-1"]
+            )
+
     def test_memory_records_and_events_use_separate_runtime_directories(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -257,6 +301,117 @@ class FawkesMemoryStoreTests(unittest.TestCase):
                     strengthened_events[0]["source_message_ids"],
                     ["message-2"],
                 )
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+class FawkesStoreDuplicateProtectionTests(unittest.TestCase):
+    def test_create_memory_does_not_create_exact_active_duplicate(self):
+        from pathlib import Path
+        from unittest.mock import patch
+
+        from src.memory.store import (
+            create_memory,
+            list_memories,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            records = root / "records"
+            events = root / "events"
+
+            with patch(
+                "src.memory.store.MEMORY_RECORDS_DIR",
+                records,
+            ), patch(
+                "src.memory.store.MEMORY_EVENTS_DIR",
+                events,
+            ):
+                first = create_memory(
+                    "career_goal",
+                    "The user chose networking as their career direction.",
+                    confidence=0.80,
+                )
+
+                second = create_memory(
+                    "career_goal",
+                    "The user chose networking as their career direction.",
+                    confidence=0.90,
+                    source_message_ids=("independent-confirmation",),
+                )
+
+                active = list_memories(status="active")
+
+        self.assertEqual(
+            second.memory_id,
+            first.memory_id,
+        )
+        self.assertEqual(
+            len(active),
+            1,
+        )
+        self.assertGreaterEqual(
+            active[0]["confidence"],
+            0.90,
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+class FawkesMemoryProvenanceTests(unittest.TestCase):
+    def test_strengthening_merges_new_provenance(self):
+        from pathlib import Path
+        from unittest.mock import patch
+
+        from src.memory.store import (
+            create_memory,
+            load_memory,
+            strengthen_memory,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            with patch(
+                "src.memory.store.MEMORY_RECORDS_DIR",
+                root / "records",
+            ), patch(
+                "src.memory.store.MEMORY_EVENTS_DIR",
+                root / "events",
+            ):
+                memory = create_memory(
+                    "career_goal",
+                    "The user chose networking as their career direction.",
+                    source_message_ids=("message-1",),
+                    source_archive_ids=("archive-1",),
+                    confidence=0.70,
+                )
+
+                strengthen_memory(
+                    memory.memory_id,
+                    confidence=0.90,
+                    source_message_ids=("message-2",),
+                    source_archive_ids=("archive-2",),
+                )
+
+                stored = load_memory(memory.memory_id)
+
+        self.assertEqual(
+            set(stored["source_message_ids"]),
+            {"message-1", "message-2"},
+        )
+        self.assertEqual(
+            set(stored["source_archive_ids"]),
+            {"archive-1", "archive-2"},
+        )
+        self.assertGreaterEqual(
+            stored["confidence"],
+            0.90,
+        )
 
 
 if __name__ == "__main__":
