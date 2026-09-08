@@ -1108,6 +1108,127 @@ class FawkesAppHandler(BaseHTTPRequestHandler):
             pass
         self._json(status, payload)
 
+    def _workshop(self, parsed, *, write=False):
+        """Inert evidence projection; no campaign, provider or application calls."""
+        from src.memory.workshop import WorkshopStore, WorkshopConflict, WorkshopError, WorkshopStateError
+        from src.runtime.personal_recording import RecordingPolicyStore
+
+        if not self._require_auth(record_rider_activity=False):
+            return
+        if write:
+            origin = urlparse(self.headers.get("Origin", ""))
+            if (origin.scheme not in {"http", "https"} or origin.path or origin.query or origin.fragment
+                    or origin.netloc.lower() != self.headers.get("Host", "").lower()
+                    or not self.server.app_session_store.valid_csrf(self._session_token(),
+                        self.headers.get("X-Fawkes-CSRF-Token", ""), rider_id="tanner")):
+                self._json(403, {"error": {"code": "workshop_auth_required",
+                    "message": "Workshop writes require this app's current Tanner browser session, Origin and session-bound CSRF token."}})
+                return
+        try:
+            suffix = parsed.path[len("/api/development/workshop"):]
+            intake = suffix == "/intake-development" and write
+            source = re.fullmatch(r"/development-source/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})", suffix) if not write else None
+            match = re.fullmatch(r"(?:/(workshop-[0-9a-f]{32})(?:/(actions|review))?)?", suffix)
+            if not match and not intake and not source:
+                raise KeyError("Workshop route not found")
+            proposal_id, operation = match.groups() if match else (None, None)
+            query = parse_qs(parsed.query, keep_blank_values=True)
+            if ((write and query) or set(query) - {"revision"}
+                    or any(len(values) != 1 for values in query.values())
+                    or (query and (not proposal_id or operation))):
+                raise ValueError("Only an exact proposal revision may be requested.")
+            instance_id = self.server.chat_service.instance_id
+            policy_store = getattr(self.server.chat_service, "_recording_policy_store", None)
+            policy_store = policy_store or RecordingPolicyStore(instance_id)
+            if policy_store.instance_id != instance_id:
+                raise PermissionError("Workshop requires the server's exact Phoenix owner.")
+            from src.memory import development_store
+            from src.runtime import worker_exchange
+            store = WorkshopStore(instance_id, root=policy_store.root,
+                development_root=development_store.DEVELOPMENT_DIR.resolve(),
+                exchange_root=worker_exchange.EXCHANGE_ROOT.resolve())
+            envelope = {"schema_version": "fawkes.workshop.http.v1", "instance_id": instance_id,
+                        "creates_authority": False, "execution_allowed": False}
+            if not write:
+                if operation:
+                    raise KeyError("Workshop read route not found")
+                if source:
+                    envelope["development_source"] = store.development_source(source.group(1))
+                elif proposal_id:
+                    revision = query.get("revision", [None])[0]
+                    if revision is not None and not re.fullmatch(r"[1-9][0-9]{0,8}", revision):
+                        raise ValueError("Revision must be a positive integer.")
+                    envelope["proposal"] = store.get(proposal_id,
+                        revision=int(revision) if revision is not None else None)
+                    envelope["history"] = [{key: record[key] for key in (
+                        "revision", "record_sha256", "event", "updated_at")}
+                        for record in store.history(proposal_id)]
+                else:
+                    envelope["proposals"] = store.list()
+            else:
+                length = int(self.headers.get("Content-Length", "0"))
+                if length <= 0 or length > 128_000:
+                    raise ValueError("Workshop request exceeds its size bound.")
+                def unique(pairs):
+                    result = {}
+                    for key, value in pairs:
+                        if key in result:
+                            raise ValueError("Duplicate Workshop JSON keys are not allowed.")
+                        result[key] = value
+                    return result
+                def nonfinite(_):
+                    raise ValueError("Workshop JSON must be finite.")
+                payload = json.loads(self.rfile.read(length), object_pairs_hook=unique, parse_constant=nonfinite)
+                if not isinstance(payload, dict):
+                    raise ValueError("Workshop request must be an object.")
+                policy = policy_store.latch()
+                actor = {"worker_id": "rider-tanner", "role": "rider_submission",
+                         "identity_status": "rider_attested", "charter_version": "workshop-browser-v1"}
+                if intake:
+                    if set(payload) != {"source_proposal_id", "expected_source_sha256", "classification"}:
+                        raise ValueError("Exact existing Development source identity, digest and classification are required.")
+                    envelope["proposal"] = store.intake_development(payload["source_proposal_id"],
+                        expected_source_sha256=payload["expected_source_sha256"], classification=payload["classification"],
+                        actor=actor, recording_policy=policy)
+                elif not proposal_id:
+                    envelope["proposal"] = store.create(payload, actor=actor, recording_policy=policy)
+                else:
+                    expected_fields = ({"expected_revision", "action", "payload"} if operation == "actions"
+                                       else {"expected_revision", "decision", "note"})
+                    if not operation or set(payload) != expected_fields:
+                        raise ValueError("Exact Workshop action fields and revision are required.")
+                    revision = payload["expected_revision"]
+                    if type(revision) is not int or revision < 1:
+                        raise ValueError("The current integer proposal revision is required.")
+                    if operation == "review":
+                        envelope["proposal"] = store.review(proposal_id, expected_revision=revision,
+                            decision=payload["decision"], note=payload["note"], rider_principal_id="tanner",
+                            authenticated_rider=True, recording_policy=policy)
+                    else:
+                        envelope["proposal"] = store.append(proposal_id, expected_revision=revision,
+                            action=payload["action"], payload=payload["payload"], actor=actor, recording_policy=policy)
+            envelope["recording_policy"] = policy_store.load().public()
+            self._json(201 if write and not proposal_id else 200, envelope)
+        except WorkshopConflict:
+            self._json(409, {"error": {"code": "workshop_revision_conflict",
+                "message": "Workshop changed elsewhere. Reload its exact revision before another write; nothing was retried."}})
+        except WorkshopStateError:
+            self._json(503, {"error": {"code": "workshop_state_unconfirmed",
+                "message": "Workshop state or durability is unconfirmed. Reload its exact revision before another write; no write was retried or applied."}})
+        except RecordingPolicyError:
+            self._json(503, {"error": {"code": "workshop_recording_unavailable",
+                "message": "Recording settings are unavailable. No successful Workshop write has been assumed; reload the current record."}})
+        except PermissionError:
+            self._json(403, {"error": {"code": "workshop_retention_denied",
+                "message": "Workshop personal diagnostics retention or matching ownership is unavailable. Existing evidence remains read-only."}})
+        except (KeyError, FileNotFoundError):
+            self._json(404, {"error": {"code": "workshop_not_found", "message": "That Workshop record or evidence is unavailable for this Phoenix."}})
+        except (WorkshopError, ValueError, UnicodeDecodeError, RecursionError) as exc:
+            self._json(400, {"error": {"code": "invalid_workshop_request", "message": str(exc)}})
+        except Exception:
+            self._json(503, {"error": {"code": "workshop_unavailable",
+                "message": "Workshop state or durability could not be confirmed. Reload the exact record before another write; nothing was applied."}})
+
     def _require_auth(self, *, record_rider_activity=True):
         if self._authorized():
             instance_id = getattr(self.server.chat_service, "instance_id", None)
@@ -1138,6 +1259,9 @@ class FawkesAppHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
         path = parsed.path
+        if path == "/api/development/workshop" or path.startswith("/api/development/workshop/"):
+            self._workshop(parsed)
+            return
         reply_match = re.fullmatch(r'/api/development/worker/replies/([0-9a-f-]{36})', path)
         if path == '/api/development/worker' or reply_match:
             if not self._require_auth(record_rider_activity=False): return
@@ -1388,6 +1512,9 @@ class FawkesAppHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
+        if path == "/api/development/workshop" or path.startswith("/api/development/workshop/"):
+            self._workshop(urlparse(self.path), write=True)
+            return
         if path in {'/api/development/worker/replies', '/api/development/worker/clipboard'}:
             if not self._require_auth(record_rider_activity=False): return
             if not self._require_attention_decision_auth(): return

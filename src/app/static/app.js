@@ -948,7 +948,254 @@ function proposalCard(record) {
   card.append(element('h3', '', record.observation || 'Development proposal'));
   card.append(element('p', '', record.proposed_change || 'No proposed change recorded.'));
   card.append(element('p', 'meta', `${readable(record.origin || 'legacy proposal')} · ${dateLabel(record.created_at)}`));
+  if (record.proposal_id) {
+    const intake = element('button', '', 'Continue existing proposal in Workshop'); intake.type = 'button';
+    intake.addEventListener('click', () => openWorkshopIntake(record.proposal_id)); card.append(intake);
+  }
   return card;
+}
+// Workshop is an evidence editor, not an execution or promotion controller.
+let workshopData = null;
+let workshopError = '';
+let workshopSelected = null;
+let workshopHistory = [];
+let workshopHistorical = false;
+const workshopClasses = ['knowledge_gap', 'retrieval_context_failure', 'capability_gap',
+  'workflow_inefficiency', 'ui_defect', 'code_system_defect', 'security_privacy',
+  'memory_issue', 'development_observation', 'base_phoenix_candidate'];
+function workshopWritable() {
+  const policy = workshopData && workshopData.recording_policy;
+  return !!(policy && policy.mode === 'retained' && policy.categories
+    && policy.categories.archive_recording && policy.categories.personal_diagnostics);
+}
+function workshopLines(value) { return value.split('\n').map(item => item.trim()).filter(Boolean); }
+function workshopInputError(message) { return Object.assign(new Error(message), { status: 400 }); }
+function workshopReferences(value) {
+  return workshopLines(value).map(line => {
+    const pieces = line.split('|').map(item => item.trim());
+    if (pieces.length !== 2 || !pieces[0] || !/^[0-9a-f]{64}$/.test(pieces[1])) throw workshopInputError('Use one report_id | sha256 reference per line.');
+    return { kind: 'worker_exchange_report', instance_id: workshopData.instance_id,
+      report_id: pieces[0], record_sha256: pieces[1] };
+  });
+}
+function workshopCriteria(value, mandatory) {
+  return workshopLines(value).map(line => {
+    const split = line.indexOf('|');
+    if (split < 1 || !line.slice(split + 1).trim()) throw workshopInputError('Use criterion_id | observable expectation on each criterion line.');
+    return { criterion_id: line.slice(0, split).trim(), expectation: line.slice(split + 1).trim(), mandatory };
+  });
+}
+function workshopRecord(value) {
+  if (!value || value.schema_version !== 'fawkes.workshop.http.v1' || !value.proposal
+      || !Number.isInteger(value.proposal.revision) || value.proposal.instance_id !== value.instance_id
+      || value.proposal.applied_revision !== null || value.proposal.outcome !== 'not_applied') {
+    throw new Error('The Workshop response was invalid; no saved or applied outcome was assumed.');
+  }
+  return value.proposal;
+}
+async function loadWorkshop() {
+  try {
+    const data = await request('/api/development/workshop');
+    if (data.schema_version !== 'fawkes.workshop.http.v1' || !Array.isArray(data.proposals)
+        || typeof data.instance_id !== 'string' || !recordingShape(data.recording_policy)) throw new Error('Workshop state is unavailable.');
+    workshopData = data; workshopError = '';
+  } catch (error) { workshopData = null; workshopError = error.message; }
+  if (developerSection === 'workshop' || developerSection === 'review') renderDeveloperSection();
+}
+async function openWorkshop(id, revision = null) {
+  detailPanel.classList.remove('hidden');
+  replaceContent(detailContent, element('p', 'dev-empty', 'Loading exact Workshop revision…'));
+  try {
+    const data = await request(`/api/development/workshop/${encodeURIComponent(id)}${revision === null ? '' : '?revision=' + revision}`);
+    workshopSelected = workshopRecord(data); workshopHistory = data.history || [];
+    workshopHistorical = revision !== null; workshopData = { ...(workshopData || {}),
+      instance_id: data.instance_id, recording_policy: data.recording_policy };
+    renderWorkshopDetail();
+  } catch (error) { replaceContent(detailContent, element('p', 'recording-error', error.message)); }
+}
+async function openWorkshopIntake(sourceId) {
+  detailPanel.classList.remove('hidden'); replaceContent(detailContent, element('p', '', 'Inspecting the exact existing Development source…'));
+  try {
+    const data = await request(`/api/development/workshop/development-source/${encodeURIComponent(sourceId)}`);
+    const source = data.development_source;
+    if (data.schema_version !== 'fawkes.workshop.http.v1' || !source || source.source_proposal_id !== sourceId
+        || source.instance_id !== data.instance_id || !/^[0-9a-f]{64}$/.test(source.expected_source_sha256)
+        || !recordingShape(data.recording_policy)) throw new Error('The exact owned Development source was not confirmed.');
+    workshopData = { ...(workshopData || {}), instance_id: data.instance_id, recording_policy: data.recording_policy };
+    const heading = element('h2', '', 'Continue an existing Development proposal'); heading.id = 'detail-title';
+    replaceContent(detailContent, heading,
+      element('p', '', source.observation), element('p', 'meta', `${source.source_proposal_id} · ${source.expected_source_sha256}`),
+      element('p', '', `Recorded origin: ${readable(source.origin)}. Historical producer identity: ${readable(source.producer_identity)}.`),
+      element('p', '', 'Rider-initiated intake preserves the exact source and its missing provenance. It does not claim investigation, acceptance or evaluation was completed, and does not change the original proposal.'));
+    const exact = element('details', 'workshop-step'); exact.append(element('summary', '', 'Inspect original source snapshot'),
+      element('pre', 'workshop-record', JSON.stringify(source.source_record, null, 2))); detailContent.append(exact);
+    detailContent.append(workshopForm('Classify and preserve this exact existing source', [
+      ['classification', 'Problem class', 'select', true, workshopClasses]], 'Intake existing source; do not apply', async fields => {
+      const result = await request('/api/development/workshop/intake-development', { method: 'POST',
+        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ source_proposal_id: sourceId,
+          expected_source_sha256: source.expected_source_sha256, classification: fields.classification }) });
+      const record = workshopRecord(result); await loadWorkshop(); await openWorkshop(record.proposal_id);
+    }, false));
+    if (!workshopWritable()) detailContent.append(element('p', 'meta', 'Read-only while personal diagnostics retention is disabled.'));
+  } catch (error) { replaceContent(detailContent, element('p', 'recording-error', error.message)); }
+}
+function workshopForm(title, fields, submitLabel, onSubmit, historical = workshopHistorical) {
+  const details = element('details', 'workshop-step'); details.append(element('summary', '', title));
+  const form = element('form', 'workshop-form'); const controls = {};
+  fields.forEach(([name, label, type = 'text', required = true, options = null]) => {
+    const row = element('label', 'workshop-field'); row.append(element('span', '', label));
+    const control = document.createElement(type === 'select' ? 'select' : 'textarea');
+    control.setAttribute('aria-label', label); control.name = name; control.required = required;
+    if (type === 'select') options.forEach(value => {
+      const option = element('option', '', readable(String(value))); option.value = String(value); control.append(option);
+    });
+    else { control.rows = type === 'lines' ? 3 : 2; control.maxLength = 12000; }
+    controls[name] = control; row.append(control); form.append(row);
+  });
+  const notice = element('p', 'workshop-notice'); notice.setAttribute('role', 'status');
+  const submit = element('button', '', submitLabel); submit.type = 'submit';
+  submit.disabled = !workshopWritable() || historical;
+  form.append(submit, notice); details.append(form);
+  form.addEventListener('submit', async event => {
+    event.preventDefault(); if (submit.disabled) return;
+    submit.disabled = true; notice.textContent = 'Saving this exact revision…';
+    try {
+      await onSubmit(Object.fromEntries(Object.entries(controls).map(([key, control]) => [key, control.value.trim()])));
+    } catch (error) {
+      notice.textContent = `Not confirmed. ${error.message} No request was retried. Reload the exact proposal before another write if its state may have changed.`;
+      // A stale or ambiguous write must be reconciled by a read, not a replay.
+      if (!error.status || error.status >= 500 || error.status === 409) return;
+      submit.disabled = !workshopWritable();
+    }
+  });
+  return details;
+}
+async function mutateWorkshop(record, action, payload, review = false) {
+  const data = await request(`/api/development/workshop/${encodeURIComponent(record.proposal_id)}/${review ? 'review' : 'actions'}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ expected_revision: record.revision, ...(review ? payload : { action, payload }) }),
+  });
+  const updated = workshopRecord(data);
+  if (updated.proposal_id !== record.proposal_id || updated.revision !== record.revision + 1) throw new Error('The exact new revision was not confirmed.');
+  await loadWorkshop(); await openWorkshop(updated.proposal_id);
+}
+function workshopCard(record) {
+  const card = element('article', 'dev-card'); card.append(pill('Workshop'), pill(record.status));
+  card.append(element('h3', '', record.observation || record.proposal_id));
+  card.append(element('p', 'meta', `${readable(record.classification)} · revision ${record.revision} · Not applied`));
+  const inspect = element('button', '', 'Inspect Workshop evidence'); inspect.type = 'button';
+  inspect.addEventListener('click', () => openWorkshop(record.proposal_id)); card.append(inspect);
+  return card;
+}
+function renderWorkshop() {
+  clearNode(developerContent);
+  developerContent.append(element('h2', '', 'Improvement Workshop'), element('p', '',
+    'Preserve a failure, investigate, design a change and its acceptance contract, import isolated evaluation evidence, then submit an inert proposal to Human Review. Nothing here runs a provider, experiment, campaign or application.'));
+  const reload = element('button', '', 'Reload Workshop'); reload.type = 'button'; reload.addEventListener('click', loadWorkshop); developerContent.append(reload);
+  if (workshopError) developerContent.append(element('p', 'recording-error', workshopError));
+  if (!workshopData || !Array.isArray(workshopData.proposals)) return;
+  developerContent.append(element('p', 'meta', workshopWritable()
+    ? 'New records are retained personal diagnostics, attributed to rider input—not a Phoenix-generated experiment. Existing reports retain their original producer identity.'
+    : 'Read-only: recording is private, Archive recording or personal diagnostics is off, or settings are unavailable. Existing evidence remains inspectable.'));
+  developerContent.append(workshopForm('1. Preserve and classify a failure', [
+    ['classification', 'Problem class', 'select', true, workshopClasses],
+    ['observation', 'Observed failure'], ['interpretation', 'Interpretation (separate from evidence)'],
+    ['uncertainty', 'Uncertainty / what is not known'],
+    ['evidence', 'Existing Exchange evidence — report_id | sha256, one per line (optional)', 'lines', false],
+  ], 'Preserve failure', async fields => {
+    const data = await request('/api/development/workshop', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...fields, evidence: workshopReferences(fields.evidence) }) });
+    const record = workshopRecord(data); await loadWorkshop(); await openWorkshop(record.proposal_id);
+  }, false));
+  if (!workshopData.proposals.length) developerContent.append(element('p', 'dev-empty', 'No Workshop failures recorded. Empty evidence does not count as completed evaluation.'));
+  workshopData.proposals.forEach(record => developerContent.append(workshopCard(record)));
+}
+function renderWorkshopDetail() {
+  const record = workshopSelected;
+  const heading = element('h2', '', 'Workshop evidence'); heading.id = 'detail-title';
+  replaceContent(detailContent, heading, element('p', '', record.observation),
+    element('p', 'meta', `${record.proposal_id} · revision ${record.revision} · ${record.record_sha256}`),
+    element('p', '', 'Not applied. Evidence imports do not run tests. A recorded approval is not an execution grant or an independent acceptance.'));
+  if (record.origin && record.origin.kind === 'development_proposal_intake') detailContent.append(element('p', 'meta',
+    `Existing Development source: ${record.origin.source_proposal_id}. Recorded origin: ${readable(record.origin.origin)}. Historical producer: ${readable(record.origin.producer_identity)}. Intake is rider-attributed; missing stages remain incomplete.`));
+  const contract = (record.acceptance_contracts || []).at(-1);
+  const evaluation = (record.evaluations || []).at(-1);
+  const sameCandidate = (a, b) => a && b && ['candidate_id', 'revision', 'sha256', 'instance_id', 'reality_scope']
+    .every(key => typeof a[key] === 'string' && a[key] === b[key]);
+  const currentEvaluation = evaluation && contract && evaluation.contract_version === contract.contract_version
+    && evaluation.contract_sha256 === contract.contract_sha256;
+  const assurance = currentEvaluation && (record.assurance || []).filter(item =>
+    item.contract_version === contract.contract_version && item.contract_sha256 === contract.contract_sha256
+    && sameCandidate(item.candidate, evaluation.candidate)
+    && item.evaluation_report && evaluation.report_reference
+    && item.evaluation_report.report_id === evaluation.report_reference.report_id
+    && item.evaluation_report.record_sha256 === evaluation.report_reference.record_sha256).at(-1);
+  detailContent.append(pill(record.status), pill(`Scoped evidence: ${record.verdict || 'inconclusive'}`),
+    element('h3', '', 'Expected'), element('p', '', contract ? contract.rider_expectation : 'Acceptance not declared.'),
+    element('h3', '', 'Observed'), element('p', '', evaluation
+      ? (evaluation.results || []).map(result => `${result.criterion_id}: ${result.verdict} — ${result.observed}`).join('\n')
+      : 'No isolated evaluation imported. No experiment or passing result is claimed.'),
+    element('h3', '', 'Failures, risks and unknowns'), element('p', '', [record.uncertainty,
+      ...((record.design && record.design.risks) || []), ...((evaluation && evaluation.limitations) || []),
+      ...((assurance && assurance.disagreements) || [])].join('\n')));
+  if (assurance) detailContent.append(element('h3', '', 'Authority check / rider impact / recommendation'),
+    element('p', '', [assurance.authority_check, assurance.rider_impact, assurance.recommendation].join('\n')));
+  else detailContent.append(element('p', 'meta', 'No current Assurance matches this exact candidate, evaluation and acceptance contract.'));
+  if ((record.assurance || []).some(item => item !== assurance)) detailContent.append(element('p', 'meta',
+    'Historical Assurance is retained in the expandable exact record; it is not advice for the current candidate.'));
+  const reload = element('button', '', 'Reload current revision'); reload.type = 'button';
+  reload.addEventListener('click', () => openWorkshop(record.proposal_id)); detailContent.append(reload);
+  const versions = element('div', 'workshop-versions');
+  workshopHistory.forEach(item => {
+    const revision = typeof item === 'number' ? item : item.revision;
+    const button = element('button', '', `Inspect revision ${revision}`); button.type = 'button';
+    button.addEventListener('click', () => openWorkshop(record.proposal_id, revision)); versions.append(button);
+  }); detailContent.append(versions);
+  const exact = element('details', 'workshop-step'); exact.append(element('summary', '', 'Exact record, evidence, limitations and disagreements'),
+    element('pre', 'workshop-record', JSON.stringify(record, null, 2))); detailContent.append(exact);
+  if (workshopHistorical || !workshopWritable() || (record.reviews || []).length) { detailContent.append(element('p', 'meta', 'This view is read-only. Historical and reviewed revisions are immutable. Reload current revision and confirm recording settings before new records.')); return; }
+  if (record.status === 'submitted') {
+    detailContent.append(workshopForm('Human Review — decision only', [
+      ['decision', 'Rider decision', 'select', true, ['approve', 'reject']], ['note', 'Review note / limitations']],
+    'Record rider decision; do not apply', fields => mutateWorkshop(record, null, fields, true)));
+    return;
+  }
+  const stage = (title, fields, label, action, convert) => detailContent.append(workshopForm(title, fields, label,
+    values => mutateWorkshop(record, action, convert(values))));
+  stage('2. Record investigation and learning', [['investigation', 'Investigation performed / sources inspected'],
+    ['knowledge', 'Relevant knowledge learned'], ['hypothesis', 'Testable hypothesis'],
+    ['evidence', 'Existing Exchange evidence — report_id | sha256, one per line', 'lines', false],
+    ['cost', 'Investigation cost / time used — say unknown if unmeasured', 'text']],
+  'Record investigation', 'investigate', fields => {
+    return { ...fields, evidence: workshopReferences(fields.evidence),
+      cost: { description: fields.cost, basis: 'rider_reported' } };
+  });
+  stage('3. Design the improvement', [['proposed_change', 'Proposed change'], ['affected_systems', 'Affected systems — one per line', 'lines'],
+    ['permissions', 'Required permissions — one per line; blank means none requested', 'lines', false], ['risks', 'Risks — one per line', 'lines'],
+    ['rollback', 'Rollback / recovery plan']], 'Record design', 'design', fields => ({ ...fields,
+      affected_systems: workshopLines(fields.affected_systems), permissions: workshopLines(fields.permissions), risks: workshopLines(fields.risks) }));
+  stage('4. Declare acceptance before evaluation', [['intended_behavior', 'Intended behavior'], ['forbidden_behavior', 'Forbidden behavior'],
+    ['rider_expectation', 'What Tanner should observe'], ['hard_invariants', 'Hard invariants — one per line', 'lines'],
+    ['failure_behavior', 'Required failure behavior'], ['regression_boundary', 'Regression boundary'], ['rollback_requirement', 'Rollback requirement'],
+    ['evidence_required', 'Required evidence — one per line', 'lines'], ['assurance_tier', 'Assurance tier', 'select', true, [0, 1, 2, 3]],
+    ['limitations', 'Known limitations — one per line', 'lines', false],
+    ['mandatory', 'Mandatory criteria — criterion_id | observable expectation', 'lines'],
+    ['optional', 'Optional criteria — criterion_id | observable expectation', 'lines', false]],
+  'Declare versioned acceptance', 'declare_acceptance', fields => {
+    const { mandatory, optional, ...contract } = fields;
+    ['hard_invariants', 'evidence_required', 'limitations'].forEach(key => { contract[key] = workshopLines(contract[key]); });
+    return { ...contract, assurance_tier: Number(contract.assurance_tier), criteria: [...workshopCriteria(mandatory, true), ...workshopCriteria(optional, false)] };
+  });
+  ['evaluation', 'assurance'].forEach(kind => {
+    const step = workshopForm(`5. Import existing ${kind} evidence (does not run it)`,
+      [['reference', 'Exact existing report — report_id | sha256']], `Import ${kind} report`, fields => {
+        const references = workshopReferences(fields.reference);
+        if (references.length !== 1) throw workshopInputError('Exactly one existing report is required.');
+        return mutateWorkshop(record, `record_${kind}`, { report_reference: references[0] });
+      });
+    step.append(element('p', 'meta', `Requires an attributed Worker Exchange workshop-${kind}-v1 section bound to this proposal, acceptance version and isolated candidate. Missing, failed or inconclusive evidence remains visible; no report is manufactured here.`)); detailContent.append(step);
+  });
+  stage('6. Submit the evaluated proposal to Human Review', [], 'Submit inert proposal', 'submit', () => ({}));
 }
 function reviewCard(record) {
   const card = element('article', 'dev-card');
@@ -1221,6 +1468,7 @@ function renderPhoenixBoard(campaigns, attentionItems) {
   return board;
 }
 function renderDeveloperSection() {
+  if (developerSection === 'workshop') { renderWorkshop(); return; }
   if (developerSection === 'tests') { renderTestCenter(); return; }
   clearNode(developerContent);
   if (developerSection === 'attention') {
@@ -1430,7 +1678,10 @@ function renderDeveloperSection() {
     return;
   }
   if (developerSection === 'review') {
-    if (!developerData.human_review_items.length) { emptyState('No human-review items recorded yet.'); return; }
+    if (workshopError) developerContent.append(element('p', 'recording-error', `Workshop review unavailable: ${workshopError}`));
+    const workshopItems = ((workshopData && workshopData.proposals) || []).filter(record => ['needs_review', 'submitted', 'approved_for_future_action', 'rejected'].includes(record.status));
+    workshopItems.forEach(record => developerContent.append(workshopCard(record)));
+    if (!developerData.human_review_items.length && !workshopItems.length) { developerContent.append(element('p', 'dev-empty', 'No human-review items recorded yet.')); return; }
     developerData.human_review_items.forEach(record => developerContent.append(reviewCard(record)));
     return;
   }
@@ -1488,6 +1739,7 @@ async function openRuntimeStatus() {
   catch (error) { replaceContent(detailContent, element('p', 'dev-empty', error.message)); }
 }
 async function loadDeveloper() {
+  if (developerSection === 'workshop') { await loadWorkshop(); return; }
   status.textContent = 'Loading Development…';
   try {
     developerData = await request('/api/development/dashboard');
@@ -1495,6 +1747,7 @@ async function loadDeveloper() {
     const attentionData = await request('/api/development/attention');
     developerData.autonomous_campaigns = (campaignData.campaigns || []).map(item => item.live_activity);
     developerData.attention = attentionData.attention || [];
+    if (developerSection === 'review') await loadWorkshop();
     auth.classList.add('hidden');
     if (developerSection === 'attention' && requestedAttentionId) await loadExactAttention();
     else renderDeveloperSection();
@@ -1702,6 +1955,7 @@ document.querySelector('#developer-sections').addEventListener('click', event =>
   renderDeveloperSection();
   if (developerSection === 'tests') loadTestCenter();
   if (developerSection === 'attention') loadExactAttention();
+  if (developerSection === 'workshop' || developerSection === 'review') loadWorkshop();
 });
 developerContent.addEventListener('click', event => {
   const run = event.target.closest('[data-run-test]');
