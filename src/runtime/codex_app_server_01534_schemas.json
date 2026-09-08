@@ -1,0 +1,78 @@
+{
+  "ApplyPatchApprovalParams.json": {
+    "byte_length": 2657,
+    "sha256": "179d91081c3c84d0f79fc544a3d6d423f280c0f9d93512cdd0344c80e09b99a3"
+  },
+  "ApplyPatchApprovalResponse.json": {
+    "byte_length": 4278,
+    "sha256": "a5e145b4794ea91da6eb478626fac96bbbd4485c3399fabd1c9972d53d2d9010"
+  },
+  "CommandExecutionRequestApprovalParams.json": {
+    "byte_length": 16106,
+    "sha256": "c9728280b8f3204fd729d0fb3d1ca7bb05b1150de26b3653f7163e6a9bd941e7"
+  },
+  "CommandExecutionRequestApprovalResponse.json": {
+    "byte_length": 3202,
+    "sha256": "6d0767113e22f311381809b6b236b0dde2b99b01992879c26bf7b1ea0e003cb7"
+  },
+  "ExecCommandApprovalParams.json": {
+    "byte_length": 3768,
+    "sha256": "653116614df1aa5011c3cc399cf79bae6b9eb28c1d527df27275abf61ceb1365"
+  },
+  "ExecCommandApprovalResponse.json": {
+    "byte_length": 4279,
+    "sha256": "80dba6d9f28d19c57960db72340554c193624f014cd496714a0c7aabe1120046"
+  },
+  "FileChangeRequestApprovalParams.json": {
+    "byte_length": 968,
+    "sha256": "13848b26814c286ad6425a20d01c1691c86790e1f9e2529399677a8a22fe0d18"
+  },
+  "FileChangeRequestApprovalResponse.json": {
+    "byte_length": 1158,
+    "sha256": "b95b03ee6be674e25cee2e863cc135a28620e1070addd2f34685aadee27cde08"
+  },
+  "PermissionsRequestApprovalParams.json": {
+    "byte_length": 7719,
+    "sha256": "c6d165e1b0c65d5dcf1e099b4c226c7e4dad79fe2b88b03621a1fc6c1d3c86c2"
+  },
+  "PermissionsRequestApprovalResponse.json": {
+    "byte_length": 7068,
+    "sha256": "23f3f24e9dbf35db3e0b85703f0d934da5a1cff3cbb611fba8bcd41f3b4a04b0"
+  },
+  "v1/InitializeParams.json": {
+    "byte_length": 2143,
+    "sha256": "6f0094be9a65242ec779a40794cbd4fdfa32fca1e45084a16adfb50501d33ea2"
+  },
+  "v1/InitializeResponse.json": {
+    "byte_length": 1286,
+    "sha256": "62ad689c2cb6379913c1d72749cfd8de5089d35760214123518eb92eef11acc9"
+  },
+  "v2/ItemCompletedNotification.json": {
+    "byte_length": 45968,
+    "sha256": "69aba3fe5f72f38bf5c541e7e2c09de40778abe65ff969d9fc73372037812091"
+  },
+  "v2/ServerRequestResolvedNotification.json": {
+    "byte_length": 514,
+    "sha256": "4f03d586a5af04edd912cad08cc97eceb658e7e06744565e6d41a93e04a55966"
+  },
+  "v2/ThreadStartParams.json": {
+    "byte_length": 12971,
+    "sha256": "25f490368ec6df52a2a3b82a5469d2413307eb93439121b309f415b5648eee7a"
+  },
+  "v2/ThreadStartResponse.json": {
+    "byte_length": 76253,
+    "sha256": "a338467af5fc271ace917f9d1262405642c3df3b66116aa105343db86cc9a76d"
+  },
+  "v2/TurnCompletedNotification.json": {
+    "byte_length": 54789,
+    "sha256": "78af2a37391e8e669a4020cb58593e4d3e378756ced79d5fec72374fa69fb94b"
+  },
+  "v2/TurnStartParams.json": {
+    "byte_length": 23746,
+    "sha256": "b36fb37326b1cf69f75c8b306f1f886d53a57c4b1b985e08e298e2407ea2ad02"
+  },
+  "v2/TurnStartResponse.json": {
+    "byte_length": 54717,
+    "sha256": "6fc49c3e5d0ce11a3a109ae194619b04d6e3ff98fa29bac683fdb754608958be"
+  }
+}

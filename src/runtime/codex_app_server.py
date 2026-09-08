@@ -14,10 +14,13 @@ import re
 import subprocess
 import threading
 import time
+import tempfile
 
 
 PROTOCOL_VERSION = "codex-app-server-0.151.0"
 SUPPORTED_CLI_VERSION = "codex-cli 0.151.0"
+REVIEWER_PROTOCOL_VERSION = "codex-app-server-0.153.4"
+REVIEWER_SCHEMA_MANIFEST_SHA256 = "5e5725a250e691329daf1e1ae5917a9bd0dd4452dc0bb724196a3b183cb1846d"
 SHELL_ENVIRONMENT_POLICY_OVERRIDE = "shell_environment_policy.inherit=all"
 PROTOCOL_SCHEMA_SHA256 = {
     "item/commandExecution/requestApproval": "c9728280b8f3204fd729d0fb3d1ca7bb05b1150de26b3653f7163e6a9bd941e7",
@@ -142,7 +145,9 @@ def approval_response(method, choice, params):
 
 def typed_approval(method, params, *, campaign_id, invocation_id, worker, process_id,
                    active_thread_id=None, active_turn_id=None, approval_binding=None,
-                   reviewer_invocation_id=None):
+                   reviewer_invocation_id=None, protocol_version=PROTOCOL_VERSION):
+    if protocol_version not in {PROTOCOL_VERSION, REVIEWER_PROTOCOL_VERSION}:
+        raise CodexAppServerError("qualification", "unsupported_protocol_version", "unsupported protocol")
     if method not in TYPED_APPROVAL_METHODS or not isinstance(params, dict):
         raise CodexAppServerError("approval", "approval_mapping_failure",
                                   "unsupported typed approval request")
@@ -167,7 +172,7 @@ def typed_approval(method, params, *, campaign_id, invocation_id, worker, proces
     review_binding = _validated_review_approval_binding(
         approval_binding, campaign_id=campaign_id, worker=worker,
         reviewer_invocation_id=reviewer_invocation_id or invocation_id)
-    protocol = {"version": PROTOCOL_VERSION, "method": method, "process_id": process_id,
+    protocol = {"version": protocol_version, "method": method, "process_id": process_id,
                 "thread_id": thread_id, "turn_id": turn_id,
                 "item_id": item_id, "blocked_action_sha256": _digest(authority),
                 "approved_action_sha256": _digest(action_identity)}
@@ -204,7 +209,11 @@ class CodexAppServerTransport:
     """One fresh stdio app-server process for one bounded turn."""
 
     def __init__(self, *, codex_binary="codex", timeout_seconds=420,
-                 decision_timeout_seconds=3600, popen=subprocess.Popen):
+                 decision_timeout_seconds=3600, popen=subprocess.Popen,
+                 protocol_version=PROTOCOL_VERSION):
+        if protocol_version not in {PROTOCOL_VERSION, REVIEWER_PROTOCOL_VERSION}:
+            raise CodexAppServerError("qualification", "unsupported_protocol_version", "unsupported protocol")
+        self.protocol_version = protocol_version
         self.codex_binary = str(codex_binary)
         self.timeout_seconds = int(timeout_seconds)
         self.decision_timeout_seconds = int(decision_timeout_seconds)
@@ -216,18 +225,58 @@ class CodexAppServerTransport:
         # The CLI may emit a harmless PATH-alias warning on stderr in a
         # read-only home.  Only its dedicated stdout version line is identity.
         version = completed.stdout.strip()
-        if completed.returncode or version != SUPPORTED_CLI_VERSION:
+        expected = ("codex-cli 0.153.4" if self.protocol_version == REVIEWER_PROTOCOL_VERSION
+                    else SUPPORTED_CLI_VERSION)
+        if completed.returncode or version != expected:
             raise CodexAppServerError("qualification", "unsupported_protocol_version",
-                                      f"expected {SUPPORTED_CLI_VERSION}; received {_safe(version)}")
-        return {"protocol_version": PROTOCOL_VERSION, "cli_version": version,
+                                      f"expected {expected}; received {_safe(version)}")
+        schema_evidence = {}
+        if self.protocol_version == REVIEWER_PROTOCOL_VERSION:
+            schema_evidence = self._qualify_reviewer_schemas(environment)
+        return {"protocol_version": self.protocol_version, "cli_version": version,
                 "typed_approval_methods": sorted(TYPED_APPROVAL_METHODS),
-                "request_schema_sha256": dict(PROTOCOL_SCHEMA_SHA256)}
+                "request_schema_sha256": dict(PROTOCOL_SCHEMA_SHA256), **schema_evidence}
+
+    def _qualify_reviewer_schemas(self, environment):
+        """Check the exact executable's complete referenced method definitions.
+
+        A version string or caller-supplied schema identity alone is insufficient.
+        Generation performs no model turn and honors the caller's temp root.
+        """
+        raw = Path(__file__).with_name("codex_app_server_01534_schemas.json").read_bytes()
+        if hashlib.sha256(raw).hexdigest() != REVIEWER_SCHEMA_MANIFEST_SHA256:
+            raise CodexAppServerError("qualification", "schema_identity_mismatch", "schema manifest changed")
+        manifest = json.loads(raw)
+        with tempfile.TemporaryDirectory(prefix="codex-reviewer-schema-",
+                                         dir=environment.get("TMPDIR")) as directory:
+            result = subprocess.run([self.codex_binary, "app-server", "generate-json-schema",
+                                     "--experimental", "--out", directory],
+                                    text=True, capture_output=True, env=environment,
+                                    timeout=40, check=False)
+            if result.returncode:
+                raise CodexAppServerError("qualification", "schema_generation_failed", "schema generation failed")
+            for name, expected in manifest.items():
+                path = Path(directory) / name
+                if (path.is_symlink() or not path.is_file()
+                        or path.stat().st_size != expected["byte_length"]
+                        or hashlib.sha256(path.read_bytes()).hexdigest() != expected["sha256"]):
+                    raise CodexAppServerError("qualification", "schema_identity_mismatch",
+                                              "generated reviewer schema changed: " + name)
+        return {"complete_schema_manifest_sha256": REVIEWER_SCHEMA_MANIFEST_SHA256,
+                "generated_schema_count": len(manifest)}
 
     def run(self, *, cwd, prompt, output_schema, output_path, sandbox,
             campaign_id, invocation_id, worker, environment, approval_handler=None,
             allow_detached_continuation=True, approval_binding=None,
             reviewer_invocation_id=None):
         reviewer_invocation_id = reviewer_invocation_id or invocation_id
+        if self.protocol_version == REVIEWER_PROTOCOL_VERSION and sandbox != "read-only":
+            raise CodexAppServerError("invocation", "reviewer_read_only_required",
+                                      "0.153.4 profile is confined to read-only Reviewer execution")
+        if self.protocol_version == REVIEWER_PROTOCOL_VERSION:
+            # The Reviewer reservation owns one invocation, not a reconstructed
+            # action after its process exits. Keep legacy Worker recovery separate.
+            allow_detached_continuation = False
         approval_binding = _validated_review_approval_binding(
             approval_binding, campaign_id=campaign_id, worker=worker,
             reviewer_invocation_id=reviewer_invocation_id)
@@ -309,11 +358,15 @@ class CodexAppServerTransport:
                     continue
                 method = message.get("method")
                 if method in TYPED_APPROVAL_METHODS and "id" in message:
+                    if self.protocol_version == REVIEWER_PROTOCOL_VERSION and method == "item/permissions/requestApproval":
+                        raise CodexAppServerError("approval", "unsupported_bounded_permission",
+                                                  "permission profile cannot be granted for one action")
                     approval = typed_approval(method, message.get("params"), campaign_id=campaign_id,
                         invocation_id=invocation_id, worker=worker, process_id=process.pid,
                         active_thread_id=thread_id, active_turn_id=turn_id,
                         approval_binding=approval_binding,
-                        reviewer_invocation_id=reviewer_invocation_id)
+                        reviewer_invocation_id=reviewer_invocation_id,
+                        protocol_version=self.protocol_version)
                     if approval["protocol"]["thread_id"] != thread_id or approval["protocol"]["turn_id"] != turn_id:
                         raise CodexAppServerError("approval", "lineage_mismatch", "approval request mismatches active turn")
                     decision = {"choice": "deny"}
@@ -349,17 +402,29 @@ class CodexAppServerTransport:
                                                   "approval process is no longer alive")
                     send({"id": message["id"], "result": response})
                     if decision.get("choice") == "approve_once" and callable(decision.get("claim")):
-                        pending_grant = {"approval": approval, "decision": decision}
+                        pending_grant = {"approval": approval, "decision": decision,
+                                         "request_id": message["id"]}
                     if response.get("decision") in {"cancel", "abort"} and decision.get("choice") == "cancel_campaign":
                         raise CodexAppServerError("approval", "campaign_cancelled", "campaign cancelled by Tanner")
                     continue
+                if self.protocol_version == REVIEWER_PROTOCOL_VERSION and "id" in message and method:
+                    raise CodexAppServerError("approval", "unsupported_request", "unsupported server request")
                 if method == "serverRequest/resolved" and pending_grant is not None:
+                    if self.protocol_version == REVIEWER_PROTOCOL_VERSION and (
+                            pending_grant.get("claimed")
+                            or (message.get("params") or {}).get("threadId") != thread_id
+                            or (message.get("params") or {}).get("requestId") != pending_grant["request_id"]):
+                        raise CodexAppServerError("approval", "lineage_mismatch", "approval resolution identity mismatch or replay")
                     pending_grant["decision"]["claim"]()
                     pending_grant["claimed"] = True
                     lifecycle.append({"stage": "approval_claim_consumed"})
                     continue
                 if method == "turn/completed":
                     params = message.get("params") or {}
+                    if self.protocol_version == REVIEWER_PROTOCOL_VERSION and (
+                            params.get("threadId") != thread_id
+                            or (params.get("turn") or {}).get("id") != turn_id):
+                        raise CodexAppServerError("turn", "lineage_mismatch", "terminal turn identity mismatch")
                     status = (params.get("turn") or {}).get("status")
                     lifecycle.append({"stage": "turn_completed", "status": status})
                     if status != "completed":
@@ -375,6 +440,10 @@ class CodexAppServerTransport:
                     output_path.write_text(last_agent_text, encoding="utf-8")
                     break
                 if method == "item/completed":
+                    if self.protocol_version == REVIEWER_PROTOCOL_VERSION and (
+                            (message.get("params") or {}).get("threadId") != thread_id
+                            or (message.get("params") or {}).get("turnId") != turn_id):
+                        raise CodexAppServerError("turn", "lineage_mismatch", "item identity mismatch")
                     item = (message.get("params") or {}).get("item") or {}
                     if item.get("type") == "agentMessage" and isinstance(item.get("text"), str):
                         last_agent_text = item["text"]
