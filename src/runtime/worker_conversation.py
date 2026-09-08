@@ -216,45 +216,65 @@ class WorkerConversation:
                 'phase': phase, 'text': text, 'content_sha256': sha(text.encode('utf-8')),
                 'client_id': item.get('clientId') if role == 'user' else None}
 
-    def _page(self, cursor=None, turn_id=None):
-        if cursor is not None and (not isinstance(cursor, str) or len(cursor.encode()) > 4096):
+    def _page(self, cursor=None, turn_id=None, *, with_identities=False):
+        if cursor is not None and (not isinstance(cursor, str) or not cursor or len(cursor.encode()) > 4096):
             raise ValueError('invalid conversation cursor')
         params = {'threadId': self.thread_id, 'limit': 20, 'sortDirection': 'desc'}
         if cursor: params['cursor'] = cursor
         if turn_id: params['turnId'] = turn_id
         value = self.rpc('thread/items/list', params)
         data = value.get('data'); following = value.get('nextCursor')
-        if not isinstance(data, list) or len(data) > 20 or (following is not None and (not isinstance(following, str) or len(following.encode()) > 4096)):
+        if not isinstance(data, list) or len(data) > 20 or (following is not None and (not isinstance(following, str) or not following or len(following.encode()) > 4096)):
             raise ConversationUnavailable('Worker history pagination is malformed.')
         if turn_id and any(not isinstance(item, dict) or item.get('turnId') != turn_id for item in data):
             raise ConversationUnavailable('Worker history turn differs from the requested turn.')
         identities = [item.get('item', {}).get('id') for item in data if isinstance(item, dict) and isinstance(item.get('item'), dict)]
-        if len(identities) != len(data) or len(set(identities)) != len(identities):
+        if (len(identities) != len(data) or any(not isinstance(i, str) or not IDENTIFIER.fullmatch(i) for i in identities)
+                or len(set(identities)) != len(identities)):
             raise ConversationUnavailable('Worker history contains duplicated or malformed identities.')
-        return [public for item in data if (public := self._public(item)) is not None], following
+        result = ([public for item in data if (public := self._public(item)) is not None], following)
+        return (*result, identities) if with_identities else result
 
-    def projection(self, cursor=None):
-        thread = self._read_thread()
-        messages, following = self._page(cursor)
-        latest = None
-        turns = self.rpc('thread/turns/list', {'threadId': self.thread_id, 'limit': 8,
-            'sortDirection': 'desc', 'itemsView': 'notLoaded'}).get('data')
-        if not isinstance(turns, list) or len(turns) > 8:
+    def _turn_page(self, cursor=None):
+        if cursor is not None and (not isinstance(cursor,str) or not cursor or len(cursor.encode())>4096):
+            raise ValueError('invalid turn evidence cursor')
+        params={'threadId':self.thread_id,'limit':8,'sortDirection':'desc','itemsView':'notLoaded'}
+        if cursor is not None:params['cursor']=cursor
+        value=self.rpc('thread/turns/list',params);turns=value.get('data');following=value.get('nextCursor')
+        if not isinstance(turns,list) or len(turns)>8:
             raise ConversationUnavailable('Worker turn completion evidence is malformed.')
-        seen_turns = set()
+        if following is not None and (not isinstance(following,str) or not following or len(following.encode())>4096 or following==cursor):
+            raise ConversationUnavailable('Worker turn evidence pagination is malformed.')
+        seen=set()
+        for turn in turns:
+            if not isinstance(turn,dict) or not isinstance(turn.get('id'),str) or not IDENTIFIER.fullmatch(turn['id']):
+                raise ConversationUnavailable('Worker turn identity is malformed.')
+            if turn['id'] in seen or turn.get('status') not in {'completed','inProgress','interrupted','failed'}:
+                raise ConversationUnavailable('Worker turn completion evidence is ambiguous.')
+            seen.add(turn['id'])
+        return turns,following
+
+    def projection(self, cursor=None, turn_cursor=None):
+        thread = self._read_thread()
+        messages, following, page_identities = self._page(cursor, with_identities=True)
+        latest = None
+        turns,next_turn_cursor=self._turn_page()
         # A streamed final-phase item is not necessarily a COMPLETE final answer.
         # Read completed turns separately so a long active turn cannot obscure
         # the previous verified final message with hundreds of tool events.
-        for turn in turns:
-            if not isinstance(turn, dict) or not IDENTIFIER.fullmatch(str(turn.get('id', ''))):
-                raise ConversationUnavailable('Worker turn identity is malformed.')
-            if turn['id'] in seen_turns or turn.get('status') not in {'completed', 'inProgress', 'interrupted', 'failed'}:
-                raise ConversationUnavailable('Worker turn completion evidence is ambiguous.')
-            seen_turns.add(turn['id'])
-            if turn.get('status') != 'completed': continue
-            values, _ = self._page(turn_id=turn['id'])
+        latest_completed=[turn['id'] for turn in turns if turn['status']=='completed']
+        for turn_id in latest_completed:
+            values, _ = self._page(turn_id=turn_id)
             latest = next((m for m in values if m['role'] == 'worker' and m['phase'] == 'final_answer'), None)
             if latest: break
+        # Separate bounded lifecycle paging from message paging. An old final
+        # item alone is not proof that its turn completed, and older completion
+        # evidence must never replace the newest verified clipboard final.
+        states={turn['id']:turn['status'] for turn in turns}
+        if turn_cursor is not None:
+            older,next_turn_cursor=self._turn_page(turn_cursor)
+            states.update({turn['id']:turn['status'] for turn in older})
+        completed_turns=[identity for identity,status in states.items() if status=='completed']
         state = thread['status']['type']
         result = {'schema_version': 'fawkes.worker_conversation.v1', 'thread_id': self.thread_id,
             'verified_at': timestamp(), 'state': state,
@@ -262,6 +282,17 @@ class WorkerConversation:
             'model_configured': thread.get('model'), 'effort_configured': thread.get('reasoningEffort'),
             'model_runtime_confirmed': False, 'messages': messages, 'next_cursor': following,
             'latest_final': latest, 'latest_final_status': 'available' if latest else 'not_found_in_bounded_lookup',
+            'completed_turn_ids': completed_turns,
+            # Only terminal observations are safe to cache as settled. A turn
+            # seen in progress may finish while it falls outside the head page.
+            'known_turn_ids': [key for key,status in states.items() if status!='inProgress'],
+            'next_turn_cursor':next_turn_cursor,
+            'active_turn_ids':[turn['id'] for turn in turns if turn['status']=='inProgress'],
+            # Only opaque identities, never tool/reasoning bodies. These let
+            # the display join consecutive pages even when a page is entirely
+            # non-public events, without silently losing public messages.
+            'page_item_ids': page_identities,
+            'message_order': 'newest_first',
             'source_updated_at': thread.get('updatedAt'), 'creates_authority': False}
         if len(canonical(result)) > MAX_PROJECTION:
             raise ConversationUnavailable('Complete conversation page exceeds display capacity; nothing was truncated.')

@@ -19,8 +19,12 @@ class ProxyTests(unittest.TestCase):
         expected=module.sha(executable.read_bytes())
         self.patch=patch.object(module,'PINNED_CODEX_SHA256',expected);self.patch.start();self.addCleanup(self.patch.stop)
         def accept():
-            conn,_=self.listener.accept();conn.close()
+            try:
+                self.listener.settimeout(.2)
+                conn,_=self.listener.accept();conn.close()
+            except (socket.timeout,OSError):pass # Rejected pre-connect cases create no peer.
         thread=threading.Thread(target=accept,daemon=True);thread.start()
+        self.addCleanup(lambda:thread.join(timeout=.3))
         output=self.root/'outgoing.json'
         script=r'''
 import json,os,sys,time

@@ -11,6 +11,7 @@
 <body>
   <main id="dev-console" data-idle-seconds="60" aria-label="Fawkes developer console">
     <header class="console-header">
+      <div id="console-brand-slot"><div id="console-brand" class="console-brand"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M13 2c1 6-5 6-3 11 2-1 3-3 3-5 5 3 8 7 6 11-2 4-12 4-14-1C3 13 7 9 8 8c0 4 1 5 2 5C7 7 12 6 13 2Z"/></svg><span>FAWKES / FIELD CONSOLE</span></div></div>
       <div class="brand-row">
         <div id="console-menu-slot" class="brand-identity">
           <details id="page-menu" class="page-menu">
@@ -18,11 +19,11 @@
             <nav class="page-nav" aria-label="Console pages">
               <button id="previous-page" type="button" aria-label="Previous page">‹</button>
               <ol id="page-indicators">
-                <li><button type="button" data-page-target="0" aria-label="Activity Summary" aria-current="page">Summary</button></li>
-                <li><button type="button" data-page-target="1" aria-label="Campaign Status">Campaign</button></li>
-                <li><button type="button" data-page-target="2" aria-label="Repository View">Repo</button></li>
-                <li><button type="button" data-page-target="3" aria-label="Architecture View">System map</button></li>
-                <li><button type="button" data-page-target="4" aria-label="Worker conversation">Worker</button></li>
+                <li><button type="button" data-page-target="0" aria-label="Activity Summary" aria-current="page"><small>01 / BRIEFING</small><strong>Summary</strong><span>What happened. What comes next.</span></button></li>
+                <li><button type="button" data-page-target="1" aria-label="Campaign Status"><small>02 / MISSION CONTROL</small><strong>Campaign</strong><span>Follow the recorded work.</span></button></li>
+                <li><button type="button" data-page-target="2" aria-label="Repository View"><small>03 / SOURCE VAULT</small><strong>Repo</strong><span>Changes, evidence and history.</span></button></li>
+                <li><button type="button" data-page-target="3" aria-label="Architecture View"><small>04 / CIRCUIT MAP</small><strong>System map</strong><span>See how Fawkes fits together.</span></button></li>
+                <li><button type="button" data-page-target="4" aria-label="Worker conversation"><small>05 / COMMUNICATIONS</small><strong>Worker</strong><span>Talk, follow along and steer the work.</span></button></li>
               </ol>
               <button id="next-page" type="button" aria-label="Next page">›</button>
             </nav>
@@ -47,29 +48,32 @@
     <section id="page-stack" class="page-stack">
       <section class="console-page" data-page="0" aria-label="Activity Summary">
         <div class="page-scroll" tabindex="0">
-          <div class="page-intro">
-            <p class="eyebrow">YOUR REQUESTED JOB</p>
+          <details class="page-intro summary-source-details">
+            <summary>Projection &amp; objective source</summary>
             <p id="summary-selection" class="meta">Current objective</p>
             <p id="summary-intro">Waiting for an authenticated read-only projection.</p>
-          </div>
+          </details>
           <div id="attention-slot"></div>
           <div id="activity-feed" class="job-list" aria-live="polite"></div>
-          <section class="update-panel" aria-labelledby="update-heading">
+          <details class="update-panel" aria-labelledby="update-heading">
+            <summary id="update-heading">Saved updates · copy or download</summary>
             <div class="panel-heading">
-              <h3 id="update-heading">Completed + working on</h3>
+              <h3>Completed + working on</h3>
             </div>
             <p>Saved updates remain available here if Windows clipboard delivery fails. The manual Copy button below copies only on the device you use.</p>
             <p id="update-result" aria-live="polite"></p>
             <button id="permission-history" type="button" class="secondary-button">Permission history</button>
             <div id="prepared-updates" class="prepared-updates"></div>
-          </section>
+          </details>
         </div>
       </section>
 
       <section class="console-page" data-page="1" aria-label="Campaign Status" hidden>
         <div class="page-scroll" tabindex="0">
           <div id="campaign-heading" class="page-intro">
-            <p>Choose an open or historical record. The graph separates its recorded transitions from the reference route.</p>
+            <p class="eyebrow">MISSION CONTROL</p>
+            <h2 id="campaign-objective">No current campaign observation</h2>
+            <div id="campaign-focus" class="mission-focus"></div>
           </div>
           <div class="view-toolbar">
             <label for="campaign-selector">Campaign</label>
@@ -80,6 +84,7 @@
           <div id="campaign-dashboard">
             <div id="campaign-widgets" class="widget-grid" aria-label="Campaign facts"></div>
             <div id="campaign-role-clocks" class="role-clock-grid" aria-label="Recorded Worker and Reviewer turn times"></div>
+            <div id="campaign-stage-board" class="stage-board" aria-label="Recorded campaign stages"></div>
             <div class="campaign-workspace">
               <section aria-labelledby="execution-graph-heading">
                 <div class="panel-heading">
@@ -103,7 +108,9 @@
       <section class="console-page" data-page="2" aria-label="Repository View" hidden>
         <div class="page-scroll" tabindex="0">
           <div id="repository-heading" class="page-intro">
-            <p>Files changed by the selected HEAD revision, with a separate summary of current working-tree changes.</p>
+            <p class="vault-tab">SOURCE VAULT · READ ONLY</p>
+            <div class="vault-body"><div><p class="eyebrow">SELECTED REPOSITORY</p><h2>Fawkes</h2><p id="repository-revision">Revision not observed</p></div><div class="vault-glyph" aria-hidden="true">◇</div></div>
+            <p class="vault-foot">Committed source and unfinished work are separate. A local commit is not proof of a remote backup.</p>
           </div>
           <div id="repository-widgets" class="widget-grid" aria-label="Repository facts"></div>
           <div id="repository-browser" class="repository-browser">
@@ -129,7 +136,7 @@
       <section class="console-page" data-page="3" aria-label="Architecture View" hidden>
         <div class="page-scroll" tabindex="0">
           <div id="architecture-heading" class="page-intro architecture-heading-row">
-            <p>Explore what Fawkes is built from and the complete recorded direction, without treating plans as running services.</p>
+            <div><p class="eyebrow">FAWKES ARCHITECTURE</p><h2>SYSTEM SCHEMATIC</h2><p class="meta">Complete source-backed components and plans · built does not mean live.</p></div>
             <button id="architecture-reset" type="button" class="secondary-button">Fit / reset</button>
           </div>
           <div id="architecture-modes" class="mode-switch" role="group" aria-label="System map mode">
@@ -157,12 +164,12 @@
                   <path d="M520 66 H535"></path>
                   <path d="M90 134 V98"></path><text x="96" y="120">identity</text>
                   <path d="M160 166 H205"></path><text x="164" y="156">requests</text>
-                  <path d="M345 166 L390 142"></path><text x="350" y="139">guards</text>
-                  <path d="M345 182 C410 220 470 220 535 182"></path><text x="435" y="207">coordinates</text>
-                  <path d="M600 198 L500 260"></path><text x="543" y="238">returns</text>
+                  <path d="M345 166 H365 V142 H390"></path><text x="350" y="130">guards</text>
+                  <path d="M345 182 H365 V220 H525 V182 H535"></path><text x="435" y="213">coordinates</text>
+                  <path d="M600 198 V238 H500 V260"></path><text x="543" y="232">returns</text>
                   <path d="M455 174 V260"></path><text x="461" y="246">permits</text>
                   <path d="M275 198 V292"></path><text x="281" y="253">informs</text>
-                  <path d="M455 98 L325 292"></path><text x="338" y="258">continuity</text>
+                  <path d="M455 98 V104 H375 V274 H325 V292"></path><text x="304" y="267">continuity</text>
                 </g>
                 <g class="architecture-node built" data-architecture-node="identity" tabindex="0" role="button" transform="translate(20 34)">
                   <rect width="140" height="64"></rect><text x="70" y="25">Phoenix identity</text><text class="node-maturity" x="70" y="47">BUILT</text>
@@ -228,6 +235,7 @@
       </section>
       <section id="worker-page" class="console-page" data-page="4" aria-label="Worker conversation" hidden>
         <div class="worker-toolbar">
+          <div id="worker-brand-slot"></div>
           <div class="worker-screen-controls">
             <div id="worker-menu-slot"></div>
             <button id="worker-send-update" type="button" class="primary-button" disabled>Send update to PC</button>
@@ -235,14 +243,24 @@
           </div>
         </div>
         <div id="worker-reading" class="page-scroll" tabindex="0">
-          <h3 class="worker-speaker">WORKER <span>// LATEST FINAL</span></h3>
-          <pre id="worker-final-message" class="worker-message" tabindex="0">The actual Worker conversation is not available yet.</pre>
-          <details id="worker-conversation-details" open>
-            <summary>Our conversation // TANNER + WORKER</summary>
-            <div id="worker-conversation-history"></div>
-            <button id="worker-older" type="button" class="secondary-button" hidden disabled>Earlier messages</button>
-            <button id="worker-newest" type="button" class="secondary-button" hidden>Latest conversation</button>
+          <section id="worker-native-approvals" aria-label="Native Worker decisions">
+            <p id="worker-native-status" class="meta">Native approval connection not yet verified</p>
+            <p id="worker-native-result" class="meta" role="status"></p>
+            <div id="worker-native-cards"></div>
+            <details id="worker-native-history"><summary>Native decision history</summary><div id="worker-native-history-items"></div>
+              <button id="worker-native-older" type="button" hidden>Earlier decisions</button></details>
+          </section>
+          <p id="worker-progress" class="worker-progress" hidden></p>
+          <p id="worker-history-state" class="meta" aria-live="polite"></p>
+          <button id="worker-new-activity" type="button" class="secondary-button" hidden>New activity below</button>
+          <button id="worker-older" type="button" class="secondary-button" disabled>Load earlier conversation</button>
+          <div id="worker-conversation-history"></div>
+          <details id="worker-final-fallback" hidden>
+            <summary>Most recent verified final reply · outside the loaded history</summary>
+            <pre id="worker-final-fallback-text" class="worker-message"></pre>
           </details>
+          <pre id="worker-final-message" class="worker-message" hidden></pre>
+          <button id="worker-newest" type="button" class="secondary-button" hidden>Return to current messages</button>
           <details class="worker-link-details">
             <summary>Session &amp; connection details</summary>
             <p id="worker-session-identity" class="meta"></p>
@@ -280,5 +298,6 @@
   <script src="/native-attention.js"></script>
   <script src="/dev-console/console.js"></script>
   <script src="/dev-console/worker.js"></script>
+  <script src="/dev-console/worker-native.js"></script>
 </body>
 </html>

@@ -105,11 +105,12 @@ class DevConsoleStaticContractTests(unittest.TestCase):
             "Architecture View",
         ):
             self.assertIn(heading, self.html)
-        for label in ("Summary", "Campaign", "Repo", "System map"):
-            self.assertRegex(
-                self.html,
-                rf'data-page-target="[0-3]"[^>]*>{re.escape(label)}</button>',
-            )
+        for index,label in enumerate(("Summary", "Campaign", "Repo", "System map", "Worker")):
+            button=re.search(rf'data-page-target="{index}"[^>]*>(.*?)</button>',self.html,re.S)
+            self.assertIsNotNone(button)
+            # The approved menu tiles contain headings and descriptions, not
+            # bare button text. Preserve each exact destination and its label.
+            self.assertIn(label,re.sub(r'<[^>]+>',' ',button.group(1)))
         self.assertIn('id="preview-context"', self.html)
         self.assertIn('id="connection-state"', self.html)
         self.assertIn('id="campaign-state"', self.html)

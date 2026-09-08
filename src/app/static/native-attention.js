@@ -68,6 +68,7 @@
     if (!panel || !binding) return null;
     let current=null, selected=null, csrf='', sending=false, stale=true, closedId=null, sequence=0;
     let lastRender=null, lastFailure='', expiryTimer=null, pendingQueue=[], technicalOpen=false, historyShowing=false;
+    let nativeWorkerPending=false,nativeWorkerConnected=null;
     const locatorKey='fawkes.native-attention.locator.v1';
     const wakeKey='fawkes.native-attention.woken.v1';
     let woken=[];
@@ -100,11 +101,11 @@
     }
     function updateLauncher() {
       const pending=needsDecision(current);
-      button.hidden=!pending;
-      button.textContent=stale?'⚠ Permissions · last known':'⚠ Permissions';
-      button.className=pending&&!stale?'needs-tanner':'';
-      connection.hidden=!stale;
-      connection.textContent=stale?'Permissions unavailable — checking connection':'';
+      button.hidden=!(pending||nativeWorkerPending);
+      button.textContent=nativeWorkerPending&&!pending?'⚠ Needs decision · Worker':stale?'⚠ Permissions · last known':'⚠ Permissions';
+      button.className=(pending&&!stale)||nativeWorkerPending?'needs-tanner':'';
+      connection.hidden=!stale&&nativeWorkerConnected!==false;
+      connection.textContent=stale?'Managed permissions unavailable — checking connection':nativeWorkerConnected===false?'Native Worker approvals unavailable — use PC terminal':'';
       if(expiryTimer!==null)root.clearTimeout(expiryTimer);
       expiryTimer=null;
       if(pending) {
@@ -134,7 +135,8 @@
         woken=[...woken,id].slice(-128);
         try {root.sessionStorage.setItem(wakeKey,JSON.stringify(woken));}catch(_){}
       }
-      root.dispatchEvent(new CustomEvent('fawkes:attention-pending',{detail:{pending,wake:shouldWake}}));
+      root.__fawkesManagedAttentionPending=pending;
+      root.dispatchEvent(new CustomEvent('fawkes:attention-pending',{detail:{pending:pending||root.__fawkesNativeWorkerPending===true,wake:shouldWake}}));
       if (shouldWake && root.__fawkesMatrix && root.__fawkesMatrix.active) root.__fawkesMatrix.wake();
     }
     function render(message) {
@@ -223,7 +225,13 @@
         }
       } catch(error) {if(generation!==sequence)return;stale=true;selected=null;cosmeticPending(false);render('Refresh failed: '+error.message);}
     }
-    button.onclick=()=>{panel.hidden=false;closedId=null;render();};
+    button.onclick=()=>{if(nativeWorkerPending&&!needsDecision(current)){
+      const worker=document.querySelector('[data-page-target="4"]');if(worker)worker.click();return;
+    }panel.hidden=false;closedId=null;render();};
+    root.addEventListener('fawkes:native-worker-attention',e=>{
+      nativeWorkerPending=e.detail&&e.detail.pending===true;
+      nativeWorkerConnected=e.detail&&e.detail.connected===true;updateLauncher();
+    });
     root.addEventListener('fawkes:console-observation', async e=>{
       if(!csrf)try {csrf=(await request('/api/session/console-csrf',{method:'POST',body:'{}'})).csrf_token||'';}catch(_){/* Existing sessions remain read-only until authenticated. */}
       const pending=(e.detail.attention||[]).filter(x=>needsDecision({attention:x}));

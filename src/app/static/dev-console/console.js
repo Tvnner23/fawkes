@@ -794,12 +794,12 @@
     return node;
   }
 
-  function detailList(documentRef, entries) {
+  function detailList(documentRef, entries, complete = false) {
     const list = element(documentRef, "ul");
     for (const entry of entries) {
       const item = element(documentRef, "li");
       const label = element(documentRef, "strong", "", entry[0] + ": ");
-      const value = documentRef.createTextNode(safeText(entry[1], 600) || "Unavailable");
+      const value = documentRef.createTextNode(safeText(entry[1], complete && typeof entry[1] === "string" ? entry[1].length : 600) || "Unavailable");
       item.append(label, value);
       list.appendChild(item);
     }
@@ -895,10 +895,18 @@
         "No job records are available to this preview. This does not mean Fawkes has no history or that every job is idle."));
       return;
     }
+    const history = element(documentRef, "details", "job-history");
+    history.dataset.consoleKey = "job-history";
+    history.appendChild(element(documentRef, "summary", "", "Earlier objectives & outcomes"));
+    if (!values.some(job => job.is_current_objective)) target.appendChild(element(documentRef,"p","empty-state",
+      "The current objective is not identified by this observation. Earlier records remain below; none is substituted as current work."));
     for (const job of values) {
       const card = element(documentRef, "article", "job-card " + job.state
         + (job.state === "done" && !job.successful ? " unsuccessful" : ""));
       card.dataset.consoleKey = "job:" + job.job_id;
+      card.dataset.tone = projectionState !== "live" && projectionState !== "sample" ? "unknown"
+        : ["needs_you","failed","closed"].includes(job.state) || (job.state === "done" && !job.successful) ? "blocked"
+          : job.state === "done" ? "complete" : job.state === "working" ? "progress" : "unknown";
       card.appendChild(element(documentRef,"p","eyebrow",job.is_current_objective?'CURRENT OBJECTIVE':'RETAINED JOB HISTORY'));
       const heading = element(documentRef, "div", "job-title-row");
       heading.append(element(documentRef, "span", "job-state",
@@ -926,22 +934,54 @@
       details.dataset.consoleKey = "job:" + job.job_id + ":details";
       details.append(element(documentRef, "summary", "", "Details"), detailList(documentRef, [
         ["Job identity", job.job_id], ["Recorded campaign status", job.recorded_status],
+        ["Job state", (projectionState === "live" || projectionState === "sample" ? "" : "Last known ") + job.state.replace("_", " ")],
         ["Parent job", job.parent_campaign_id || "Not recorded; no parent completion inferred"],
         ["Source record digest", job.source_record_sha256 || "Unavailable"],
-        ["Complete accomplishment", job.accomplished], ["Complete gain", job.gained],
+        ["Complete objective", job.objective], ["Complete current step", job.current_step],
+        ["Complete accomplishment", job.accomplished], ["Complete gain", job.gained], ["Complete next action", job.next],
+        ["Public Worker result", job.public_result],
         ["Worker return", job.result_report || "No typed return available"],
         ["Historical next at Worker return (not a current instruction)", job.historical_next || "Not recorded"],
         ["Observation", projectionTruthLabel(projectionState)],
         ["Scope", "Fawkes-managed jobs only; a separately opened standalone CLI is not attached"]
-      ]));
+      ], true));
       card.appendChild(details);
       const link = element(documentRef, "a", "evidence-link", "Open campaign evidence");
       link.href = "#campaign-heading";
       link.dataset.pageLink = "1";
       link.dataset.campaignId = job.job_id;
-      card.appendChild(link);
-      target.appendChild(card);
+      details.appendChild(link);
+      if (job.is_current_objective) {
+        // The brief is a view of recorded fields, never a model-generated verdict.
+        // Full exact fields remain in Details; neither theme nor wording grants authority.
+        const brief = text => { const s = String(text || ""); return s.length > 240 ? s.slice(0, 240) + "… (Details)" : s; };
+        const header = element(documentRef, "div", "briefing-header");
+        header.append(element(documentRef,"span","eyebrow","LATEST BRIEFING"),
+          element(documentRef,"span","meta",projectionState === "live" ? "RECORDED OBJECTIVE" : projectionTruthLabel(projectionState)));
+        const body = element(documentRef,"div","briefing-body");
+        const words = element(documentRef,"div","briefing-words");
+        words.append(element(documentRef,"h2","",brief(job.objective)),
+          element(documentRef,"p","briefing-state",(projectionState === "live" || projectionState === "sample" ? "" : "Last known · ")
+            + (job.state === "done" ? job.successful ? "Finished." : "Stopped — unfinished outcome." : job.state === "needs_you" ? "Needs you." : job.state === "working" ? "Working." : job.state === "waiting" ? "Waiting." : ["failed","closed"].includes(job.state) ? "Stopped — recorded outcome retained." : "Current state unknown.")),
+          element(documentRef,"p","briefing-fact",brief(job.accomplished || job.current_step || "No current step is recorded.")));
+        if (job.accomplished && job.current_step && job.current_step !== job.accomplished) words.appendChild(element(documentRef,"p","briefing-fact",brief(job.current_step)));
+        body.appendChild(words);
+        // A completion emblem is only for this explicitly successful record,
+        // never the parent campaign, deployed build, or a percentage.
+        if (job.state === "done" && job.successful && projectionState === "live") {
+          const emblem = element(documentRef,"div","completion-emblem");
+          emblem.setAttribute("aria-hidden","true");
+          emblem.append(element(documentRef,"strong","","✓"),element(documentRef,"span","","RECORD COMPLETE"));
+          body.appendChild(emblem);
+        }
+        const foot = element(documentRef,"p","briefing-foot",brief(job.gained || "No deployed gain is established by this record."));
+        const next = element(documentRef,"p","briefing-next","UP NEXT · " + brief(job.next || "No next action recorded."));
+        const time = element(documentRef,"p","job-time","Last activity · " + (job.last_activity_at || "Unknown"));
+        card.replaceChildren(header,body,foot,next,time,details);
+        card.classList.add("current-briefing"); target.appendChild(card);
+      } else history.appendChild(card);
     }
+    if (history.children.length > 1) target.appendChild(history);
   }
 
   function campaignGraphModel(campaign) {
@@ -1056,6 +1096,10 @@
     elements.empty.hidden = Boolean(campaign);
     elements.dashboard.hidden = !campaign;
     if (!campaign) {
+      for (const id of ["campaign-objective", "campaign-focus", "campaign-stage-board"]) {
+        const node = documentRef.getElementById(id);
+        if (node) { node.replaceChildren(); node.textContent = ""; }
+      }
       elements.history.textContent = "NO ACTIVE CAMPAIGN";
       elements.empty.textContent = "No campaign records are available to this preview. This is not an all-history or idle claim.";
       return {campaign_id: "", stage_id: ""};
@@ -1071,6 +1115,27 @@
     );
     const model = campaignGraphModel(campaign);
     const stages = model.stages;
+    const objective = documentRef.getElementById("campaign-objective");
+    if (objective) objective.textContent = campaign.objective || "Selected campaign";
+    const focus = documentRef.getElementById("campaign-focus");
+    const board = documentRef.getElementById("campaign-stage-board");
+    if (focus && board) {
+      const current = stages.find(s => ["current", "waiting", "blocked", "failed"].includes(s.state)) || stages[stages.length - 1];
+      const tone = s => observationState !== "live" && observationState !== "sample" ? "unknown"
+        : ({completed:"complete",current:"progress",waiting:"planned",blocked:"blocked",failed:"blocked"}[s.state] || "unknown");
+      focus.dataset.tone = tone(current);
+      focus.replaceChildren(element(documentRef,"strong","mission-number",String(stages.indexOf(current)+1).padStart(2,"0")),
+        element(documentRef,"p","",`Recorded stage ${stages.indexOf(current)+1} / ${stages.length} · ${current.label} · ${current.state}`));
+      board.replaceChildren();
+      stages.forEach((stage,index) => {
+        const slot = element(documentRef,"button","stage-slot"); slot.type="button";
+        slot.dataset.campaignStage=stage.id; slot.dataset.tone=tone(stage);
+        slot.append(element(documentRef,"small","",`STAGE ${String(index+1).padStart(2,"0")} · ${stage.state}`),
+          element(documentRef,"strong","",stage.label),
+          element(documentRef,"span","",stage.recorded ? "Recorded evidence · open details" : "Reference only · not observed"));
+        board.appendChild(slot);
+      });
+    }
     const selectedStage = stages.find((stage) => stage.id === selectedStageId)
       || stages.find((stage) => ["current", "waiting", "blocked", "failed"].includes(stage.state))
       || stages[0];
@@ -1168,6 +1233,8 @@
   }
 
   function renderRepositoryDashboard(documentRef, elements, repository, state, selectedPath, detailOpen) {
+    const revision = documentRef.getElementById("repository-revision");
+    if (revision) revision.textContent = repository ? "HEAD " + repository.head.slice(0,12) + " · " + repository.branch : "Revision not observed";
     const retainedTreeScroll = Number(elements.tree.scrollTop) || 0;
     elements.widgets.replaceChildren();
     elements.tree.replaceChildren();
@@ -1301,7 +1368,17 @@
       button.classList.add(observation === "unknown" || observation === "unavailable"
         ? "unavailable" : "observed");
       button.title = "Observed state: " + observation;
+      const rect = button.querySelector && button.querySelector("rect");
+      if (rect && !button.querySelector(".component-pin")) {
+        const width=Number(rect.getAttribute("width")), height=Number(rect.getAttribute("height"));
+        [0,width].forEach(x=>[12,height-12].forEach(y=>button.appendChild(svgElement(documentRef,"path",
+          {d:`M${x-5} ${y} H${x+5}`,class:"component-pin","aria-hidden":"true"}))));
+      }
     }
+    Array.from(map.querySelectorAll(".architecture-edges > path")).forEach((path,index)=>{
+      const edge=COMBINED_RELATIONS[index];
+      path.classList.toggle("selected-edge",Boolean(edge && (edge[0]===selected || edge[1]===selected)));
+    });
     const contract = ARCHITECTURE_COMPONENTS[selected];
     const observation = architectureObservation(components, selected, state);
     detail.replaceChildren(
@@ -1560,9 +1637,9 @@
       if (!from || !to) return; // Hidden endpoints remain discoverable in details.
       const sx = from.x + from.width, sy = from.y + from.height / 2, ex = to.x, ey = to.y + to.height / 2;
       const currentPaths = ["M160 66 H205", "M345 66 H390", "M520 66 H535",
-        "M90 134 V98", "M160 166 H205", "M345 166 L390 142",
-        "M345 182 C410 220 470 220 535 182", "M600 198 L500 260",
-        "M455 174 V260", "M275 198 V292", "M455 98 L325 292"];
+        "M90 134 V98", "M160 166 H205", "M345 166 H365 V142 H390",
+        "M345 182 H365 V220 H525 V182 H535", "M600 198 V238 H500 V260",
+        "M455 174 V260", "M275 198 V292", "M455 98 V104 H375 V274 H325 V292"];
       const relation = COMBINED_RELATIONS.findIndex(item => item[0] === edge.from && item[1] === edge.to);
       const lane = 8 + (index % 3) * 4;
       const route = edge.kind === "architecture" && relation >= 0 ? currentPaths[relation]
@@ -1570,7 +1647,7 @@
         : `M${from.x + from.width / 2} ${from.y + from.height} V${from.y + from.height + 12} H${lane} V${ey} H${ex}`;
       const path = svgElement(documentRef, "path", {
         d: route,
-        class: "combined-edge " + edge.kind, "aria-label": `${edge.from} → ${edge.to}: ${edge.label}`,
+        class: "combined-edge " + edge.kind + (edge.from===state.selected || edge.to===state.selected ? " selected-edge" : ""), "aria-label": `${edge.from} → ${edge.to}: ${edge.label}`,
         ...(["architecture","prerequisite","flow"].includes(edge.kind) ? {"marker-end": "url(#combined-arrow)"} : {})});
       path.appendChild(svgElement(documentRef, "title", {}, `${edge.kind}: ${edge.label}`));
       layer.appendChild(path);
@@ -1593,6 +1670,8 @@
         ...(group ? {"aria-expanded": String(state.expanded.has(node.id))} : {})});
       button.dataset.combinedId = node.id;
       button.appendChild(svgElement(documentRef, "rect", {width: position.width, height: position.height}));
+      [0,position.width].forEach(x=>[12,position.height-12].forEach(y=>button.appendChild(svgElement(documentRef,"path",
+        {d:`M${x-5} ${y} H${x+5}`,class:"component-pin","aria-hidden":"true"}))));
       const compactName = {archive: "Archive & evidence", development: "Development",
         clients: "Clients & console", workers: "Workers", application_git: "Application & Git",
         embodiment: "Physical embodiment"}[node.id] || (node.kind === "group" ? "Not mapped yet" : node.name);
@@ -2131,6 +2210,9 @@
       const idle = documentRef.getElementById("console-idle");
       const idleSlot = documentRef.getElementById(page === 4 ? "worker-idle-slot" : "console-idle-slot");
       if (idle && idleSlot && idle.parentNode !== idleSlot) idleSlot.appendChild(idle);
+      const brand = documentRef.getElementById("console-brand");
+      const brandSlot = documentRef.getElementById(page === 4 ? "worker-brand-slot" : "console-brand-slot");
+      if (brand && brandSlot && brand.parentNode !== brandSlot) brandSlot.appendChild(brand);
       indicators.forEach((item, index) => {
         if (index === page) item.setAttribute("aria-current", "page");
         else item.removeAttribute("aria-current");
@@ -2408,16 +2490,19 @@
       }
       navigation.activity();
     });
-    campaignElements.graph.addEventListener("click", (event) => {
+    const selectCampaignStage = (event) => {
       const selected = event.target.closest && event.target.closest("[data-campaign-stage]");
       if (!selected || !displayedProjection) return;
       selectedCampaignStageId = safeIdentifier(selected.dataset.campaignStage, 40);
       const result = renderCampaignDashboard(documentRef, campaignElements,
-        displayedProjection.campaigns || [], selectedCampaignId, selectedCampaignStageId);
+        displayedProjection.campaigns || [], selectedCampaignId, selectedCampaignStageId, shell.dataset.projectionState);
       selectedCampaignId = result.campaign_id;
       selectedCampaignStageId = result.stage_id;
       navigation.activity();
-    });
+    };
+    campaignElements.graph.addEventListener("click", selectCampaignStage);
+    const stageBoard=documentRef.getElementById("campaign-stage-board");
+    if(stageBoard) stageBoard.addEventListener("click",selectCampaignStage);
     campaignElements.graph.addEventListener("keydown", (event) => {
       if (!['Enter', ' '].includes(event.key)) return;
       const selected = event.target.closest && event.target.closest("[data-campaign-stage]");

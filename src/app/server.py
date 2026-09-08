@@ -979,6 +979,7 @@ def build_identity():
              STATIC_DIR / "app.css", STATIC_DIR / "dev-console" / "index.html",
              STATIC_DIR / "dev-console" / "console.js",
              STATIC_DIR / "dev-console" / "worker.js",
+             STATIC_DIR / "dev-console" / "worker-native.js",
              STATIC_DIR / "dev-console" / "console.css"]
     digest = hashlib.sha256()
     for item in files: digest.update(item.read_bytes())
@@ -1116,6 +1117,19 @@ class FawkesAppHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
         path = parsed.path
+        if path == '/api/development/worker/approvals':
+            if not self._require_auth(record_rider_activity=False): return
+            try:
+                owner = getattr(self.server, 'native_worker_approvals', None)
+                if owner is None: raise RuntimeError('Native approval channel is not configured')
+                query = parse_qs(parsed.query, keep_blank_values=True)
+                if set(query)-{'cursor'} or any(len(v)!=1 for v in query.values()): raise ValueError('Invalid native history query')
+                self._json(200, owner.projection(query.get('cursor',[None])[0]))
+            except ValueError as exc:
+                self._json(400, {'error':{'code':'invalid_native_approval_query','message':str(exc)}})
+            except Exception:
+                self._json(503, {'error':{'code':'native_approval_unavailable','message':'Native Worker approval connection unavailable. Use the PC terminal; no empty queue or decision is confirmed.'}})
+            return
         reply_match = re.fullmatch(r'/api/development/worker/replies/([0-9a-f-]{36})', path)
         if path == '/api/development/worker' or reply_match:
             if not self._require_auth(record_rider_activity=False): return
@@ -1124,9 +1138,10 @@ class FawkesAppHandler(BaseHTTPRequestHandler):
                 if worker is None:
                     raise RuntimeError('The same-session Worker connection is not configured.')
                 query = parse_qs(parsed.query, keep_blank_values=True)
-                if set(query) - {'cursor'} or any(len(v) != 1 for v in query.values()):
+                if set(query) - {'cursor','turn_cursor'} or any(len(v) != 1 for v in query.values()):
                     raise ValueError('invalid Worker page query')
-                value = worker.reply_status(reply_match.group(1)) if reply_match else worker.projection(query.get('cursor', [None])[0])
+                value = worker.reply_status(reply_match.group(1)) if reply_match else worker.projection(
+                    query.get('cursor', [None])[0], **({'turn_cursor':query['turn_cursor'][0]} if 'turn_cursor' in query else {}))
                 self._json(200, value)
             except (ValueError, FileNotFoundError) as exc:
                 self._json(400, {'error': {'code': 'invalid_worker_request', 'message': str(exc)}})
@@ -1357,6 +1372,25 @@ class FawkesAppHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
+        if path == '/api/development/worker/approvals/decision':
+            if not self._require_auth(record_rider_activity=False): return
+            if not self._require_attention_decision_auth(): return
+            try:
+                from src.runtime.worker_conversation import unique
+                length = int(self.headers.get('Content-Length','0'))
+                if not 0 < length <= 4096: raise ValueError('Native decision identity exceeds bound')
+                value = json.loads(self.rfile.read(length), object_pairs_hook=unique)
+                if not isinstance(value,dict) or set(value)!={'thread_id','request_key','action_sha256','choice_id','submission_id'}:
+                    raise ValueError('Only exact native request and offered-choice identities are accepted; chat text is not a decision')
+                owner = getattr(self.server, 'native_worker_approvals', None)
+                if owner is None: raise RuntimeError('Native approval channel unavailable')
+                record = owner.decide(**value, authenticated=True)
+                self._json(200, {k:record[k] for k in ('thread_id','request_key','action_sha256','status','selection','operation')})
+            except (ValueError, PermissionError) as exc:
+                self._json(409, {'error':{'code':'native_decision_not_applied','message':str(exc)}})
+            except Exception:
+                self._json(503, {'error':{'code':'native_decision_unconfirmed','message':'Native decision was not confirmed. The exact selection is retained if recorded; no automatic replay.'}})
+            return
         if path in {'/api/development/worker/replies', '/api/development/worker/clipboard'}:
             if not self._require_auth(record_rider_activity=False): return
             if not self._require_attention_decision_auth(): return
@@ -1745,6 +1779,7 @@ class FawkesAppHandler(BaseHTTPRequestHandler):
             "/dev-console/console.js": ("dev-console/console.js", "text/javascript; charset=utf-8"),
             "/dev-console/console.css": ("dev-console/console.css", "text/css; charset=utf-8"),
             "/dev-console/worker.js": ("dev-console/worker.js", "text/javascript; charset=utf-8"),
+            "/dev-console/worker-native.js": ("dev-console/worker-native.js", "text/javascript; charset=utf-8"),
         }
         if path.startswith("/assets/presence/"):
             filename = path.removeprefix("/assets/presence/")
@@ -1829,7 +1864,8 @@ class FawkesConsoleApprovalHandler(FawkesAppHandler):
         allowed = {"/dev-console", "/dev-console/", "/dev-console/console.js",
             "/dev-console/console.css", "/attention-binding.js", "/native-attention.js",
             "/native-attention.css", "/api/status", "/api/development/dev-console",
-            "/api/development/console-updates", "/api/development/worker", "/dev-console/worker.js"}
+            "/api/development/console-updates", "/api/development/worker", "/dev-console/worker.js",
+            "/api/development/worker/approvals", "/dev-console/worker-native.js"}
         exact = path.startswith("/api/development/attention/") and path.count("/") == 4
         # The console history uses the passive owner only. Never expose the
         # collection's lifecycle-maintenance branch through this narrow surface.
@@ -1859,7 +1895,7 @@ class FawkesConsoleApprovalHandler(FawkesAppHandler):
                     and path.count("/") == 7)
         if path in {"/api/session", "/api/session/logout",
                     "/api/development/console-updates", "/api/development/worker/replies",
-                    "/api/development/worker/clipboard"} or decision:
+                    "/api/development/worker/clipboard", "/api/development/worker/approvals/decision"} or decision:
             return super().do_POST()
         self._json(405, {"error": {"code": "unavailable_in_console"},
                          "creates_authority": False, "creates_continuing_authority": False})
@@ -1869,9 +1905,11 @@ class FawkesAppServer(ThreadingHTTPServer):
     daemon_threads = True
 
     def __init__(self, address, *, chat_service, app_token, app_session_store=None,
-                 console_update_store=None, console_clipboard_writer=None, worker_conversation=None):
+                 console_update_store=None, console_clipboard_writer=None, worker_conversation=None,
+                 native_worker_approvals=None):
         super().__init__(address, FawkesAppHandler)
         self.chat_service = chat_service
+        self.native_worker_approvals = native_worker_approvals
         self.app_token = app_token
         self.worker_conversation = worker_conversation
         state_root = Path(os.environ.get("FAWKES_DEVELOPMENT_ROOT", Path.cwd()))
