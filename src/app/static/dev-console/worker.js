@@ -112,7 +112,7 @@
       if (!append) container.replaceChildren();
       if (!messages.length) {
         const empty = doc.createElement("p");
-        empty.textContent = "This history page has no public messages. Earlier messages continues the retained conversation; tool and reasoning records are not displayed.";
+        empty.textContent = "No public messages are available on this conversation page. Saved history is retained; tool and reasoning records are not displayed.";
         container.appendChild(empty);
       }
       for (const item of messages) {

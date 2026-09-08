@@ -232,15 +232,9 @@
         <div class="worker-toolbar">
           <div class="worker-screen-controls">
             <button id="worker-back" type="button" class="secondary-button" aria-label="Back to Summary">‹ Back</button>
-            <span class="worker-channel-label">PRIVATE CONVERSATION</span>
+            <button id="worker-send-update" type="button" class="primary-button" disabled>Send update to PC</button>
             <span id="worker-idle-slot"></span>
           </div>
-          <div class="worker-link-heading">
-            <h2>FAWKES // WORKER LINK</h2>
-            <span id="worker-session-state" class="meta" data-connection="unknown" aria-live="polite">Worker connection not verified</span>
-          </div>
-          <button id="worker-send-update" type="button" class="primary-button" disabled>Send update to PC</button>
-          <p id="worker-copy-result" aria-live="polite">Copies the latest complete final message to Windows, verbatim. Wait for Windows confirmation before Ctrl+V.</p>
         </div>
         <div id="worker-reading" class="page-scroll" tabindex="0">
           <h3 class="worker-speaker">WORKER <span>// LATEST FINAL</span></h3>
@@ -248,8 +242,8 @@
           <details id="worker-conversation-details" open>
             <summary>Our conversation // TANNER + WORKER</summary>
             <div id="worker-conversation-history"></div>
-            <button id="worker-older" type="button" class="secondary-button" disabled>Earlier messages</button>
-            <button id="worker-newest" type="button" class="secondary-button">Latest conversation</button>
+            <button id="worker-older" type="button" class="secondary-button" hidden disabled>Earlier messages</button>
+            <button id="worker-newest" type="button" class="secondary-button" hidden>Latest conversation</button>
           </details>
           <details class="worker-link-details">
             <summary>Session &amp; connection details</summary>
@@ -265,8 +259,12 @@
             <button id="worker-keyboard-toggle" type="button" class="secondary-button" aria-expanded="false">Keyboard</button>
             <button id="worker-send-reply" type="submit" class="primary-button" disabled>Send reply</button>
           </div>
-          <p id="worker-reply-result" aria-live="polite">Replies require this exact session to be connected.</p>
           <div id="worker-keyboard" class="worker-keyboard" aria-label="Touchscreen keyboard" hidden></div>
+          <div class="worker-feedback" tabindex="0" aria-label="Connection and delivery status">
+            <span id="worker-session-state" class="meta" data-connection="unknown" aria-live="polite">Worker connection not verified</span>
+            <p id="worker-copy-result" aria-live="polite">Copies the latest complete final message to Windows, verbatim. Wait for Windows confirmation before Ctrl+V.</p>
+            <p id="worker-reply-result" aria-live="polite">Replies require this exact session to be connected.</p>
+          </div>
         </form>
       </section>
     </section>

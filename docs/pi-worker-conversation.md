@@ -1,13 +1,30 @@
 # Pi Worker conversation and Windows handoff
 ## Worker-only CRT appearance
 
+The TV-style frame has rounded olive-metal edges and a recessed dark screen.
+Public message bodies use sharp 20px monospaced text with 1.65 line spacing;
+separate padded cards and 24px history gaps distinguish messages. WORKER and
+TANNER labels remain explicit, with green/cyan edge accents rather than color
+alone. Complete text, commands and whitespace are unchanged; long content wraps
+and scrolls rather than being shortened. These presentation refinements do not add
+overlays, filters, animations, protocol calls or new input handling. The existing
+Back, Idle, keyboard, approval controls and exact clipboard/reply owners remain.
+Only Back, Send update to PC and the single existing Idle button occupy the top
+strip. Tanner explicitly removed the prior title/header and Earlier messages /
+Latest conversation buttons. Those paging controls remain hidden and untabbable;
+the currently loaded conversation remains scrollable and saved history is not
+deleted. Connection, Windows delivery and reply status stay beside the composer,
+in separate bounded scrollable lines so their result prefixes remain visible.
+Tanner physically confirmed the preceding full-screen G18 appearance on the Pi;
+that evidence does not claim this refined frame has already been deployed.
+
 The Worker page uses a lightweight near-black/phosphor-green CRT treatment,
 with restrained amber/cyan accents and an industrial inset bezel.
 It occupies the whole screen while selected: the surrounding console header,
 tabs and footer are hidden only there. Back (top left) returns to Summary;
 existing swipe navigation remains. The single companion-bound Idle button moves
 to its compact Worker slot and back without cloning handlers or simulating taps.
-“FAWKES // WORKER LINK” labels the same conversation connection and its
+The composer status identifies this same conversation connection and its
 authoritative observed status; it is not the separate managed-approval feed.
 Disconnected/history-only and stale states remain explicit, not green.
 
@@ -20,10 +37,13 @@ write/read-back requirement. Send reply retains the exact same-session queue,
 receipt and duplicate protection. Nothing here approves a permission request.
 
 The720×720 layout keeps the copy control above the scrollable text and the reply
-box/actions below. The touchscreen keyboard remains scrollable with48px keys.
+box/actions below. Opening the five-row touchscreen keyboard reduces the
+conversation region, not the composer: the input, all48px keys and Send reply
+remain visible together without scrolling the form. Long drafts scroll inside
+the fixed-height input. Delivery details may scroll inside their own status line.
 Effects are static CSS backgrounds/inset shadows: no canvas, video, filters,
 font downloads, flashing or overlay intercepting touch/selection. Reduced motion
-removes scanlines and title glow. Other console pages, Idle/Matrix, approvals
+removes scanlines. Other console pages, Idle/Matrix, approvals
 and native Pi touch mapping are unchanged.
 
 Retained real G17 evidence: Tanner's Pi Send update produced the complete final
