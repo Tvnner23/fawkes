@@ -1092,7 +1092,7 @@ class FawkesAppHandler(BaseHTTPRequestHandler):
             if record_rider_activity and instance_id:
                 RiderActivityStore(
                     instance_id,
-                    root=Path(__file__).resolve().parents[2] / "database" / "rider_activity",
+                    root=Path(os.environ.get("FAWKES_RUNTIME_STATE_ROOT") or Path(__file__).resolve().parents[2]) / "database" / "rider_activity",
                 ).touch(authenticated_rider=True)
             return True
         self._json(401, {"error": {"code": "unauthorized", "message": "Access token required."}})

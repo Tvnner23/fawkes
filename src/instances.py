@@ -20,6 +20,7 @@ def load_registry():
 
 
 def create_instance(name: str, instance_type: str = "phoenix"):
+    INSTANCE_DIR.mkdir(parents=True, exist_ok=True)
     registry = load_registry()
 
     instance_id = str(uuid.uuid4())
@@ -50,3 +51,32 @@ def get_instance(instance_id: str):
             return instance
 
     return None
+
+
+def get_or_create_default_instance(name="Fawkes"):
+    """
+    Return the stable local Phoenix instance used by the live MVP.
+
+    FAWKES_INSTANCE_ID may select a pre-existing instance explicitly.
+    Otherwise the first named Phoenix is reused, or created once.
+    """
+    configured_id = os.getenv("FAWKES_INSTANCE_ID")
+
+    if configured_id:
+        instance = get_instance(configured_id)
+        if instance is None:
+            raise ValueError(
+                "FAWKES_INSTANCE_ID does not identify a registered instance"
+            )
+        return instance
+
+    registry = load_registry()
+
+    for instance in registry.get("instances", []):
+        if (
+            instance.get("name") == name
+            and instance.get("instance_type", "phoenix") == "phoenix"
+        ):
+            return instance
+
+    return create_instance(name)

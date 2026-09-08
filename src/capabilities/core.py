@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 import hashlib
 import json
+import os
 import re
 import uuid
 
@@ -17,7 +18,8 @@ from src.capabilities.multimodal import AuthorityContract, MultimodalCapabilityC
 
 
 ROOT = Path(__file__).resolve().parent.parent.parent
-RECEIPTS_DIR = ROOT / "database" / "capability_receipts"
+STATE_ROOT = Path(os.environ.get("FAWKES_RUNTIME_STATE_ROOT") or ROOT)
+RECEIPTS_DIR = STATE_ROOT / "database" / "capability_receipts"
 SAFE_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 

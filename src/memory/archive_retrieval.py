@@ -65,14 +65,12 @@ def _looks_procedural(content):
     )
 
 
-def list_conversation_ids(*, instance_id=None, include_unscoped=False):
+def list_conversation_ids(*, instance_id=None, include_unscoped=False, strict=False):
+    from src.capture.storage import metadata_paths,read_metadata
     conversation_ids = set()
 
-    for path in META_DIR.glob("*.json"):
-        try:
-            metadata = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
+    for path in metadata_paths(META_DIR,allow_missing=not strict):
+        metadata = read_metadata(path)
 
         conversation_id = metadata.get("conversation_id")
         if not conversation_id:
@@ -142,10 +140,28 @@ def rebuild_archive_index(
     path=INDEX_PATH,
 ):
     """Rebuild one Phoenix's derived passage index from canonical history."""
+    from src.ingest import _serialized_ingest
+    with _serialized_ingest(META_DIR):
+        return _rebuild_archive_index(instance_id=instance_id,include_unscoped=include_unscoped,path=path)
+
+
+def _rebuild_archive_index(*,instance_id,include_unscoped,path):
     connection = _connect(path)
     indexed = 0
 
     try:
+        connection.execute('BEGIN IMMEDIATE')
+        # Resolve and validate the selected corpus before replacing any derived
+        # rows. Missing/corrupt source is not proof that known history is empty.
+        messages=[]
+        for conversation_id in list_conversation_ids(instance_id=instance_id,include_unscoped=include_unscoped,strict=True):
+            selected=canonical_messages(conversation_id,instance_id=instance_id,include_unscoped=include_unscoped,
+                raw_dir=META_DIR.parent/'raw',meta_dir=META_DIR,strict=True)
+            messages.extend((conversation_id,message) for message in selected)
+        existing=sum(connection.execute('SELECT count(*) FROM '+table+' WHERE instance_id=?',(instance_id,)).fetchone()[0]
+                     for table in ['canonical_message_projection','canonical_passages'])
+        if existing and not messages:
+            raise ValueError('No verified source messages; refusing to erase a populated Archive projection')
         connection.execute(
             "DELETE FROM canonical_passages WHERE instance_id = ?",
             (instance_id,),
@@ -155,58 +171,83 @@ def rebuild_archive_index(
             (instance_id,),
         )
 
-        for conversation_id in list_conversation_ids(
-            instance_id=instance_id,
-            include_unscoped=include_unscoped,
-        ):
-            for message in canonical_messages(conversation_id):
-                message_instance_id = message.get("instance_id")
-                if message_instance_id == instance_id:
-                    pass
-                elif message_instance_id is None and include_unscoped:
-                    pass
-                else:
-                    continue
-
-                connection.execute(
-                    """
-                    INSERT INTO canonical_passages (
-                        instance_id,
-                        conversation_id,
-                        message_id,
-                        role,
-                        content,
-                        created_at,
-                        source_archive_id,
-                        canonicalizer_version
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        instance_id,
-                        conversation_id,
-                        message["message_id"],
-                        message["role"],
-                        message["content"],
-                        message["created_at"],
-                        message["source_archive_id"],
-                        "structured-v1",
-                    ),
-                )
-                connection.execute(
-                    """INSERT OR REPLACE INTO canonical_message_projection (
-                        instance_id, conversation_id, message_id, role, content,
-                        created_at, source_archive_id, canonicalizer_version
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (instance_id, conversation_id, message["message_id"], message["role"],
-                     message["content"], message["created_at"], message["source_archive_id"], "structured-v1"),
-                )
-                indexed += 1
+        for conversation_id, message in messages:
+            message_instance_id = message.get("instance_id")
+            if message_instance_id != instance_id and not (
+                message_instance_id is None and include_unscoped
+            ):
+                raise ValueError('Canonical rebuild returned an unexpected owner')
+            values = (
+                instance_id, conversation_id, message['message_id'], message['role'],
+                message['content'], message['created_at'], message['source_archive_id'],
+                'structured-v2-first-observed',
+            )
+            connection.execute(
+                """INSERT INTO canonical_passages (
+                    instance_id, conversation_id, message_id, role, content,
+                    created_at, source_archive_id, canonicalizer_version
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""", values,
+            )
+            connection.execute(
+                """INSERT OR REPLACE INTO canonical_message_projection (
+                    instance_id, conversation_id, message_id, role, content,
+                    created_at, source_archive_id, canonicalizer_version
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""", values,
+            )
+            indexed += 1
 
         connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
     finally:
         connection.close()
 
     return indexed
+
+
+def project_retained_message(metadata, *, path=None):
+    """Project current retained revision, never an older caller's retry payload.
+
+    The Archive publication lock spans selection and index publication, using
+    the same lock order as rebuild. A delayed older retry therefore cannot
+    overwrite a newer retained revision. Archive bytes remain immutable.
+    """
+    from src import ingest
+    owner=metadata.get('instance_id');conversation=metadata.get('conversation_id')
+    if not owner or not conversation:raise ValueError('Scoped Archive projection identity is required')
+    with ingest._serialized_ingest():
+        archive_id=metadata.get('archive_id')
+        if not isinstance(archive_id,str) or not archive_id or any(c in archive_id for c in '/\\') or archive_id in {'.','..'}:
+            raise ValueError('Retained Archive metadata identity is invalid')
+        meta_path=ingest.META_DIR/(archive_id+'.json')
+        if meta_path.is_symlink() or meta_path.resolve().parent!=ingest.META_DIR.resolve() or not meta_path.is_file():
+            raise ValueError('Retained Archive metadata is unavailable')
+        saved=json.loads(meta_path.read_text(encoding='utf-8'))
+        fields=('archive_id','instance_id','conversation_id','raw_file','sha256','size_bytes','capture_type','capture_event_id')
+        if not isinstance(saved,dict) or any(saved.get(k)!=metadata.get(k) for k in fields):
+            raise ValueError('Projection receipt differs from retained Archive metadata')
+        if saved.get('capture_type')!='message_state':raise ValueError('Projection requires a retained message state')
+        metadata=saved
+        retained=json.loads(ingest.read_archived_bytes(metadata))
+        mid=retained['message_id']
+        current=next((message for message in canonical_messages(conversation,instance_id=owner,
+            raw_dir=ingest.RAW_DIR,meta_dir=ingest.META_DIR,strict=True) if message['message_id']==mid),None)
+        if current is not None:
+            index_canonical_message(instance_id=owner,conversation_id=conversation,message_id=mid,
+                role=current['role'],content=current['content'],created_at=current['created_at'],
+                source_archive_id=current['source_archive_id'],canonicalizer_version='structured-v2-first-observed',path=path)
+        else:
+            # The newest retained revision may legitimately be empty/omitted
+            # by normalization. Remove only its derived rows, not its history.
+            connection=_connect(INDEX_PATH if path is None else path)
+            try:
+                connection.execute('BEGIN IMMEDIATE')
+                for table in ['canonical_passages','canonical_message_projection']:
+                    connection.execute('DELETE FROM '+table+' WHERE instance_id=? AND conversation_id=? AND message_id=?',(owner,conversation,mid))
+                connection.commit()
+            finally:connection.close()
+        return current
 
 
 def index_canonical_message(

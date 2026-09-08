@@ -8,6 +8,7 @@ their authoritative domain records.
 from datetime import datetime, timezone
 from pathlib import Path
 import json
+import os
 import sqlite3
 
 from src.library.artifacts import EVIDENCE_ERAS, require_id, stable_work_id
@@ -16,7 +17,8 @@ from src.capabilities.multimodal import AuthorityContract, MultimodalCapabilityC
 
 
 ROOT = Path(__file__).resolve().parent.parent.parent
-PROCESSING_ROOT = ROOT / "database" / "processing"
+STATE_ROOT = Path(os.environ.get("FAWKES_RUNTIME_STATE_ROOT") or ROOT)
+PROCESSING_ROOT = STATE_ROOT / "database" / "processing"
 SCHEMA_VERSION = 1
 
 STATUSES = {
