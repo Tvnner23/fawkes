@@ -12,7 +12,10 @@ def effective_unit(unit_path,allow_missing=False):
  props=subprocess.check_output(['systemctl','--user','show',UNIT,'--property=LoadState','--property=ActiveState','--property=FragmentPath','--property=DropInPaths','--property=ExecStart'],timeout=5).decode()
  values=dict(line.split('=',1) for line in props.splitlines() if '=' in line)
  if values.get('DropInPaths')!='':raise PermissionError('Unreviewed or unknown effective unit overrides; preserved')
- if allow_missing and values.get('LoadState')=='not-found' and values.get('ActiveState')=='inactive' and values.get('FragmentPath')=='' and values.get('ExecStart')=='':return
+ # systemd omits ExecStart for a nonexistent unit, even with show --all.
+ # Permit omission only when absence/inactivity and empty source/overrides
+ # are independently explicit. Loaded units still require exact ExecStart.
+ if allow_missing and values.get('LoadState')=='not-found' and values.get('ActiveState')=='inactive' and values.get('FragmentPath')=='' and values.get('ExecStart','')=='':return
  expected='/home/tvnner/fawkes/.venv/bin/python'
  prefix='{ path='+expected+' ; argv[]='+expected+' -B /home/tvnner/.local/share/fawkes-worker-link/pi_worker_link.py server ; ignore_errors=no ;'
  if values.get('LoadState')!='loaded' or values.get('FragmentPath')!=str(unit_path) or not values.get('ExecStart','').startswith(prefix) or values['ExecStart'].count('{')!=1:raise PermissionError('Effective service command/source differs; no activation')

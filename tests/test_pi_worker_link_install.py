@@ -37,6 +37,25 @@ class Install(unittest.TestCase):
    root=pathlib.Path(d)/'worker'
    with patch.object(installer,'ROOT',root),patch.object(pathlib.Path,'home',return_value=pathlib.Path(d)),patch.object(installer.subprocess,'check_output',return_value=b'ActiveState=active\nFragmentPath=/run/user/1000/systemd/transient/other\n'),patch.object(installer.subprocess,'run') as run,self.assertRaises(PermissionError):installer.install(P,self.binding())
    self.assertFalse(any('enable' in x.args[0] for x in run.call_args_list));self.assertFalse((root/'accepted-binding.json').exists())
+ def test_missing_unit_omitted_execstart_and_duplicate_install(self):
+  with tempfile.TemporaryDirectory() as d:
+   base=pathlib.Path(d);root=base/'worker';unit=base/'.config/systemd/user'/link.UNIT
+   observed=b'LoadState=not-found\nActiveState=inactive\nFragmentPath=\nDropInPaths=\n'
+   with patch.object(installer,'ROOT',root),patch.object(pathlib.Path,'home',return_value=base),patch.object(installer.subprocess,'check_output',side_effect=lambda *a,**k:self.properties(unit) if unit.exists() else observed),patch.object(installer.subprocess,'run') as run:
+    first=installer.install(P,self.binding());second=installer.install(P,self.binding())
+   self.assertTrue(first['startup_installed']);self.assertTrue(second['startup_installed'])
+   self.assertFalse(first['thread_resumed']);self.assertFalse(second['provider_prompt_sent'])
+   self.assertEqual(unit.read_bytes(),(P/link.UNIT).read_bytes())
+   self.assertFalse(any('resume' in x.args[0] for x in run.call_args_list))
+ def test_omitted_execstart_only_for_verified_absence(self):
+  unit=pathlib.Path('/private/user')/link.UNIT
+  observed=b'LoadState=not-found\nActiveState=inactive\nFragmentPath=\nDropInPaths=\n'
+  with patch.object(installer.subprocess,'check_output',return_value=observed):
+   installer.effective_unit(unit,allow_missing=True)
+   with self.assertRaises(PermissionError):installer.effective_unit(unit)
+  invalid=[observed.replace(b'not-found',b'loaded'),observed.replace(b'inactive',b'active'),observed.replace(b'FragmentPath=\n',b''),observed.replace(b'DropInPaths=\n',b''),observed.replace(b'FragmentPath=',b'FragmentPath=/other'),observed.replace(b'DropInPaths=',b'DropInPaths=/override'),observed+b'ExecStart=unreviewed\n',self.properties(unit).split(b'ExecStart=')[0]]
+  for bad in invalid:
+   with self.subTest(bad=bad),patch.object(installer.subprocess,'check_output',return_value=bad),self.assertRaises(PermissionError):installer.effective_unit(unit,allow_missing=True)
  def test_dropin_changed_exec_or_missing_configuration_refused(self):
   unit=pathlib.Path('/private/user')/link.UNIT;good=self.properties(unit)
   for bad in [good.replace(b'DropInPaths=',b'DropInPaths=/tmp/unreviewed.conf'),good.replace(b'argv[]=/home/tvnner/fawkes/.venv/bin/python',b'argv[]=/bin/other'),good.replace(b'DropInPaths=\n',b''),good.replace(str(unit).encode(),b'/other/unit')]:
