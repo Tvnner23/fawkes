@@ -23,7 +23,8 @@ from src.runtime.codex_app_server import CodexAppServerError, CodexAppServerTran
 from src.runtime.windows_codex_reviewer import (
     MAX_REVIEW_PACKAGE_BYTES, MAX_REVIEW_RESOLVED_PACKAGE_BYTES,
     WINDOWS_REVIEW_SCHEMA, _exact_builder_evidence,
-    canonical_review_evidence_reference_ids, independent_review_acceptance_receipt, exact_review_schema,
+    _review_exact_change_evidence, canonical_review_evidence_reference_ids,
+    independent_review_acceptance_receipt, exact_review_schema,
     validate_windows_structured_response,
 )
 
@@ -812,6 +813,8 @@ class WslCodexReviewAdapter:
             binding["adapter_promotion_reference"] = WSL_PROMOTION_RECORD["promotion_id"]
         if any(transport_authority.get(k) != v for k, v in binding.items()):
             raise PermissionError("WSL review authority does not bind the exact request")
+        _review_exact_change_evidence(package, candidate_snapshot_root=snapshot_root,
+                                      transport_authority=transport_authority)
         transported = self.exchange.export_package_transport(package_id,
             max_transport_bytes=MAX_REVIEW_PACKAGE_BYTES,
             max_resolved_bytes=MAX_REVIEW_RESOLVED_PACKAGE_BYTES)
@@ -1027,7 +1030,8 @@ class WslCodexReviewAdapter:
                 reviewer=request["recipient"], return_report=returned,
                 delivery_receipt_id=delivery["delivery_receipt_id"],
                 verification_receipt_id=verification["verification_receipt_id"],
-                transport_authority=transport_authority)
+                transport_authority=transport_authority,
+                candidate_snapshot_root=snapshot_root)
             result = {"schema_version": 1, "record_type": "wsl_codex_review_result",
                 "adapter_id": WSL_ADAPTER_ID, "adapter_version": WSL_ADAPTER_VERSION,
                 "instance_id": package["instance_id"], "campaign_id": campaign_id,

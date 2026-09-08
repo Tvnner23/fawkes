@@ -1,7 +1,7 @@
 """Exact-evidence, read-only Windows Codex reviewer transport candidate."""
 
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import hashlib
 import json
 import os
@@ -306,25 +306,156 @@ def canonical_review_evidence_reference_ids(package):
     return sorted(item for item in identifiers if isinstance(item, str) and item.strip())
 
 
+_EXACT_CHANGE_REFERENCE_PATH = "review-supplement/exact-change-evidence.json"
+
+
+def _unique_review_json_keys(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("review evidence contains duplicate JSON keys")
+        value[key] = item
+    return value
+
+
+def _review_json(body, label):
+    try:
+        return json.loads(body, object_pairs_hook=_unique_review_json_keys)
+    except (TypeError, ValueError, json.JSONDecodeError, RecursionError) as exc:
+        raise PermissionError(label + " is malformed") from exc
+
+
+def _read_exact_change_reference(reference, candidate_snapshot_root):
+    expected = {"exact_candidate_relative_path", "sha256", "byte_length",
+                "complete", "external_retrieval"}
+    if (not isinstance(reference, dict) or set(reference) != expected
+            or reference.get("exact_candidate_relative_path") != _EXACT_CHANGE_REFERENCE_PATH
+            or type(reference.get("byte_length")) is not int
+            or not 0 <= reference["byte_length"] <= MAX_REVIEW_RESOLVED_PACKAGE_BYTES
+            or not isinstance(reference.get("sha256"), str)
+            or len(reference["sha256"]) != 64
+            or any(character not in "0123456789abcdef" for character in reference["sha256"])
+            or reference.get("complete") is not True
+            or reference.get("external_retrieval") is not False
+            or candidate_snapshot_root is None):
+        raise PermissionError("exact change evidence reference is invalid")
+    relative = PurePosixPath(reference["exact_candidate_relative_path"])
+    if (relative.is_absolute() or "\\" in str(relative)
+            or any(part in {"", ".", ".."} for part in relative.parts)):
+        raise PermissionError("exact change evidence reference escapes the candidate")
+    root = os.path.abspath(os.fspath(candidate_snapshot_root))
+    directory_flags = (os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+                       | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0))
+    file_flags = (os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                  | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0))
+    opened = []
+    try:
+        current = os.open(root, directory_flags)
+        opened.append(current)
+        if not stat.S_ISDIR(os.fstat(current).st_mode):
+            raise PermissionError("exact change evidence root is not a directory")
+        for part in relative.parts[:-1]:
+            current = os.open(part, directory_flags, dir_fd=current)
+            opened.append(current)
+            if not stat.S_ISDIR(os.fstat(current).st_mode):
+                raise PermissionError("exact change evidence ancestor is not a directory")
+        descriptor = os.open(relative.parts[-1], file_flags, dir_fd=current)
+        opened.append(descriptor)
+        node = os.fstat(descriptor)
+        if (not stat.S_ISREG(node.st_mode)
+                or node.st_size != reference["byte_length"]):
+            raise PermissionError("exact change evidence reference has stale metadata")
+        remaining = reference["byte_length"] + 1
+        chunks = []
+        while remaining:
+            try:
+                chunk = os.read(descriptor, min(65_536, remaining))
+            except InterruptedError:
+                continue
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        body = b"".join(chunks)
+        if os.fstat(descriptor).st_size != reference["byte_length"]:
+            raise PermissionError("exact change evidence reference changed while read")
+    except (OSError, ValueError) as exc:
+        if isinstance(exc, PermissionError):
+            raise
+        raise PermissionError("exact change evidence reference is unavailable") from exc
+    finally:
+        for descriptor in reversed(opened):
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+    if (len(body) != reference["byte_length"]
+            or hashlib.sha256(body).hexdigest() != reference["sha256"]):
+        raise PermissionError("exact change evidence reference has stale bytes")
+    try:
+        return body.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise PermissionError("exact change evidence reference is not UTF-8") from exc
+
+
+def _review_exact_change_evidence(package, *, candidate_snapshot_root=None,
+                                  transport_authority=None):
+    """Resolve inline or exact frozen-file evidence under one strict boundary."""
+    sections = {}
+    for item in package.get("included_sections", []):
+        section_id = item.get("section_id") if isinstance(item, dict) else None
+        if not isinstance(section_id, str) or not section_id or section_id in sections:
+            raise PermissionError("canonical review package sections are ambiguous")
+        sections[section_id] = item
+    inline = sections.get("exact-change-evidence")
+    referenced = sections.get("exact-change-evidence-reference")
+    if (inline is None) == (referenced is None):
+        raise PermissionError("canonical review package needs one exact change evidence form")
+    reference_form = referenced is not None
+    if inline is not None:
+        try:
+            changes = json.loads(inline["content"])
+            retention = json.loads(sections["candidate-retention-receipt"]["content"])
+        except (KeyError, TypeError, json.JSONDecodeError) as exc:
+            raise PermissionError("canonical review package evidence is incomplete") from exc
+    else:
+        pointer = _review_json(referenced.get("content"),
+                               "exact change evidence reference")
+        exact_body = _read_exact_change_reference(pointer, candidate_snapshot_root)
+        changes = _review_json(exact_body, "exact change evidence")
+        retention = _review_json(
+            (sections.get("candidate-retention-receipt") or {}).get("content"),
+            "candidate retention evidence")
+    if not isinstance(changes, list) or not isinstance(retention, dict):
+        raise PermissionError("canonical review package evidence has the wrong type")
+    if retention.get("exact_change_evidence_sha256") != _digest(changes):
+        raise PermissionError("canonical review package evidence lineage mismatch")
+    if transport_authority is not None:
+        if retention.get("record_sha256") != transport_authority.get(
+                "candidate_retention_receipt_sha256"):
+            raise PermissionError("review authority does not bind candidate retention")
+        if reference_form and (
+                retention.get("record_sha256") != _digest(
+                    {key: value for key, value in retention.items()
+                     if key != "record_sha256"})
+                or retention.get("exact_change_evidence_sha256") !=
+                    transport_authority.get("exact_change_evidence_sha256")):
+            raise PermissionError("review authority does not bind exact change evidence")
+    return changes, retention
+
+
 def independent_review_acceptance_receipt(*, response, campaign_id, package,
         candidate_snapshot_id, invocation_id, reviewer, return_report,
-        delivery_receipt_id, verification_receipt_id, transport_authority):
+        delivery_receipt_id, verification_receipt_id, transport_authority,
+        candidate_snapshot_root=None):
     """Derive acceptance only from a fully validated independent return."""
     if response.get("review_status") not in {"pass", "pass_with_caveats"}:
         return None
-    sections = {item["section_id"]: item for item in package.get("included_sections", [])
-                if isinstance(item, dict) and isinstance(item.get("section_id"), str)}
-    try:
-        changes = json.loads(sections["exact-change-evidence"]["content"])
-        retention = json.loads(sections["candidate-retention-receipt"]["content"])
-    except (KeyError, TypeError, json.JSONDecodeError) as exc:
-        raise PermissionError("canonical review package evidence is incomplete") from exc
+    changes, retention = _review_exact_change_evidence(
+        package, candidate_snapshot_root=candidate_snapshot_root,
+        transport_authority=transport_authority)
     preimages = [{"path": item.get("path"), "before_node_binding": item.get("before_node_binding")}
                  for item in changes]
-    if (retention.get("record_sha256") != transport_authority.get(
-            "candidate_retention_receipt_sha256")
-            or retention.get("exact_change_evidence_sha256") != _digest(changes)):
-        raise PermissionError("canonical review package evidence lineage mismatch")
     created_at = _now()
     receipt = {"schema_version": 2,
         "record_type": "codex_independent_review_acceptance_receipt",
@@ -593,6 +724,7 @@ def prepare_windows_review_package(*, exchange, campaign_record, candidate_snaps
         "builder_return_sha256": builder["record_sha256"],
         "candidate_snapshot_id": snapshot_id, "builder_package_id": run["package_id"],
         "mutation_manifest_sha256": retention["mutation_manifest_sha256"],
+        "exact_change_evidence_sha256": retention["exact_change_evidence_sha256"],
         "allowed_scope_sha256": retention["allowed_scope_sha256"],
         "candidate_retention_receipt_sha256": retention["record_sha256"],
         "adapter_promotion_reference": WINDOWS_PROMOTION_RECORD["promotion_id"]}
@@ -675,6 +807,8 @@ class WindowsCodexReviewAdapter:
             binding["adapter_promotion_reference"] = WINDOWS_PROMOTION_RECORD["promotion_id"]
         if any(transport_authority.get(k) != v for k, v in binding.items()):
             raise PermissionError("Windows review authority does not bind the exact request")
+        _review_exact_change_evidence(package, candidate_snapshot_root=snapshot_root,
+                                      transport_authority=transport_authority)
         transported = self.exchange.export_package_transport(package_id,
             max_transport_bytes=MAX_REVIEW_PACKAGE_BYTES,
             max_resolved_bytes=MAX_REVIEW_RESOLVED_PACKAGE_BYTES)
@@ -792,7 +926,8 @@ class WindowsCodexReviewAdapter:
                 reviewer=request["recipient"], return_report=returned,
                 delivery_receipt_id=delivery["delivery_receipt_id"],
                 verification_receipt_id=verification["verification_receipt_id"],
-                transport_authority=transport_authority)
+                transport_authority=transport_authority,
+                candidate_snapshot_root=snapshot_root)
             result = {"schema_version": 1, "record_type": "windows_codex_review_result",
                 "adapter_id": WINDOWS_ADAPTER_ID, "adapter_version": WINDOWS_ADAPTER_VERSION,
                 "instance_id": package["instance_id"], "campaign_id": campaign_id,
