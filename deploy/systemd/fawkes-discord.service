@@ -15,11 +15,12 @@ Group=tvnner
 WorkingDirectory=/home/tvnner/.local/lib/fawkes-production/current
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=PYTHONUNBUFFERED=1
-Environment=FAWKES_RUNTIME_STATE_ROOT=/home/tvnner/.local/state/fawkes
+# Runtime state is selected by the exact release manifest, never an ambient default.
 EnvironmentFile=/home/tvnner/.config/fawkes/discord-bot.env
-ExecStartPre=/home/tvnner/.local/lib/fawkes-production/venv/bin/python -B scripts/initialize_fawkes_discord_cursors.py
-ExecStart=/home/tvnner/.local/lib/fawkes-production/venv/bin/python -B scripts/run_fawkes_discord_bot.py
-ExecStopPost=/home/tvnner/.local/lib/fawkes-production/venv/bin/python -B scripts/fawkes_component_failure.py discord_bridge --result ${SERVICE_RESULT} --exit-code ${EXIT_CODE} --exit-status ${EXIT_STATUS}
+ExecStartPre=/usr/bin/python3 -B /home/tvnner/.local/lib/fawkes-production/run_fawkes_release.py scripts/verify_fawkes_production_prerequisites.py --component discord
+ExecStartPre=/usr/bin/python3 -B /home/tvnner/.local/lib/fawkes-production/run_fawkes_release.py scripts/initialize_fawkes_discord_cursors.py
+ExecStart=/usr/bin/python3 -B /home/tvnner/.local/lib/fawkes-production/run_fawkes_release.py scripts/run_fawkes_discord_bot.py
+ExecStopPost=/usr/bin/python3 -B /home/tvnner/.local/lib/fawkes-production/run_fawkes_release.py scripts/fawkes_component_failure.py discord_bridge --result ${SERVICE_RESULT} --exit-code ${EXIT_CODE} --exit-status ${EXIT_STATUS}
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=30
@@ -29,6 +30,7 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
 ReadWritePaths=/home/tvnner/fawkes/archive /home/tvnner/fawkes/database /home/tvnner/fawkes/memory /home/tvnner/fawkes/library /home/tvnner/fawkes/conversations /home/tvnner/fawkes/instances /home/tvnner/fawkes/logs /home/tvnner/.local/state/fawkes
+ReadWritePaths=/home/tvnner/fawkes/component-receipts /home/tvnner/fawkes/pending-failure-notifications
 
 [Install]
 WantedBy=fawkes.target

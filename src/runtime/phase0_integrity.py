@@ -6,9 +6,11 @@ than treated as canonical evidence.
 """
 
 from datetime import datetime, timezone
+from contextlib import closing, contextmanager
 from pathlib import Path
 import hashlib
 import json
+import os
 import shutil
 import sqlite3
 import uuid
@@ -60,14 +62,33 @@ def _record_instance(record):
     return record.get("instance_id") if isinstance(record, dict) else None
 
 
+@contextmanager
+def _read_database(path):
+    connection = sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True)
+    try:
+        connection.execute("PRAGMA query_only=ON")
+        yield connection
+    finally:
+        connection.close()
+
+
 def audit_phoenix_state(instance_id, *, root=None):
     """Return a bounded projection without mutating any audited record."""
-    root = Path(root) if root else ROOT
+    root = Path(root) if root is not None else Path(os.environ.get("FAWKES_RUNTIME_STATE_ROOT") or ROOT)
     findings = []
 
     def add(component, path, status, detail=None):
         findings.append({"component": component, "path": str(path.relative_to(root)),
                          "status": status, "detail": detail})
+
+    registry = _json(root / 'instances/registry.json') if root.is_dir() else None
+    entries = registry.get('instances') if isinstance(registry, dict) else None
+    if (not isinstance(instance_id, str) or not instance_id
+            or not isinstance(registry, dict) or registry.get('schema_version') != 1
+            or not isinstance(entries, list) or not all(isinstance(item, dict) for item in entries)
+            or sum(item.get('instance_id') == instance_id for item in entries) != 1):
+        add('instances', root / 'instances/registry.json', 'invalid',
+            'requested registered owner unavailable or ambiguous')
 
     for relative in SCOPED_ROOTS:
         base = root / relative
@@ -111,7 +132,11 @@ def audit_phoenix_state(instance_id, *, root=None):
             else:
                 add(relative, path, "owned" if owner == instance_id else "foreign_owned")
 
-    conversations = _json(root / "conversations/registry.json") or {}
+    conversations_path = root / "conversations/registry.json"
+    conversations = _json(conversations_path)
+    if conversations_path.exists() and not isinstance(conversations, dict):
+        add("conversations", conversations_path, "invalid", "unreadable registry")
+    conversations = conversations if isinstance(conversations, dict) else {}
     for record in conversations.get("conversations", ()):
         owner = record.get("instance_id")
         status = "legacy_unscoped" if owner is None else ("owned" if owner == instance_id else "foreign_owned")
@@ -132,9 +157,8 @@ def audit_phoenix_state(instance_id, *, root=None):
         if not path.exists():
             continue
         try:
-            connection = sqlite3.connect(path)
-            rows = connection.execute(f"SELECT instance_id, COUNT(*) FROM {table} GROUP BY instance_id").fetchall()
-            connection.close()
+            with _read_database(path) as connection:
+                rows = connection.execute(f"SELECT instance_id, COUNT(*) FROM {table} GROUP BY instance_id").fetchall()
             for owner, count in rows:
                 status = "legacy_unscoped" if owner is None else ("owned" if owner == instance_id else "foreign_owned")
                 findings.append({"component": table, "path": relative, "status": status,
@@ -149,14 +173,13 @@ def audit_phoenix_state(instance_id, *, root=None):
             if not path.exists():
                 continue
             try:
-                connection = sqlite3.connect(path)
-                metadata = connection.execute(
-                    "SELECT schema_version, instance_id FROM processing_ledger_metadata WHERE singleton=1"
-                ).fetchone()
-                owners = connection.execute(
-                    "SELECT instance_id, COUNT(*) FROM processing_work_items GROUP BY instance_id"
-                ).fetchall()
-                connection.close()
+                with _read_database(path) as connection:
+                    metadata = connection.execute(
+                        "SELECT schema_version, instance_id FROM processing_ledger_metadata WHERE singleton=1"
+                    ).fetchone()
+                    owners = connection.execute(
+                        "SELECT instance_id, COUNT(*) FROM processing_work_items GROUP BY instance_id"
+                    ).fetchall()
                 if metadata is None or metadata[1] != owner_dir.name or any(owner != owner_dir.name for owner, _ in owners):
                     status = "ownership_mismatch"
                 else:
@@ -176,12 +199,11 @@ def audit_phoenix_state(instance_id, *, root=None):
             if not path.exists():
                 continue
             try:
-                connection = sqlite3.connect(path)
-                metadata = connection.execute("SELECT schema_version,instance_id FROM staging_metadata").fetchone()
-                owners = set()
-                for table in ("staged_exports", "staged_conversations", "staged_nodes", "staged_messages"):
-                    owners.update(row[0] for row in connection.execute(f"SELECT DISTINCT instance_id FROM {table}"))
-                connection.close()
+                with _read_database(path) as connection:
+                    metadata = connection.execute("SELECT schema_version,instance_id FROM staging_metadata").fetchone()
+                    owners = set()
+                    for table in ("staged_exports", "staged_conversations", "staged_nodes", "staged_messages"):
+                        owners.update(row[0] for row in connection.execute(f"SELECT DISTINCT instance_id FROM {table}"))
                 mismatch = metadata is None or metadata[1] != owner_dir.name or any(owner != owner_dir.name for owner in owners)
                 status = "ownership_mismatch" if mismatch else ("owned" if owner_dir.name == instance_id else "foreign_owned")
                 findings.append({"component": "inherited_history_staging", "path": str(path.relative_to(root)),
@@ -258,14 +280,15 @@ def _filtered_work_ledger(instance_id, source_root, files_root):
         return
     target = files_root / "database/memory_processing.sqlite3"
     target.parent.mkdir(parents=True, exist_ok=True)
-    origin, copy = sqlite3.connect(source), sqlite3.connect(target)
-    origin.backup(copy)
-    copy.execute("DELETE FROM memory_work_items WHERE instance_id != ?", (instance_id,))
-    copy.commit(); copy.close(); origin.close()
+    with _read_database(source) as origin:
+        with closing(sqlite3.connect(target)) as copy:
+            origin.backup(copy)
+            copy.execute("DELETE FROM memory_work_items WHERE instance_id != ?", (instance_id,))
+            copy.commit()
 
 
 def create_complete_state_backup(instance_id, backup_root, *, source_root=None):
-    source_root = Path(source_root) if source_root else ROOT
+    source_root = Path(source_root) if source_root is not None else Path(os.environ.get("FAWKES_RUNTIME_STATE_ROOT") or ROOT)
     audit = audit_phoenix_state(instance_id, root=source_root)
     if not audit["gate_satisfied"]:
         raise ValueError("ownership/integrity audit has blocking findings")

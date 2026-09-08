@@ -58,6 +58,27 @@ work have their own boundaries; this pointer does not start them.
 
 ## Historical record
 
+### Alpha source preparation — 2026-09-16
+
+Normal-app source now includes prospective personal-recording controls: the
+authenticated settings UI reports the effective mode, private turns remain
+volatile, and learning eligibility remains separate from retained read access.
+The bounded Workshop successor supplies revisioned, non-self-applying proposals;
+its accepted source must be included before selecting an Alpha release.
+See [recording behavior](../recording-policy.md).
+
+Release preparation now separates exact accepted source from the existing state
+owner, packages the pinned reviewer schema, verifies a release-specific
+dependency environment before promotion, and supports app-only native setup
+without requiring social credentials. Phase-0 defaults follow the runtime root
+and database audits use read-only connections.
+
+These are source behaviors, not self-issued acceptance or deployment claims.
+Exact review, integration, release and observation receipts control status.
+The [startup and trial checklist](../ALPHA_STARTUP_TRIAL.md) keeps missing native
+credentials/setup, private iPhone access, coherent live backup/restore and the
+seven-day real Tanner trial separate from synthetic preparation results.
+
 The complete prior file is preserved byte-for-byte as the
 [September 8 implementation capture and older milestone notes](CURRENT_IMPLEMENTATION_2026-09-08_CAPTURE.md).
 Its SHA-256 is recorded in the status evidence. Present-tense statements inside

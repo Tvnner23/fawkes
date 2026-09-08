@@ -7,6 +7,5 @@ Before=fawkes-app.service fawkes-discord.service
 Type=oneshot
 User=tvnner
 Group=tvnner
-ExecStart=/home/tvnner/.local/lib/fawkes-production/venv/bin/python -B /home/tvnner/.local/lib/fawkes-production/current/scripts/verify_fawkes_production_prerequisites.py
-RemainAfterExit=true
+ExecStart=/usr/bin/python3 -B /home/tvnner/.local/lib/fawkes-production/run_fawkes_release.py scripts/verify_fawkes_production_prerequisites.py --component app
 NoNewPrivileges=true

@@ -10,9 +10,10 @@ Group=tvnner
 WorkingDirectory=/home/tvnner/.local/lib/fawkes-production/current
 Environment=PYTHONDONTWRITEBYTECODE=1
 EnvironmentFile=/home/tvnner/.config/fawkes/notification.env
-ExecStart=/home/tvnner/.local/lib/fawkes-production/venv/bin/python -B scripts/fawkes_failure_notifier.py
+ExecStart=/usr/bin/python3 -B /home/tvnner/.local/lib/fawkes-production/run_fawkes_release.py scripts/fawkes_failure_notifier.py
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
 ReadWritePaths=/home/tvnner/.local/state/fawkes
+ReadWritePaths=/home/tvnner/fawkes/component-receipts /home/tvnner/fawkes/pending-failure-notifications

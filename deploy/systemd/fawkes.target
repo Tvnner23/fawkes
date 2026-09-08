@@ -1,7 +1,8 @@
 [Unit]
 Description=Complete current production Fawkes runtime
-Wants=fawkes-production-ready.service fawkes-app.service fawkes-failure-notifier.timer fawkes-discord.service
-After=network-online.target fawkes-production-ready.service fawkes-app.service fawkes-discord.service
+Wants=fawkes-production-ready.service fawkes-app.service fawkes-failure-notifier.timer
+After=network-online.target fawkes-production-ready.service fawkes-app.service
+# Discord remains a separately configured, explicitly started companion.
 
 [Install]
 WantedBy=multi-user.target

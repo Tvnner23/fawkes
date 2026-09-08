@@ -4,7 +4,6 @@ After=network-online.target fawkes-production-ready.service
 Wants=network-online.target
 Requires=fawkes-production-ready.service
 PartOf=fawkes.target
-OnFailure=fawkes-failure-notifier.service
 StartLimitIntervalSec=300
 StartLimitBurst=5
 
@@ -17,13 +16,12 @@ Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=PYTHONUNBUFFERED=1
 Environment=FAWKES_APP_HOST=0.0.0.0
 Environment=FAWKES_APP_PORT=8787
-Environment=FAWKES_DEVELOPMENT_ROOT=/home/tvnner/fawkes
-Environment=FAWKES_RUNTIME_STATE_ROOT=/home/tvnner/.local/state/fawkes
+# Accepted source and runtime state come from the exact release binding.
 EnvironmentFile=/home/tvnner/.config/fawkes/app.env
 EnvironmentFile=-/home/tvnner/.config/fawkes/notification.env
-ExecStart=/home/tvnner/.local/lib/fawkes-production/venv/bin/python -B -m src.app.server --host 0.0.0.0 --port 8787
-ExecStartPost=/home/tvnner/.local/lib/fawkes-production/venv/bin/python -B scripts/wait_fawkes_app_ready.py
-ExecStopPost=/home/tvnner/.local/lib/fawkes-production/venv/bin/python -B scripts/fawkes_component_failure.py app_server --result ${SERVICE_RESULT} --exit-code ${EXIT_CODE} --exit-status ${EXIT_STATUS}
+ExecStart=/usr/bin/python3 -B /home/tvnner/.local/lib/fawkes-production/run_fawkes_release.py -m src.app.server --host 0.0.0.0 --port 8787
+ExecStartPost=/usr/bin/python3 -B /home/tvnner/.local/lib/fawkes-production/run_fawkes_release.py scripts/wait_fawkes_app_ready.py
+ExecStopPost=/usr/bin/python3 -B /home/tvnner/.local/lib/fawkes-production/run_fawkes_release.py scripts/fawkes_component_failure.py app_server --result ${SERVICE_RESULT} --exit-code ${EXIT_CODE} --exit-status ${EXIT_STATUS}
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=30
@@ -33,6 +31,7 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
 ReadWritePaths=/home/tvnner/fawkes/archive /home/tvnner/fawkes/database /home/tvnner/fawkes/memory /home/tvnner/fawkes/library /home/tvnner/fawkes/conversations /home/tvnner/fawkes/instances /home/tvnner/fawkes/logs /home/tvnner/.local/state/fawkes
+ReadWritePaths=/home/tvnner/fawkes/component-receipts /home/tvnner/fawkes/pending-failure-notifications /home/tvnner/fawkes/development_attention
 
 [Install]
-WantedBy=fawkes.target
+WantedBy=multi-user.target

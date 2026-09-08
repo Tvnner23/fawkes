@@ -110,12 +110,15 @@ print(json.dumps({
         self.assertIn("WorkingDirectory=/home/tvnner/.local/lib/fawkes-production/current", discord)
         self.assertNotIn("WorkingDirectory=/home/tvnner/fawkes", app)
         self.assertNotIn("WorkingDirectory=/home/tvnner/fawkes", discord)
-        self.assertIn("FAWKES_DEVELOPMENT_ROOT=/home/tvnner/fawkes", app)
-        self.assertIn("FAWKES_RUNTIME_STATE_ROOT=/home/tvnner/.local/state/fawkes", app)
+        self.assertIn("run_fawkes_release.py -m src.app.server", app)
+        self.assertNotIn("Environment=FAWKES_RUNTIME_STATE_ROOT=", app)
+        self.assertNotIn("Environment=FAWKES_DEVELOPMENT_ROOT=", app)
+        self.assertIn("--component discord", discord)
 
     def test_target_contains_only_current_production_components(self):
         target = (ROOT / "deploy/systemd/fawkes.target").read_text()
-        self.assertIn("fawkes-app.service fawkes-discord.service", target)
+        self.assertIn("fawkes-app.service", target)
+        self.assertNotIn("fawkes-discord.service", target)
         self.assertNotIn("worker", target.lower())
 
     def test_production_readiness_precedes_runtime(self):
@@ -123,6 +126,8 @@ print(json.dumps({
         app = (ROOT / "deploy/systemd/fawkes-app.service").read_text()
         discord = (ROOT / "deploy/systemd/fawkes-discord.service").read_text()
         self.assertIn("approved Fawkes release", ready)
+        self.assertIn("--component app", ready)
+        self.assertNotIn("RemainAfterExit=true", ready)
         self.assertIn("Requires=fawkes-production-ready.service", app)
         self.assertIn("Requires=fawkes-production-ready.service fawkes-app.service", discord)
 

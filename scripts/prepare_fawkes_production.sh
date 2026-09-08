@@ -1,16 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
-cd /home/tvnner/fawkes
-PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B -m unittest \
-  tests.test_discord_bot tests.test_discord_webhook tests.test_app_chat \
-  tests.test_component_supervision tests.test_fawkes_services tests.test_production_release
-validation="production-preparation-$(date -u +%Y%m%dT%H%M%SZ)"
-record=$(.venv/bin/python -B scripts/manage_fawkes_release.py build --validation-reference "$validation")
-release_id=$(printf '%s' "$record" | .venv/bin/python -c 'import json,sys; print(json.load(sys.stdin)["release_id"])')
-.venv/bin/python -B scripts/manage_fawkes_release.py promote "$release_id" >/dev/null
+repo="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 production=/home/tvnner/.local/lib/fawkes-production
-if [[ ! -x "$production/venv/bin/python" ]]; then
-  python3 -m venv "$production/venv"
+if [[ "${1:-}" == --production-root ]]; then
+  [[ $# -ge 2 && -n "$2" ]] || { echo 'Missing production root.' >&2; exit 2; }
+  production="$2"; shift 2
 fi
-"$production/venv/bin/pip" install --disable-pip-version-check -r "$production/current/requirements.txt"
-echo "Approved production release prepared: $release_id"
+# Explicit source/state/accepted-receipt arguments are mandatory. This prepares
+# dependencies but does not move current or alter the old shared environment.
+record=$(python3 -B "$repo/scripts/manage_fawkes_release.py" --production-root "$production" build "$@")
+release_id=$(printf '%s' "$record" | python3 -c 'import json,sys; print(json.load(sys.stdin)["release_id"])')
+python3 -B "$repo/scripts/manage_fawkes_release.py" --production-root "$production" prepare-env "$release_id" >/dev/null
+printf '%s\n' "$record"
