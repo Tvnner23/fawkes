@@ -3,7 +3,8 @@
   const URL='/api/development/worker/approvals', HEX=/^[a-f0-9]{64}$/, UUID=/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/;
   function boot(doc){
     const by=id=>doc.getElementById(id),cards=by('worker-native-cards');if(!cards||!root.fetch)return null;
-    const status=by('worker-native-status'),result=by('worker-native-result'),history=by('worker-native-history-items'),reading=by('worker-reading');
+    const status=by('worker-native-status'),result=by('worker-native-result'),history=by('worker-native-history-items');
+    const dialog=by('worker-native-dialog'),dialogScroll=by('worker-native-dialog-scroll'),title=by('worker-native-dialog-title');
     let current=null,selected=null,attempt=null,loading=false,sending=false,signature='',cursor=null;
     let historyRecords=[],woken=new Set();
     const savedKey='fawkes-native-worker-selection-v1',wakeKey='fawkes-native-worker-woken-v1';
@@ -36,7 +37,7 @@
       if(!current)return;
       const next=JSON.stringify([current.requests,current.connected,selected,sending,historyRecords]);if(next===signature)return;signature=next;
       const open=new Set(Array.from(cards.querySelectorAll('details[open]')).map(e=>e.dataset.requestKey));
-      const previous=cards.getBoundingClientRect().height,preserve=reading.scrollTop>previous+80;
+      const previousScroll=dialogScroll.scrollTop;
       cards.replaceChildren();history.replaceChildren();
       const rows=current.requests.concat(historyRecords.filter(r=>!current.requests.some(x=>x.request_key===r.request_key)));
       for(const r of rows){
@@ -71,7 +72,10 @@
         if(r.explanation&&d)card.appendChild(element('p',r.explanation,'meta'));
         (r.native_pending||r.needs_decision||r.status==='submitted'?cards:history).appendChild(card);
       }
-      if(preserve)reading.scrollTop+=cards.getBoundingClientRect().height-previous;
+      // Updating the one dialog-owned card must never scroll the conversation.
+      // Keep a reader's position through ordinary polling/selection re-renders.
+      dialogScroll.scrollTop=previousScroll;
+      title.textContent=current.connected?(current.pending_count?'Needs your decision':'Native decisions & history'):'Decision connection unavailable';
       by('worker-native-older').hidden=!cursor;
     }
     async function decide(r,c){
@@ -107,23 +111,25 @@
     }
     function revealDecision(){
       const page=by('worker-page');
-      if(!page||page.hidden||!reading)return;
+      if(!page||page.hidden||!dialog)return;
       // Explicit attention navigation, not a background refresh. Give the
       // request room without discarding draft text or changing any decision.
       const keyboard=by('worker-keyboard'),toggle=by('worker-keyboard-toggle');
       if(keyboard&&!keyboard.hidden&&toggle)toggle.click();
-      const request=current&&current.connected&&current.requests.find(r=>r.needs_decision||r.native_pending);
-      const card=request&&Array.from(cards.children).find(e=>e.dataset.requestKey===request.request_key);
-      // A PC resolution may win just before this click. Reveal the truthful
-      // current status instead; never revive a resolved request or send input.
-      const target=card||status;
-      reading.scrollTop+=target.getBoundingClientRect().top-reading.getBoundingClientRect().top;
-      target.tabIndex=-1;target.focus({preventScroll:true});
+      // There is one set of request controls, in the browser's modal top layer.
+      // The conversation remains inert behind it; no OS window or clone exists.
+      if(!dialog.open)dialog.showModal();
+      dialogScroll.scrollTop=0;title.focus({preventScroll:true});
+      refresh(); // Resolve races truthfully through the unchanged request owner.
     }
+    function closeDecision(){if(dialog.open)dialog.close();}
     root.addEventListener('fawkes:show-native-worker-decision',revealDecision);
+    by('worker-native-open').addEventListener('click',revealDecision);
+    by('worker-native-close').addEventListener('click',closeDecision);
     by('worker-native-older').addEventListener('click',()=>refresh(cursor));
     const timer=root.setInterval(()=>refresh(),5000);refresh();
-    return{refresh,stop:()=>{root.clearInterval(timer);root.removeEventListener('fawkes:show-native-worker-decision',revealDecision);}};
+    return{refresh,stop:()=>{root.clearInterval(timer);closeDecision();root.removeEventListener('fawkes:show-native-worker-decision',revealDecision);
+      by('worker-native-open').removeEventListener('click',revealDecision);by('worker-native-close').removeEventListener('click',closeDecision);}};
   }
   const api={boot};root.FawkesNativeWorkerApprovals=api;
   if(typeof module==='object'&&module.exports)module.exports=api;

@@ -243,13 +243,6 @@
           </div>
         </div>
         <div id="worker-reading" class="page-scroll" tabindex="0">
-          <section id="worker-native-approvals" aria-label="Native Worker decisions">
-            <p id="worker-native-status" class="meta">Native approval connection not yet verified</p>
-            <p id="worker-native-result" class="meta" role="status"></p>
-            <div id="worker-native-cards"></div>
-            <details id="worker-native-history"><summary>Native decision history</summary><div id="worker-native-history-items"></div>
-              <button id="worker-native-older" type="button" hidden>Earlier decisions</button></details>
-          </section>
           <p id="worker-progress" class="worker-progress" hidden></p>
           <p id="worker-history-state" class="meta" aria-live="polite"></p>
           <button id="worker-new-activity" type="button" class="secondary-button" hidden>New activity below</button>
@@ -266,6 +259,7 @@
             <p id="worker-session-identity" class="meta"></p>
             <p class="meta">This conversation connection is separate from the approval-managed execution feed in the header. Existing permission controls remain unchanged.</p>
             <p id="worker-final-identity" class="meta">No verified final message</p>
+            <button id="worker-native-open" type="button">Native decisions &amp; history</button>
           </details>
         </div>
         <form id="worker-reply-form" class="worker-reply-form">
@@ -291,6 +285,22 @@
       <span id="last-updated">No current projection</span>
       <span>Swipe or ← → · wheel scroll · wheel click expands</span>
     </footer>
+    <dialog id="worker-native-dialog" class="gesture-surface" aria-labelledby="worker-native-dialog-title">
+      <header class="worker-native-dialog-header">
+        <h2 id="worker-native-dialog-title" tabindex="-1">Needs your decision</h2>
+        <button id="worker-native-close" type="button" aria-label="Close decision window without answering">Close</button>
+      </header>
+      <div id="worker-native-dialog-scroll" class="gesture-surface" tabindex="0" aria-label="Decision details and choices">
+        <p class="meta">Closing this window does not answer or cancel a request.</p>
+        <section id="worker-native-approvals" aria-label="Native Worker decisions">
+          <p id="worker-native-status" class="meta">Native approval connection not yet verified</p>
+          <p id="worker-native-result" class="meta" role="status"></p>
+          <div id="worker-native-cards"></div>
+          <details id="worker-native-history"><summary>Native decision history</summary><div id="worker-native-history-items"></div>
+            <button id="worker-native-older" type="button" hidden>Earlier decisions</button></details>
+        </section>
+      </div>
+    </dialog>
   </main>
   <section id="native-permission" aria-live="polite" hidden></section>
   <link rel="stylesheet" href="/native-attention.css">

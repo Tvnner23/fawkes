@@ -141,7 +141,7 @@ commentary visible without inventing completion. Only currently observed active
 turns contribute to the current-progress recap. Older lifecycle pages never
 replace the independently bounded latest-final lookup or its clipboard identity.
 
-## Native decision navigation correction
+## G7 native decision navigation correction (historical)
 
 The September 14 installed `97405c8` product reached Summary on Tanner's Pi,
 and Tanner confirmed its appearance and general operation. Its native attention
@@ -165,3 +165,51 @@ not use a test-only scrollIntoView to make the initial card accessible. Syntheti
 scrolling, keyboard/draft, refresh and PC-resolution checks supplement the
 unchanged exact-decision/receipt tests; they do not claim the physical Pi return
 path has passed. That remains a post-install check on a legitimate permission.
+
+## G8 foreground native decision window
+
+G7 was subsequently installed at `b9339de`. Tanner confirmed selecting the
+real native request on the Pi; the authenticated selection, native resolution
+and matching command completion (exit 0) are separately retained. The selected
+choice saved the exact displayed command-prefix permission, not Approve Once.
+No additional model invocation or approval/execution trial was launched.
+
+Tanner then requested a separate window instead of a card in the conversation.
+Needs me now opens a native HTML modal dialog over Worker. The single set of
+request controls lives there, with a fixed heading and Close button, its own
+touch-scrollable details, exact native choices and confirmation. The underlying
+conversation is inert while it is open. It does not create an operating-system
+window, duplicate a request, select a choice or authorize an action.
+
+Close or Escape dismisses only the window: it does not deny, cancel or answer
+the native operation. Native decisions and history remain accessible in
+Worker's Session & connection details. Only the explicit attention/history tap
+opens the dialog; polling does not force it open. The keyboard is collapsed
+through the existing toggle without losing draft text or insertion position.
+Conversation position is unaffected by card rendering, and modal reading
+position is retained across normal refresh and option selection.
+
+PC resolution clears actionable controls in the same dialog. Disconnect and
+unverified queues remain visibly distinct from a confirmed empty queue. Native
+request identity, offered choice order/scope, persistent permission description,
+response validation, audit history and command outcomes use unchanged owners.
+The dialog stays inside the existing content-gesture guard, so dragging cannot
+activate a choice or confirmation. Native touch scrolling remains browser-owned.
+
+Offline DOM and 720×720 browser checks are supporting evidence, not physical
+verification of this new window. Reuse G7's real Pi return and the passed pinch,
+scroll, Idle, clipboard and same-Worker reply evidence; inspect the new dialog
+after the accepted installer is run. Preserve the deployed G7 rollback.
+
+### G9: contain keyboard navigation across the whole window
+
+The first dialog review reproduced D1: initial title focus let Left/Right keys
+bubble to console page navigation, changing Worker to Map behind the modal.
+The entire dialog now uses the existing gesture-surface navigation boundary,
+including its heading and surrounding chrome, not just its scrolling body.
+The browser retains native Tab focus containment and Escape dismissal.
+Regression checks run the actual console boot/registered navigation handler:
+the unclassified title reproduces the defect, the corrected markup preserves
+Worker for both arrows, and ordinary navigation outside the dialog still works.
+Real-browser key events additionally check initial focus and Escape without a
+decision. No approval owner, command material or response path changes.

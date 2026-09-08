@@ -885,3 +885,25 @@ body { background: radial-gradient(circle at 50% 0, #152332, var(--background) 6
 #fawkes-matrix-idle::before { content:"FAWKES / FIELD CONSOLE"; position:absolute; top:12px; left:16px; padding:3px 0 3px 30px; color:#edf3f6; font:600 14px/22px system-ui,sans-serif; pointer-events:none; background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23c58aff' d='M13 2c1 6-5 6-3 11 2-1 3-3 3-5 5 3 8 7 6 11-2 4-12 4-14-1C3 13 7 9 8 8c0 4 1 5 2 5C7 7 12 6 13 2Z'/%3E%3C/svg%3E") left center/22px no-repeat; }
 #fawkes-matrix-idle::after { content:"Touch to return to Summary"; position:absolute; bottom:24px; left:0; width:100%; text-align:center; color:#dceadd; font:18px/1.5 system-ui,sans-serif; pointer-events:none; }
 @media(prefers-reduced-motion:reduce) { .worker-native-card.needs-decision h3 { animation:none; } }
+#worker-native-dialog {
+  box-sizing: border-box; padding: 0; margin: auto;
+  width: min(680px, calc(100vw - 24px)); max-width: calc(100vw - 24px);
+  height: min(680px, calc(100dvh - 24px)); max-height: calc(100dvh - 24px);
+  border: 2px solid #FFD082; border-radius: 14px;
+  background: #11131b; color: #f3f7fc; overflow: hidden;
+  box-shadow: 0 12px 40px #0009; font: 18px/1.45 system-ui, sans-serif;
+}
+#worker-native-dialog[open] { display: flex; flex-direction: column; }
+#worker-native-dialog::backdrop { background: #05070cdc; }
+.worker-native-dialog-header {
+  flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between;
+  gap: 16px; padding: 12px 16px; border-bottom: 1px solid #61768a; background: #201c19;
+}
+.worker-native-dialog-header h2 { margin: 0; color: #FFD082; font-size: 21px; line-height: 1.3; }
+#worker-native-close { min-width: 76px; min-height: 52px; flex-shrink: 0; font: inherit; }
+#worker-native-dialog-scroll {
+  min-height: 0; flex: 1 1 auto; overflow: auto; padding: 12px 16px 24px;
+  scrollbar-gutter: stable; overscroll-behavior: contain; touch-action: pan-y;
+}
+#worker-native-dialog .worker-native-card { margin: 12px 0; }
+#worker-native-dialog .native-choice, #worker-native-dialog .native-confirm { white-space: normal; overflow-wrap: anywhere; }
