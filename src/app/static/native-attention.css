@@ -7,6 +7,14 @@
 #native-permission details{font-size:13px}
 #native-permission pre{white-space:pre-wrap;overflow-wrap:anywhere}
 #native-permission input{min-height:46px;max-width:95%;font:18px system-ui}
+#native-permission .permission-task{font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#b8c6d6}
+#native-permission .permission-explanation{margin:16px 0;font-size:18px;line-height:1.4}
+#native-permission .permission-explanation dt{font-weight:700;color:#ffd166;margin-top:14px}
+#native-permission .permission-explanation dd{margin:4px 0 0;white-space:pre-wrap;overflow-wrap:anywhere}
+#native-permission details summary{min-height:48px;display:flex;align-items:center;font:700 17px system-ui;cursor:pointer;color:#69d8ff}
+#native-permission button.permission-approve_once{background:#69d8ff;color:#0b1118;border-color:#69d8ff}
+#native-permission button.permission-deny{background:#14212d;color:#ff8585;border-color:#ff8585}
+#native-permission button.permission-cancel_campaign{background:#14212d;color:#f3f7fc;border-color:#61768a}
 #permission-launcher{position:fixed;left:10px;bottom:10px;z-index:200;min-height:48px;padding:10px 16px;background:#14212d;color:#ffd166;border:2px solid #ffd166;border-radius:9px;font:700 18px system-ui}
 #permission-launcher.needs-tanner{animation:permission-attention 2.6s ease-in-out infinite}
 #permission-launcher[hidden],#permission-connection[hidden]{display:none}

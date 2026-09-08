@@ -2,6 +2,45 @@
   'use strict';
   const binding = root.FawkesAttentionBinding;
   const labels = {approve_once:'Approve Once', deny:'Deny action', cancel_campaign:'Cancel campaign'};
+  // Explanations are display-only projections of this exact observed request.
+  // Do not infer shell effects, safety, or task necessity from arbitrary text.
+  function explainRequest(event,decision=null) {
+    const p=event.protocol_binding||{}, method=p.method;
+    let kind=null;
+    try {
+      const a=JSON.parse(event.requested_authority);
+      if(a&&typeof a==='object'&&!Array.isArray(a)&&a.method===method&&typeof a.kind==='string')kind=a.kind;
+    }catch(_){/* Recorded display text can be shortened or masked; do not guess subtype. */}
+    const actions={
+      'item/commandExecution/requestApproval':kind==='command'?'Run a command requested by this managed Worker.':kind==='writeStdin'?'Send input to a running command. One-action approval is not supported here.':'Perform a command-related operation. The command/input subtype is unavailable; see the recorded restriction below.',
+      execCommandApproval:'Run a command requested by this managed Worker.',
+      applyPatchApproval:'Apply the requested file changes.',
+      'item/fileChange/requestApproval':'Make a file change. This request does not supply the complete changes for one-action approval.',
+      'item/permissions/requestApproval':'Grant permissions for a whole turn or session, rather than one action.'
+    };
+    const strings=value=>Array.isArray(value)?value.filter(x=>typeof x==='string'&&x.trim()):[];
+    const scope=strings(p.managed_scope), resources=strings(event.resources);
+    const reason=typeof event.why_required==='string'&&event.why_required.trim();
+    const expires=typeof event.expires_at==='string'&&Number.isFinite(Date.parse(event.expires_at))
+      ?new Date(event.expires_at).toLocaleString():null;
+    const once=Array.isArray(p.native_decision_choices)&&p.native_decision_choices.includes('approve_once');
+    const claim=decision&&typeof decision.claim_expires_at==='string'&&Number.isFinite(Date.parse(decision.claim_expires_at))
+      ?new Date(decision.claim_expires_at).toLocaleString():null;
+    const responseDeadline=expires?'Response deadline: '+expires+'. ':'Response deadline is unknown. ';
+    const duration=decision&&decision.choice!=='approve_once'?'No approval was granted; there is no approval to consume.':decision
+      ?(decision.consumed?'Already consumed once; it cannot be used again. ':'')+(claim?'Owner-recorded claim deadline: '+claim+'. ':'The owner’s claim deadline is unavailable. ')
+      :'After approval, the owner gives the Worker a separate 60-second window to claim this action once. ';
+    return {
+      what:actions[method]||'Unknown request type. Its effects cannot be explained from the available record.',
+      why:reason&&reason!=='Codex requested native approval'?reason:'The Worker did not supply a task-specific reason.',
+      affects:[scope.length?'Managed task paths: '+scope.join(', '):'Managed task paths are not available.',
+        resources.length?'Request-reported locations: '+resources.join(', '):'No affected locations were reported.',
+        'These are recorded scope and locations, not proof of every effect. Other files, devices, services or settings affected are not independently established.'].join(' '),
+      authority:once?'Approve Once allows only this exact requested action in this Worker run, once. It does not approve code, extend the task or budget, or grant future access.':'One-action approval is not available for this request. Only the choices supplied by the approval owner can be offered.',
+      duration:responseDeadline+duration+'The response deadline and claim window are separate; neither promises how long execution will take.',
+      scopeDetails:typeof p.native_scope_explanation==='string'?p.native_scope_explanation:'Native scope is unavailable.'
+    };
+  }
   function outcome(value) {
     const event=value && value.attention, decision=value && value.decision;
     if (!event) return 'Unavailable — no exact request';
@@ -19,7 +58,7 @@
     const panel=document.getElementById('native-permission');
     if (!panel || !binding) return null;
     let current=null, selected=null, csrf='', sending=false, stale=true, closedId=null, sequence=0;
-    let lastRender=null, lastFailure='', expiryTimer=null, pendingQueue=[];
+    let lastRender=null, lastFailure='', expiryTimer=null, pendingQueue=[], technicalOpen=false;
     const locatorKey='fawkes.native-attention.locator.v1';
     const wakeKey='fawkes.native-attention.woken.v1';
     let woken=[];
@@ -100,11 +139,20 @@
       if (message) panel.append(element('p',message));
       if (!current) {panel.append(element('p','No exact managed permission request is available.'));return;}
       const event=current.attention, protocol=event.protocol_binding||{};
-      panel.append(element('p','Managed task paths: '+(Array.isArray(protocol.managed_scope)?protocol.managed_scope.join(', '):'See exact canonical scope binding in Details')));
       panel.append(element('p',stale?'Disconnected / stale — decisions disabled':outcome(current)));
       if(lastFailure)panel.append(element('p','Last submission: '+lastFailure+'. The canonical outcome above is authoritative.'));
-      for (const [name,value] of [['Worker',event.worker&&event.worker.worker_id],['Task',event.campaign_id],['Requested action',event.blocked_action],['Path / destination',(event.resources||[]).join('\n')],['Why',event.why_required],['Scope',protocol.native_scope_explanation||'Unknown native scope; no controls offered'],['Deadline',event.expires_at||'Unavailable']]) panel.append(element('p',name+': '+String(value||'Unavailable')));
-      const details=element('details','');details.append(element('summary','Exact request details'),element('pre',JSON.stringify({requested_authority:event.requested_authority||'Unavailable',identity:binding.canonicalAttentionIdentity(event),protocol},null,2)));panel.append(details);
+      const task=element('p','Worker: '+String(event.worker&&event.worker.worker_id||'Unknown')+' · Task: '+String(event.campaign_id||'Unknown'));
+      task.className='permission-task';task.title=task.textContent;panel.append(task);
+      const explanation=explainRequest(event,current.decision), overview=element('dl','');overview.className='permission-explanation';
+      for(const [name,value] of [['What Fawkes wants to do',explanation.what],['Why — Worker’s stated reason',explanation.why],['What it may affect',explanation.affects],['What your approval allows',explanation.authority+' Recorded scope / restriction: '+explanation.scopeDetails],['How long it lasts',explanation.duration]]) {
+        overview.append(element('dt',name),element('dd',value));
+      }
+      panel.append(overview,element('p','The Worker’s reason is a claim about this task, not independently verified necessity or a safety assessment.'));
+      const details=element('details','');details.open=technicalOpen;
+      details.ontoggle=()=>{technicalOpen=details.open;};
+      details.append(element('summary','Show technical details'),element('h3','Recorded command / file changes'),element('pre',String(event.blocked_action||'Unavailable')),
+        element('p','Display text is the approval service’s recorded view and may be shortened or masked. The decision remains bound to the exact waiting operation.'),
+        element('p',explanation.scopeDetails),element('pre',JSON.stringify({worker:event.worker,task:event.campaign_id,requested_authority:event.requested_authority||'Unavailable',resources:event.resources,deadline:event.expires_at,identity:binding.canonicalAttentionIdentity(event),protocol},null,2)));panel.append(details);
       if (!csrf) {
         const form=document.createElement('form'), input=document.createElement('input'), submit=element('button','Authenticate for decisions');
         input.type='password';input.autocomplete='current-password';input.placeholder='Existing app credential';submit.type='submit';form.append(input,submit);
@@ -117,10 +165,10 @@
         panel.append(element('p',selected==='approve_once'?'Confirm this exact action once. This does not accept code, increase budget, or authorize future work.':selected==='deny'?'Deny this action. The managed campaign stops safely.':'Cancel the entire selected campaign and interrupt this turn.'));
         const confirmedChoice=selected, confirmedIdentity=binding.canonicalAttentionIdentity(event);
         const confirmedDigest=event.authority_binding_sha256;
-        const confirm=element('button','Confirm '+labels[selected]);confirm.type='button';confirm.onclick=()=>submit(confirmedChoice,confirmedIdentity,confirmedDigest);
+        const confirm=element('button','Confirm '+labels[selected]);confirm.type='button';confirm.className='permission-'+selected;confirm.onclick=()=>submit(confirmedChoice,confirmedIdentity,confirmedDigest);
         const back=element('button','Go back');back.type='button';back.onclick=()=>{selected=null;render();};panel.append(confirm,back);
       } else for (const choice of offered) if(labels[choice]) {
-        const control=element('button',labels[choice]);control.type='button';control.onclick=()=>{
+        const control=element('button',labels[choice]);control.type='button';control.className='permission-'+choice;control.onclick=()=>{
           if(!current || !binding.canonicalAttentionIdentityMatches(current.attention,binding.canonicalAttentionIdentity(event),event.authority_binding_sha256))return;
           selected=choice;render();};panel.append(control);
       }
@@ -150,7 +198,7 @@
           if(!Object.prototype.hasOwnProperty.call(labels,value.decision.choice))throw new Error('Unknown recorded decision');
           binding.requireCanonicalDecisionResult(value,binding.canonicalAttentionIdentity(value.attention),value.attention.authority_binding_sha256,value.decision.choice);
         }
-        if (!current || current.attention.attention_id !== id) {selected=null;lastFailure='';}
+        if (!current || current.attention.attention_id !== id) {selected=null;lastFailure='';technicalOpen=false;}
         current=value;stale=false;
         remember(value.attention);
         if (selected && !(current.attention.protocol_binding.native_decision_choices||[]).includes(selected)) selected=null;
@@ -180,7 +228,7 @@
     render();
     return {refreshExact,outcome:()=>outcome(current)};
   }
-  const api={attach,outcome};root.FawkesNativeAttention=api;
+  const api={attach,outcome,explainRequest};root.FawkesNativeAttention=api;
   if(typeof module==='object'&&module.exports)module.exports=api;
   if(root.document)attach(root.document,root.fetch.bind(root));
 })(typeof window!=='undefined'?window:globalThis);

@@ -56,6 +56,16 @@ async function main(){
   value=fixture('attention-one');
   await events['fawkes:console-observation']({detail:{attention:[value.attention]}});
   assert(wake.includes('woke'));assert(buttons().some(x=>x.textContent==='Approve Once'));
+  const technical=descendants(panel).find(x=>x.tagName==='details');
+  assert.equal(technical.open,false,'technical material starts collapsed');
+  assert(descendants(technical).some(x=>x.textContent==='Show technical details'));
+  assert(descendants(technical).some(x=>x.textContent===value.attention.blocked_action),'recorded command stays available in technical details');
+  assert(descendants(panel).some(x=>x.textContent==='Why — Worker’s stated reason'));
+  assert(descendants(panel).some(x=>x.textContent.includes('not independently verified necessity')));
+  const overviewIndex=panel.children.findIndex(x=>x.className==='permission-explanation');
+  assert(overviewIndex>=0&&overviewIndex<panel.children.findIndex(x=>x.textContent==='Approve Once'),'explanation precedes decisions');
+  assert.equal(buttons().find(x=>x.textContent==='Approve Once').className,'permission-approve_once');
+  technical.open=true;technical.ontoggle();
   assert(!launcher().hidden,'exact pending request reveals Permissions');
   const wakesBeforeReconnect=wake.filter(x=>x==='woke').length;
   events['fawkes:console-disconnected']({});
@@ -64,6 +74,7 @@ async function main(){
   assert(!connection().hidden,'disconnect must remain visible, not empty');
   root.__fawkesMatrix.active=true;
   await events['fawkes:console-observation']({detail:{attention:[value.attention]}});
+  assert.equal(descendants(panel).find(x=>x.tagName==='details').open,true,'same request retains expanded technical details across reconnect');
   assert.equal(wake.filter(x=>x==='woke').length,wakesBeforeReconnect,'same pending request must not wake again after reconnect');
   assert(root.__fawkesMatrix.active);
   root.FawkesNativeAttention.attach(root.document,root.fetch);
@@ -116,6 +127,7 @@ async function main(){
   const oldConfirm=buttons().find(x=>x.textContent==='Confirm Approve Once');
   value=fixture('attention-four');
   await events['fawkes:console-observation']({detail:{attention:[value.attention]}});
+  assert.equal(descendants(panel).find(x=>x.tagName==='details').open,false,'new exact request starts its own details');
   assert(!buttons().some(x=>x.textContent==='Confirm Approve Once'),'selection for A must not become confirmation for B');
   await oldConfirm.onclick();assert.equal(posts.length,1,'a delayed confirmation cannot retarget another request');
   lost=false;buttons().find(x=>x.textContent==='Deny action').onclick();
