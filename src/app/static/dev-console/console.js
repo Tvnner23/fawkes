@@ -1232,12 +1232,91 @@
     return {state: "live", label: "◉ Live", updated_at: latest.updated_at};
   }
 
+  function attachContentScrolling(documentRef, environment) {
+    const host=environment||root;
+    let gesture=null, suppressUntil=0, previousSelect=null;
+    const now=()=>Date.now();
+    function within(target) {
+      return target&&target.closest&&target.closest('#dev-console, #native-permission');
+    }
+    function scrollers(target) {
+      const items=[];
+      for(let node=target;node&&node!==documentRef.body;node=node.parentElement) {
+        if(node.nodeType===1&&/(auto|scroll)/.test(host.getComputedStyle(node).overflowY)
+          &&node.scrollHeight>node.clientHeight+1)items.push(node);
+      }
+      return items;
+    }
+    function restore() {
+      if(previousSelect){previousSelect.node.style.userSelect=previousSelect.value;previousSelect=null;}
+    }
+    function down(event) {
+      if(event.isPrimary===false)return;
+      restore();gesture=null;suppressUntil=0;
+      if(event.button!==0||!within(event.target))return;
+      const selection=host.getSelection&&host.getSelection();
+      const editable=event.target.closest('input, textarea, select, [contenteditable="true"]');
+      gesture={id:event.pointerId,x:event.clientX,y:event.clientY,lastY:event.clientY,
+        start:now(),moved:false,dragging:false,scrollers:scrollers(event.target),
+        mouseFallback:event.pointerType==='mouse'&&host.__fawkesMatrixConfig
+          &&host.__fawkesMatrixConfig.emulatedPointerScroll===true&&!editable
+          &&(!selection||selection.isCollapsed),target:event.target};
+    }
+    function move(event) {
+      if(!gesture||event.pointerId!==gesture.id)return;
+      const dx=event.clientX-gesture.x,dy=event.clientY-gesture.y;
+      if(Math.hypot(dx,dy)>=12)gesture.moved=true;
+      // Native touch is never prevented or translated. The existing Pi compositor
+      // maps its Goodix touchscreen to a mouse; only the companion opts it in.
+      if(!gesture.mouseFallback)return;
+      if(!gesture.dragging) {
+        // Hold before dragging retains ordinary text selection; controls/inputs
+        // keep taps. No mouse fallback is enabled in the PC console by default.
+        if(now()-gesture.start>450){
+          gesture.mouseFallback=false;return;
+        }
+        if(!gesture.moved||!gesture.scrollers.length)return;
+        // Sub-threshold jitter has not established a direction yet.
+        if(Math.abs(dx)>Math.abs(dy)){gesture.mouseFallback=false;return;}
+        gesture.dragging=true;
+        const node=gesture.scrollers[0];previousSelect={node,value:node.style.userSelect};node.style.userSelect='none';
+        const selection=host.getSelection&&host.getSelection();
+        if(selection&&selection.removeAllRanges)selection.removeAllRanges();
+      }
+      let remaining=gesture.lastY-event.clientY;gesture.lastY=event.clientY;
+      for(const node of gesture.scrollers) {
+        const before=node.scrollTop;
+        node.scrollTop=Math.max(0,Math.min(node.scrollHeight-node.clientHeight,before+remaining));
+        remaining-=node.scrollTop-before;
+        if(Math.abs(remaining)<1)break;
+      }
+      if(event.cancelable)event.preventDefault();
+      event.stopPropagation();
+    }
+    function end(event) {
+      if(!gesture||event.pointerId!==gesture.id)return;
+      const moved=gesture.moved||Math.hypot(event.clientX-gesture.x,event.clientY-gesture.y)>=12;
+      if(moved||event.type==='pointercancel')suppressUntil=now()+800;
+      if(gesture.dragging){if(event.cancelable)event.preventDefault();event.stopPropagation();}
+      restore();gesture=null;
+    }
+    function click(event) {
+      // A trailing drag click is blocked even when it lands on Idle or a newly
+      // rendered decision. A new real pointerdown or keyboard click is distinct.
+      if(event.detail!==0&&now()<suppressUntil){event.preventDefault();event.stopImmediatePropagation();}
+    }
+    const listeners={pointerdown:down,pointermove:move,pointerup:end,pointercancel:end,click};
+    for(const [kind,fn] of Object.entries(listeners))documentRef.addEventListener(kind,fn,{capture:true,passive:false});
+    return ()=>{restore();for(const [kind,fn] of Object.entries(listeners))documentRef.removeEventListener(kind,fn,true);};
+  }
+
   function boot(options) {
     const value = options || {};
     const documentRef = value.document || root.document;
     if (!documentRef) return null;
     const shell = documentRef.getElementById("dev-console");
     if (!shell) return null;
+    const stopContentScrolling=attachContentScrolling(documentRef);
     const fetchImpl = value.fetch || (typeof root.fetch === "function" ? root.fetch.bind(root) : null);
     const pages = Array.from(documentRef.querySelectorAll(".console-page"));
     const indicators = Array.from(documentRef.querySelectorAll("[data-page-target]"));
@@ -1803,6 +1882,7 @@
       stop: function () {
         stopped = true;
         navigation.destroy();
+        stopContentScrolling();
         if (pollTimer !== null && root.clearInterval) root.clearInterval(pollTimer);
         clearProjectionTimers();
       }
@@ -1837,6 +1917,7 @@
     managedFeedObservation,
     renderRoadmapInventory,
     ConsoleNavigation,
+    attachContentScrolling,
     boot,
     startConsole: boot
   });

@@ -5,7 +5,7 @@
   function outcome(value) {
     const event=value && value.attention, decision=value && value.decision;
     if (!event) return 'Unavailable — no exact request';
-    if (event.state === 'expired') return 'Expired — no approval is available';
+    if (event.state === 'expired'||(!decision&&Number.isFinite(Date.parse(event.expires_at))&&Date.parse(event.expires_at)<=Date.now())) return 'Expired — no approval is available';
     if (!decision) return event.actionable === true ? 'Waiting for Tanner' : 'Unavailable — action is not verifiably live';
     if (decision.choice === 'deny') return 'Denied — campaign stopped safely';
     if (decision.choice === 'cancel_campaign') return 'Cancelled — campaign ended';
@@ -19,7 +19,7 @@
     const panel=document.getElementById('native-permission');
     if (!panel || !binding) return null;
     let current=null, selected=null, csrf='', sending=false, stale=true, closedId=null, sequence=0;
-    let lastRender=null, lastFailure='';
+    let lastRender=null, lastFailure='', expiryTimer=null, pendingQueue=[];
     const locatorKey='fawkes.native-attention.locator.v1';
     const wakeKey='fawkes.native-attention.woken.v1';
     let woken=[];
@@ -40,8 +40,33 @@
       remembered=locator({attention_id:event.attention_id,campaign_id:event.campaign_id,invocation_id:event.invocation_id});
       try {if(remembered)root.sessionStorage.setItem(locatorKey,JSON.stringify(remembered));}catch(_){}
     }
-    const button=document.createElement('button'); button.id='permission-launcher'; button.textContent='Permissions';
+    const button=document.createElement('button'); button.id='permission-launcher'; button.textContent='⚠ Permissions';
+    button.type='button';button.hidden=true;
     document.body.append(button);
+    const connection=document.createElement('p');connection.id='permission-connection';
+    connection.setAttribute('role','status');document.body.append(connection);
+    function needsDecision(value) {
+      const event=value&&value.attention;
+      return Boolean(event&&!value.decision&&event.state==='needs_tanner'&&event.actionable===true
+        &&Number.isFinite(Date.parse(event.expires_at))&&Date.parse(event.expires_at)>Date.now());
+    }
+    function updateLauncher() {
+      const pending=needsDecision(current);
+      button.hidden=!pending;
+      button.textContent=stale?'⚠ Permissions · last known':'⚠ Permissions';
+      button.className=pending&&!stale?'needs-tanner':'';
+      connection.hidden=!stale;
+      connection.textContent=stale?'Permissions unavailable — checking connection':'';
+      if(expiryTimer!==null)root.clearTimeout(expiryTimer);
+      expiryTimer=null;
+      if(pending) {
+        expiryTimer=root.setTimeout(()=>{
+          selected=null;cosmeticPending(false);updateLauncher();render();
+          if(current&&!sending)refreshExact(current.attention.attention_id);
+        },Math.min(2147483647,Math.max(1,Date.parse(current.attention.expires_at)-Date.now())));
+        if(expiryTimer&&expiryTimer.unref)expiryTimer.unref();
+      }
+    }
     function element(tag,text) {const x=document.createElement(tag);x.textContent=text;return x;}
     async function request(path, options) {
       const response=await fetchImpl(path,{credentials:'same-origin',cache:'no-store',...options,
@@ -65,7 +90,8 @@
       if (shouldWake && root.__fawkesMatrix && root.__fawkesMatrix.active) root.__fawkesMatrix.wake();
     }
     function render(message) {
-      const signature=JSON.stringify([current,selected,Boolean(csrf),sending,stale,message||'',lastFailure]);
+      updateLauncher();
+      const signature=JSON.stringify([current,selected,Boolean(csrf),sending,stale,needsDecision(current),message||'',lastFailure]);
       if(signature===lastRender)return;
       lastRender=signature;
       panel.replaceChildren(element('h2','Native Worker permission'));
@@ -100,7 +126,7 @@
       }
     }
     async function submit(choice,expectedIdentity,expectedDigest) {
-      if(sending||stale||!current||current.decision||!labels[choice]||selected!==choice
+      if(sending||stale||!needsDecision(current)||!labels[choice]||selected!==choice
         ||!binding.canonicalAttentionIdentityMatches(current.attention,expectedIdentity,expectedDigest))return;
       const event=current.attention, identity=binding.canonicalAttentionIdentity(event), expected=event.authority_binding_sha256;
       sending=true;selected=null;render('Sending exact decision…');
@@ -129,19 +155,25 @@
         remember(value.attention);
         if (selected && !(current.attention.protocol_binding.native_decision_choices||[]).includes(selected)) selected=null;
         if (current.decision || current.attention.state !== 'needs_tanner' || !current.attention.actionable) selected=null;
-        if (!current.decision && closedId!==id) panel.hidden=false;
-        cosmeticPending(!current.decision&&current.attention.actionable===true&&current.attention.state==='needs_tanner');render();
+        if (needsDecision(current) && closedId!==id) panel.hidden=false;
+        cosmeticPending(needsDecision(current));render();
+        if(!needsDecision(current)) {
+          pendingQueue=pendingQueue.filter(x=>x.attention_id!==id);
+          if(pendingQueue.length&&!sending)await refreshExact(pendingQueue[0].attention_id);
+        }
       } catch(error) {if(generation!==sequence)return;stale=true;selected=null;cosmeticPending(false);render('Refresh failed: '+error.message);}
     }
     button.onclick=()=>{panel.hidden=false;closedId=null;render();};
     root.addEventListener('fawkes:console-observation', async e=>{
       if(!csrf)try {csrf=(await request('/api/session/console-csrf',{method:'POST',body:'{}'})).csrf_token||'';}catch(_){/* Existing sessions remain read-only until authenticated. */}
-      const pending=(e.detail.attention||[]).filter(x=>x.actionable===true&&x.state==='needs_tanner');
+      const pending=(e.detail.attention||[]).filter(x=>needsDecision({attention:x}));
+      pendingQueue=pending.slice(0,128);
       const id=(pending[0]||{}).attention_id||(current&&current.attention.attention_id)||(remembered&&remembered.attention_id);
       const recovering=!pending.length&&!current;
       if(id&&!sending)await refreshExact(id,recovering?remembered:null);
+      else if(!id){stale=false;render();}
     });
-    root.addEventListener('fawkes:console-disconnected',()=>{stale=true;selected=null;cosmeticPending(false);render('Connection lost; no decision was sent.');});
+    root.addEventListener('fawkes:console-disconnected',()=>{sequence++;stale=true;selected=null;cosmeticPending(false);render('Connection lost; no decision was sent.');});
     // Middle/wheel gestures and the complete wake gesture must never choose a decision.
     panel.addEventListener('auxclick',e=>{e.preventDefault();e.stopPropagation();});
     panel.addEventListener('keydown',e=>{if(e.key==='ArrowLeft'||e.key==='ArrowRight')e.stopPropagation();});

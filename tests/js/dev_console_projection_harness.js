@@ -629,6 +629,8 @@ function fakeDocument() {
         return null;
       },
       createElement: (tag) => make(tag),
+      addEventListener: (...args) => shell.addEventListener(...args),
+      removeEventListener: () => {},
       createElementNS: (_namespace, tag) => make(tag),
       createTextNode(value) {
         const node = make('#text');

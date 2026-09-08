@@ -86,7 +86,7 @@ h3 { margin-bottom: 5px; font-size: 1rem; }
 .detail ul { margin: 12px 0 0; padding-left: 20px; }
 .detail li { margin: 7px 0; color: #d9e2dc; overflow-wrap: anywhere; }
 .detail code { color: var(--blue); }
-.code-scroll { max-width: 100%; overflow-x: auto; touch-action: pan-x; white-space: pre; padding: 10px; border-radius: 9px; background: #07100d; color: #c8e7d4; }
+.code-scroll { max-width: 100%; overflow-x: auto; touch-action: pan-x pan-y; white-space: pre; padding: 10px; border-radius: 9px; background: #07100d; color: #c8e7d4; }
 .evidence-link, .attention-link { display: inline-flex; min-height: 44px; align-items: center; margin-top: 10px; color: #08120e; background: var(--mint); border-radius: 10px; padding: 8px 12px; font-weight: 850; text-decoration: none; }
 .attention-card { margin-bottom: 12px; padding: 14px; border-color: rgba(255, 201, 120, 0.55); }
 .attention-card p { color: var(--muted); }
@@ -192,7 +192,7 @@ h3 { margin-bottom: 5px; font-size: 1rem; }
 .maturity-legend .built { border-color: var(--mint); }
 .maturity-legend .progressing { border-color: var(--blue); }
 .maturity-legend .planned { border-color: var(--amber); }
-.architecture-map { display: block; width: 100%; height: auto; max-height: 350px; overflow: visible; touch-action: none; background: radial-gradient(circle at center, rgba(57, 150, 104, 0.12), transparent 65%), var(--panel); }
+.architecture-map { display: block; width: 100%; height: auto; max-height: 350px; overflow: visible; touch-action: pan-y; background: radial-gradient(circle at center, rgba(57, 150, 104, 0.12), transparent 65%), var(--panel); }
 .architecture-edges path { fill: none; stroke: rgba(155, 200, 255, 0.58); stroke-width: 2; marker-end: url(#architecture-arrow); }
 .architecture-edges text { fill: var(--muted); font-size: 10px; }
 .architecture-node { cursor: pointer; }

@@ -1,4 +1,4 @@
-#native-permission{position:fixed;inset:64px 12px 12px;z-index:10000;background:#10221d;color:#f0fff6;border:2px solid #ffd16d;border-radius:14px;padding:18px;overflow:auto;font:17px system-ui;box-shadow:0 12px 45px #000b}
+#native-permission{position:fixed;inset:64px 12px 12px;z-index:10000;background:#10221d;color:#f0fff6;border:2px solid #ffd16d;border-radius:14px;padding:18px;overflow:auto;touch-action:pan-y;font:17px system-ui;box-shadow:0 12px 45px #000b}
 #native-permission[hidden]{display:none}
 #native-permission h2{font-size:22px;margin:0 0 10px}
 #native-permission p{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.4}
@@ -7,7 +7,12 @@
 #native-permission details{font-size:13px}
 #native-permission pre{white-space:pre-wrap;overflow-wrap:anywhere}
 #native-permission input{min-height:46px;max-width:95%;font:18px system-ui}
-#permission-launcher{position:fixed;left:10px;bottom:10px;z-index:200;min-height:44px}
+#permission-launcher{position:fixed;left:10px;bottom:10px;z-index:200;min-height:48px;padding:10px 16px;background:#14212d;color:#ffd166;border:2px solid #ffd166;border-radius:9px;font:700 18px system-ui}
+#permission-launcher.needs-tanner{animation:permission-attention 2.6s ease-in-out infinite}
+#permission-launcher[hidden],#permission-connection[hidden]{display:none}
+#permission-connection{position:fixed;left:10px;bottom:70px;z-index:200;max-width:calc(100% - 40px);padding:8px 12px;margin:0;background:#14212d;color:#b8c6d6;border:1px solid #61768a;border-radius:9px;font:16px system-ui;pointer-events:none}
+@keyframes permission-attention{0%,100%{box-shadow:0 0 0 0 #ffd16600}50%{box-shadow:0 0 0 4px #ffd16655}}
+@media(prefers-reduced-motion:reduce){#permission-launcher.needs-tanner{animation:none;box-shadow:none}}
 .managed-worker-feed{border-left:3px solid #73cba6;padding-left:12px}
 #console-login{padding:24px;max-width:680px;margin:auto;font:18px system-ui}
 #console-login form{display:flex;flex-wrap:wrap;gap:12px;align-items:center}
