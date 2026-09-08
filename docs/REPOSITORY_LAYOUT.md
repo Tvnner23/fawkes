@@ -55,14 +55,14 @@ to validate this map.
 
 ## Reading status honestly
 
-The [implementation handoff](phoenix/CURRENT_IMPLEMENTATION.md) contains an
-explicit **2026-09-08 capture** and older present-tense milestone notes. The
-[external review guide](EXTERNAL_REVIEW_GUIDE.md) also contains implementation
-and phase claims requiring reconciliation with current accepted evidence.
-Neither this map nor a file's presence resolves those claims. Use the existing
-owners and accepted evidence to reconcile status; do not treat a dated capture,
-proposal or test result as fresh roadmap authority or production approval.
+The [current implementation pointer](phoenix/CURRENT_IMPLEMENTATION.md) separates
+the accepted/deployed console from the byte-preserved
+[September 8 capture](phoenix/CURRENT_IMPLEMENTATION_2026-09-08_CAPTURE.md).
+[Repository work and cleanup](REPOSITORY_WORK.md) links the exact unfinished-work
+inventory, remaining causal groups and [status evidence](repository-status-evidence.json).
+The [external review guide](EXTERNAL_REVIEW_GUIDE.md) retains a labeled historical
+matrix; it cannot override newer accepted evidence.
 
-This contributor/navigation batch leaves the broader cleanup open. Status
-reconciliation and review of remaining repository organization are suggested
-backlog items, not work launched by this document.
+A path in this map is navigation, not proof of acceptance, integration or
+deployment. Cleanup is an active bounded assignment, not permission to discard
+untracked work or start distant roadmap capabilities.

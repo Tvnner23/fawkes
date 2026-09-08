@@ -16,9 +16,9 @@ critical disagreement is most valuable.
 
 For focused changes, read [Contributing](CONTRIBUTING.md) and the
 [Repository layout](docs/REPOSITORY_LAYOUT.md). Implementation/status documents
-contain dated captures (including the 2026-09-08 implementation pointer); reconcile
-them with current accepted evidence before relying on phase or deployment claims.
-This contributor/navigation batch leaves the broader repository cleanup open.
+include a reconciled current pointer and separately preserved dated captures.
+Use [Repository work and cleanup](docs/REPOSITORY_WORK.md) for the source-bound
+unfinished-work index and the remaining cleanup/backup boundaries.
 
 ## Core Architecture
 

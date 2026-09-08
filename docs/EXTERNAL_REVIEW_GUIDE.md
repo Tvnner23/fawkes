@@ -45,7 +45,20 @@ self-development under Human Review, Ghost Rider longitudinal experiments,
 embodiment/Presence, scheduling, workflows, voice, devices, and controlled
 agency. Most of that is not implemented.
 
-## Current state
+## Current state — use the reconciled pointer
+
+The private console is accepted, integrated and deployed at G22
+`e4fdddb7af525dbf32bb804ff6727313224ce430`. Contributor batch 1 is integrated;
+repository cleanup and privacy-verified backup remain in progress. See the
+[current pointer](phoenix/CURRENT_IMPLEMENTATION.md) and
+[unfinished-work index](REPOSITORY_WORK.md) for exact status and evidence.
+
+The following phase notes and matrix are a **historical review baseline**,
+retained rather than presented as fresh implementation/deployment verification.
+In particular, later recorded Context Composer, continuity, Presence and
+developer-console work supersedes older “next/not implemented” wording.
+
+### Historical state
 
 The target is v0.1 Alpha: trustworthy enough for Tanner to use Fawkes as his
 daily personal AI while development continues. Phases 0–8 are complete. Phase 9
@@ -57,7 +70,7 @@ legitimate production-asset gate.
 For the authoritative development handoff, read
 [`phoenix/CURRENT_IMPLEMENTATION.md`](phoenix/CURRENT_IMPLEMENTATION.md).
 
-## Implemented versus planned
+## Historical implemented-versus-planned matrix
 
 | Area | Implemented today | Designed/planned, not live |
 |---|---|---|
@@ -79,9 +92,9 @@ For the authoritative development handoff, read
 | Ghost Rider | Architecture/roadmap only | Post-Replay synthetic longitudinal experimentation and research instrument |
 | Scheduling/agency/devices | Permission extension points only | Scheduling, proactivity, workflows, actions, home/vehicle/device integration |
 
-If this matrix conflicts with the roadmap, this matrix and
-`CURRENT_IMPLEMENTATION.md` describe present implementation; the roadmap
-describes intended direction.
+This historical matrix is not today's authority. Use the reconciled current
+pointer and its accepted evidence for implementation/deployment, and the
+canonical roadmap for requirements and direction.
 
 ## Technology stack
 
@@ -301,8 +314,15 @@ above are essential context.
 - The dependency-light client is approaching the point where Presence and richer
   UI may pressure its maintainability.
 - Test coverage is broad but concentrated in several very large modules.
-- No CI, `pyproject.toml`, package metadata, lockfile, container/deployment
-  definition, or production observability stack exists.
+- Historical September 8 capture: this guide reported no CI, `pyproject.toml`,
+  package metadata, lockfile, container/deployment definition or production
+  observability stack. That combined absence claim is no longer current:
+  [package metadata](../package.json), [the npm lockfile](../package-lock.json)
+  and [systemd deployment definitions](../deploy/systemd/) exist in the retained
+  tree. Their existence alone is not independent acceptance of every retained
+  delta or proof of production observability. Use the current implementation
+  pointer and [work inventory](REPOSITORY_WORK.md) for current status; the other
+  historical absence claims need their own current evidence, not inference.
 - Some schema evolution occurs in application startup paths rather than a formal
   migration framework.
 - Capability/Test Center fixtures can still produce shared-implementation false

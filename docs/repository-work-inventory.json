@@ -1,0 +1,1694 @@
+{
+  "base_commit": "e4fdddb7af525dbf32bb804ff6727313224ce430",
+  "capture_date": "2026-09-13",
+  "git_staged_paths": 0,
+  "groups": [
+    {
+      "id": "work-group-01",
+      "items": [
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 65,
+            "mode": 420,
+            "sha256": "d825f6c5bea376421c94a114dfb09cfaf256d021b624dfda00b6f19d29a0a00b",
+            "type": "regular"
+          },
+          "path": "src/app/__init__.py"
+        }
+      ],
+      "name": "App and UI \u2014 distinguish current accepted console from older unfinished work"
+    },
+    {
+      "id": "work-group-02",
+      "items": [
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 3959,
+            "mode": 420,
+            "sha256": "596ec2754b1dcbddd95057fbb2e84a79f85605e6d934b99cdb8a87e1019a9415",
+            "type": "regular"
+          },
+          "path": "scripts/evaluate_live_research.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 1227,
+            "mode": 420,
+            "sha256": "fc43fab25e1312eec6a366650f7c18178d633900c4914566ba1208f6b030b2e5",
+            "type": "regular"
+          },
+          "path": "scripts/fawkes_chat.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 2619,
+            "mode": 420,
+            "sha256": "3115fedff49cc660f971f6540820406e0c6ecf2db5e8a3a269939d5e6cc6eff5",
+            "type": "regular"
+          },
+          "path": "scripts/import_rehearsal.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 1964,
+            "mode": 420,
+            "sha256": "cca2f77a12010c0cf578db081a397c983e09334800b0f30f93e1f0d47b078c89",
+            "type": "regular"
+          },
+          "path": "scripts/register_presence_asset.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 3068,
+            "mode": 420,
+            "sha256": "79dc3b62d76c854a1acf3b8ac3cb1140d8812660fb6cc1539ed6f236f2c7d468",
+            "type": "regular"
+          },
+          "path": "scripts/rider_acceptance_smoke.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 674,
+            "mode": 420,
+            "sha256": "e6b68cbabcaf64edde57acc83c914e784cb21a915f4f3a6e0c4d1f4375c0bb1b",
+            "type": "regular"
+          },
+          "path": "scripts/run_native_archive_corpus_acceptance.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 1922,
+            "mode": 420,
+            "sha256": "692952785dbf791e94014179ceb30b42f3eae13409640f45abc6b76b5e92150d",
+            "type": "regular"
+          },
+          "path": "scripts/send_fawkes_notification_test.py"
+        }
+      ],
+      "name": "Operational tools \u2014 inspect side effects before execution"
+    },
+    {
+      "id": "work-group-03",
+      "items": [
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "modified",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 2860,
+            "mode": 420,
+            "sha256": "f0c608701a31351cbde6183855b510af6b64c60301256dbc45f3c45555b37669",
+            "type": "regular"
+          },
+          "path": "src/capture/canonical.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "modified",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 8119,
+            "mode": 420,
+            "sha256": "c593da9b60e1bb16fb86e87f29e2245e679aa2e4b8635300dad582c19bb80938",
+            "type": "regular"
+          },
+          "path": "src/capture_receiver.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "modified",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 2560,
+            "mode": 420,
+            "sha256": "a446bc2c0c0b2f3828cdefef15b7bc5d863e3bcb979965799523ff69077e6175",
+            "type": "regular"
+          },
+          "path": "src/conversations.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "modified",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 3954,
+            "mode": 420,
+            "sha256": "2e337aaa155ab7a11df34225577251b00b519718bcefc015f5412001f84f5ea6",
+            "type": "regular"
+          },
+          "path": "src/fawkes.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 14216,
+            "mode": 420,
+            "sha256": "6f8b39d3630843f1baecadf73fd68f28a88a11fc0b537a073f990ee3a1e829f0",
+            "type": "regular"
+          },
+          "path": "src/historical_search.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 34690,
+            "mode": 420,
+            "sha256": "b1e14af2f75585e6bff6f49b0eff1b2f8a97ebdb3f4086d18a5bdf1bc8b94d7f",
+            "type": "regular"
+          },
+          "path": "src/history_staging.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 11052,
+            "mode": 420,
+            "sha256": "f1116a8e572a9ac35336170be5a0017d14758c348b86d61ae96bf5fac48a20ea",
+            "type": "regular"
+          },
+          "path": "src/history_validation.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 456,
+            "mode": 420,
+            "sha256": "c14effefbff28b0ed028cef2040943dab4b949965227dc2f7172a76a3cb97650",
+            "type": "regular"
+          },
+          "path": "src/index_archive.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "modified",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 3975,
+            "mode": 420,
+            "sha256": "18e9b11c391c48a16cc9259aee17e85249681742d93b0e63e3cf124448a55092",
+            "type": "regular"
+          },
+          "path": "src/ingest.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "modified",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 2163,
+            "mode": 420,
+            "sha256": "029e8fdb3b4345e93e1cadc9b19b84bc5c1572ab29906f7c44b789f6b6d96a0e",
+            "type": "regular"
+          },
+          "path": "src/instances.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 387,
+            "mode": 420,
+            "sha256": "1f4071a5e4636b6ffdfc60a646cdbe38035e3bf38ed2380c6cea9f663c7eb18e",
+            "type": "regular"
+          },
+          "path": "src/library/__init__.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 8817,
+            "mode": 420,
+            "sha256": "11cb3d1c366fd458f5398f2680b13ed368d019296ac226a338065aef4bd9cf56",
+            "type": "regular"
+          },
+          "path": "src/library/artifacts.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 4507,
+            "mode": 420,
+            "sha256": "15976d40ca5b6688c1c48830ecd0719caa132b00aa5b9eaec8c3cf704b1589a2",
+            "type": "regular"
+          },
+          "path": "src/library/extraction.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 3861,
+            "mode": 420,
+            "sha256": "3ca565f67f352fdd8e32d3a1e33bb18bfee6f185b53ef44fc9020ef1edf8a524",
+            "type": "regular"
+          },
+          "path": "src/library/storage.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 18407,
+            "mode": 420,
+            "sha256": "86e35c4afa2b488aadbf8fbe10f77038d0bab36c0e8c778d47e3b47d485b051d",
+            "type": "regular"
+          },
+          "path": "src/library/store.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "modified",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 1630,
+            "mode": 420,
+            "sha256": "4eba22167dd0a9e2baee029394b084de36432bfbd682a1122252b1bc788d5d25",
+            "type": "regular"
+          },
+          "path": "src/memory/archive_context.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "modified",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 1614,
+            "mode": 420,
+            "sha256": "659caea50f5bdb9da4448f390a18d19dd433ca0c7d8cdc67a233ba79488a159e",
+            "type": "regular"
+          },
+          "path": "src/memory/compare.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "modified",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 11682,
+            "mode": 420,
+            "sha256": "557271165935c98bf1a2dd2a4c00c534cea7b4b8708fcc768f0666c07ee3fd5f",
+            "type": "regular"
+          },
+          "path": "src/memory/consolidate.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 1146,
+            "mode": 420,
+            "sha256": "d271b34153520a7a2c1fe29ed8c527c490d09bad92128d9df7a2c0079a0dbfca",
+            "type": "regular"
+          },
+          "path": "src/memory/correction.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 5180,
+            "mode": 420,
+            "sha256": "e953cc586fb69af7b0a811855f8b375248d8841f3d9d4318259159b6adec7ca7",
+            "type": "regular"
+          },
+          "path": "src/memory/dev_review.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 4627,
+            "mode": 420,
+            "sha256": "8e093f2858ee9617b4569fca2c07c71aeab9965293053b2d17511f69606618b4",
+            "type": "regular"
+          },
+          "path": "src/memory/development_dashboard.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 17670,
+            "mode": 420,
+            "sha256": "315104a160ead959b7b44c8ada871ec947b175512da256fb037997cd2763b0e6",
+            "type": "regular"
+          },
+          "path": "src/memory/development_observations.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 2915,
+            "mode": 420,
+            "sha256": "5dbc188e225067333d725c7529e1b9bf5e58ed29878357728468912f5275e03b",
+            "type": "regular"
+          },
+          "path": "src/memory/development_runtime.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "modified",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 2878,
+            "mode": 420,
+            "sha256": "134cf6ef378b35d85e042bb3f8aa570166b254c07df67c4922c107f50e3dea11",
+            "type": "regular"
+          },
+          "path": "src/memory/development_store.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 1954,
+            "mode": 420,
+            "sha256": "3f5e7a3c14cbecf1b21e98449390a0f7be851558c65b8d1893cd7c1c4bb1da3c",
+            "type": "regular"
+          },
+          "path": "src/memory/import_audit.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 926,
+            "mode": 420,
+            "sha256": "4c6414649f8e112d8eb89006d55f592473125f4d5c984d7190437dbb2a3547dc",
+            "type": "regular"
+          },
+          "path": "src/memory/import_batch.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 4494,
+            "mode": 420,
+            "sha256": "deaa51adc3091504a32a7ae3fc1deefb8dbd37c04b17f429c8750e17b6939429",
+            "type": "regular"
+          },
+          "path": "src/memory/import_calibration.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 947,
+            "mode": 420,
+            "sha256": "2c444321a14c4bd78a15589de885f581165fec2ddacc430bb62b3bd470ad6e3f",
+            "type": "regular"
+          },
+          "path": "src/memory/import_decision.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 1949,
+            "mode": 420,
+            "sha256": "692132f88ac0b366881ddf07ab6be27a693a30bb1e4248bbb829203ced0ffebc",
+            "type": "regular"
+          },
+          "path": "src/memory/import_dry_run.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 1211,
+            "mode": 420,
+            "sha256": "e6b4cf3bee62f64b6e044d9eed1aaa309c63885a23ac9b3afe2cf4f2fab28d45",
+            "type": "regular"
+          },
+          "path": "src/memory/import_manifest.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 859,
+            "mode": 420,
+            "sha256": "57839fdd390d5d313f14169f7b999b4ebef064955af5b96e9f173b733d432aba",
+            "type": "regular"
+          },
+          "path": "src/memory/import_pipeline.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 1416,
+            "mode": 420,
+            "sha256": "34dd3b5ab601fef43aca5cf33235b8b29fdd7c40d9ecfd1ed0bc4ca169c4fe10",
+            "type": "regular"
+          },
+          "path": "src/memory/import_policy.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 1360,
+            "mode": 420,
+            "sha256": "d184b02cc5ec5c13bdc0519b5dd964cb3977a2615555534afb22bd9e3c2f3eee",
+            "type": "regular"
+          },
+          "path": "src/memory/import_review.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 1882,
+            "mode": 420,
+            "sha256": "9f61ed6968c2bca23845196bfc73779e668d1c04ec213c403a19fa4e55b52341",
+            "type": "regular"
+          },
+          "path": "src/memory/import_router.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "modified",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 16238,
+            "mode": 420,
+            "sha256": "accf90ec8d426c6964152c76841690aa05a600399dbfd79117851f45dd37df4e",
+            "type": "regular"
+          },
+          "path": "src/memory/openai_provider.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "modified",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 4026,
+            "mode": 420,
+            "sha256": "e0592faec0f24f95a6ba23e3ac5c24b17791f0327dc20837c30799e780c0492d",
+            "type": "regular"
+          },
+          "path": "src/memory/pipeline.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "modified",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 2735,
+            "mode": 420,
+            "sha256": "f952bc5ea97a6a0f92ef312821275cb04d77aef41f396c4255344aaabdd4d6ad",
+            "type": "regular"
+          },
+          "path": "src/memory/retrieval.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "modified",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 1889,
+            "mode": 420,
+            "sha256": "c39b6f03e84e11d8d6b1253e029fc04f1380b8d3166349978c03fa13f0e543eb",
+            "type": "regular"
+          },
+          "path": "src/memory/runtime.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "modified",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 1844,
+            "mode": 420,
+            "sha256": "07ab365f0913ad627be1a3c50a8aff675d1a4168a56a8888c863c2a6077f8467",
+            "type": "regular"
+          },
+          "path": "src/memory/semantic.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 811,
+            "mode": 420,
+            "sha256": "f525a16bc6262609c8605ac487c074c4c913823c9c137be780cd0bb2a99ebc2b",
+            "type": "regular"
+          },
+          "path": "src/memory/semantic_retrieval.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "modified",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 17170,
+            "mode": 420,
+            "sha256": "6ce7c0c740fbc2bd20ca7c48e0fe9ed4d8122c269b36ada2977cc858537bfcca",
+            "type": "regular"
+          },
+          "path": "src/memory/store.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 14867,
+            "mode": 420,
+            "sha256": "c7c6155016ec5841151fd1bdcba0eab382b56f3bf61373a83f04bb8bc7f7a270",
+            "type": "regular"
+          },
+          "path": "src/memory/worker.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 7231,
+            "mode": 420,
+            "sha256": "7bbf2cd54d8d7fad18fc2d81ba455a8ecda954ce5f354ceefd1d6a2225171970",
+            "type": "regular"
+          },
+          "path": "src/memory_cli.py"
+        }
+      ],
+      "name": "Other source domains \u2014 identify canonical owner"
+    },
+    {
+      "id": "work-group-04",
+      "items": [
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "modified",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 32042,
+            "mode": 420,
+            "sha256": "005c93e5cbd1fed17f5b9a96b1dba7851baf067101dc0daa7c30ec47b8bccc93",
+            "type": "regular"
+          },
+          "path": "docs/phoenix/FOUNDATION.md"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 3317,
+            "mode": 420,
+            "sha256": "193ca71021c4dae141d106a6a817951c51d3087903d98b308d84c1fa30c0b952",
+            "type": "regular"
+          },
+          "path": "docs/phoenix/HISTORICAL_SEARCH.md"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 1502,
+            "mode": 420,
+            "sha256": "19e4e7cd9dd10208a55c409f96e853e76d10b5f83f17fab75e6b840f7dd4f205",
+            "type": "regular"
+          },
+          "path": "docs/phoenix/HISTORY_CORPUS_VALIDATION.md"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 5217,
+            "mode": 420,
+            "sha256": "414ecd902e63dc0f7a6645f3eba78062af6ee5f2970891c6c55f7fa06f1f4986",
+            "type": "regular"
+          },
+          "path": "docs/phoenix/INHERITED_HISTORY_STAGING.md"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 2928,
+            "mode": 420,
+            "sha256": "b0f8a12e658ea18c061defd31723c75cb8e0dc964d924deb88d21d3f4ea74f27",
+            "type": "regular"
+          },
+          "path": "docs/phoenix/LEGACY_EVIDENCE_COMPATIBILITY.md"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 6192,
+            "mode": 420,
+            "sha256": "49b206061403742c08e4d5445f54c6844de75464c753edb91df60f5ee6127c85",
+            "type": "regular"
+          },
+          "path": "docs/phoenix/LIBRARY_ARCHITECTURE.md"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "modified",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 16583,
+            "mode": 420,
+            "sha256": "f85c87af3fbb93213faa4b84483af736bd52981a2cee22295fbc0320e7da57a3",
+            "type": "regular"
+          },
+          "path": "docs/phoenix/MEMORY_ARCHITECTURE.md"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 3220,
+            "mode": 420,
+            "sha256": "113006c1278be46f482b06dee2cd510016253559c7f8b5779992639efee4336d",
+            "type": "regular"
+          },
+          "path": "docs/phoenix/MVP_MEMORY_OPERATIONS.md"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 12884,
+            "mode": 420,
+            "sha256": "8c84953b964b08b9ebfb601f03873ce3c538b95b6547ff857cf47d3ad7385431",
+            "type": "regular"
+          },
+          "path": "docs/phoenix/NATIVE_ARCHIVE_CONTINUITY.md"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 3534,
+            "mode": 420,
+            "sha256": "70dd6cf6bd7b809de6c3967a7660d8c18ce61076cddd65c5502f4f814e5dbc08",
+            "type": "regular"
+          },
+          "path": "docs/phoenix/NATIVE_ARCHIVE_CORPUS_ACCEPTANCE.md"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 9421,
+            "mode": 420,
+            "sha256": "53c934325bcd1c153966569816f640f8d4c43e08aa173a9b19635857e0ecbe71",
+            "type": "regular"
+          },
+          "path": "docs/phoenix/PHOENIX_CHECKPOINT_RECOVERY.md"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 4994,
+            "mode": 420,
+            "sha256": "f8ee1e3299b0056e2f8b3413050dda767f3fcfb7347ccc02112f1b1f07bdff1d",
+            "type": "regular"
+          },
+          "path": "docs/phoenix/RETRIEVAL_REPLAY.md"
+        }
+      ],
+      "name": "Phoenix contracts/planning \u2014 preserve accepted versus proposed lineage"
+    },
+    {
+      "id": "work-group-05",
+      "items": [
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "modified",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 1055,
+            "mode": 420,
+            "sha256": "908c851fd50429a796dd208df788fbf5554e66d94179d8073157dc8888c9e5b2",
+            "type": "regular"
+          },
+          "path": ".gitignore"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 14155,
+            "mode": 420,
+            "sha256": "ed9b7f21a5df8765f587ccf0b08558ec7e4f676f206962ae08c5ae22e90b72d9",
+            "type": "regular"
+          },
+          "path": "package-lock.json"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 414,
+            "mode": 420,
+            "sha256": "efb30653e71b1563f3d49137c6e3a1227531740d601b18e3e793eb24498614e6",
+            "type": "regular"
+          },
+          "path": "package.json"
+        }
+      ],
+      "name": "Root/client configuration \u2014 inspect exact purpose"
+    },
+    {
+      "id": "work-group-06",
+      "items": [
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 0,
+            "mode": 420,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "type": "regular"
+          },
+          "path": "src/runtime/__init__.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 8248,
+            "mode": 420,
+            "sha256": "ee632002fdd4e5ce41d5bb73e336bf74b0337bfb9953bd499a2421ae371e4b99",
+            "type": "regular"
+          },
+          "path": "src/runtime/chat_cli.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 27681,
+            "mode": 420,
+            "sha256": "23e860f8b8417d587dfe426408f4e506b3d85fac421226b205be2cbb8320c602",
+            "type": "regular"
+          },
+          "path": "src/runtime/context_composer.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 12004,
+            "mode": 420,
+            "sha256": "983398ec5ffaf69360b8934f5f69af5756ea3377a077ba1ee2542dbd654df693",
+            "type": "regular"
+          },
+          "path": "src/runtime/context_receipts.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 9741,
+            "mode": 420,
+            "sha256": "777172091a699a123a210a338f107fd17057ddfa4f4fe5edbc92d2e9006f881a",
+            "type": "regular"
+          },
+          "path": "src/runtime/evidence_transmission.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 6887,
+            "mode": 420,
+            "sha256": "c22910978cacae5d9ecdc918f10bb1d3dc4785e68203b6e8035c7c15f46c9a85",
+            "type": "regular"
+          },
+          "path": "src/runtime/legacy_compatibility.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 14054,
+            "mode": 420,
+            "sha256": "9792ecd22709eb0026071815030112f36c702e4334879441691367949837df90",
+            "type": "regular"
+          },
+          "path": "src/runtime/native_archive_corpus_acceptance.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 41816,
+            "mode": 420,
+            "sha256": "d11726acb52aa07e3e339880a9a3da9eeb8ee8c19b72528ff6a505ea20f5a7af",
+            "type": "regular"
+          },
+          "path": "src/runtime/native_continuity_projection.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 7271,
+            "mode": 420,
+            "sha256": "0cadb3c6476ee786e9deceee08c8607e2400b1eb9e95988d13cb34a580261a06",
+            "type": "regular"
+          },
+          "path": "src/runtime/native_retrieval_ambiguity.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 1614,
+            "mode": 420,
+            "sha256": "0b9b1a0cdca4c4000f5536ab75f4770bf7af09d3f11406be69bf91265c56294b",
+            "type": "regular"
+          },
+          "path": "src/runtime/persistence.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 22115,
+            "mode": 420,
+            "sha256": "c04577b4413720b0c2515f3abf6b68e60f00d7c212301c295d1e67425bfa4c5f",
+            "type": "regular"
+          },
+          "path": "src/runtime/processing_ledger.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 8876,
+            "mode": 420,
+            "sha256": "e2658505c8bb6b00f2b663d67f38636e6b0d28c69578d59ce9245fbca97f3854",
+            "type": "regular"
+          },
+          "path": "src/runtime/production_planner_builder.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 20879,
+            "mode": 420,
+            "sha256": "3d9eb36d13ad8a0fcda203efb5d061b1df79287863624ce0e3e746a35fcd369c",
+            "type": "regular"
+          },
+          "path": "src/runtime/production_retrieval_adapters.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 18330,
+            "mode": 420,
+            "sha256": "a045dd4624fb44d0464ca3862f369b187731b5b75d8cf0eae41ac9e1201a6491",
+            "type": "regular"
+          },
+          "path": "src/runtime/retrieval_planner.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 13610,
+            "mode": 420,
+            "sha256": "eadbe72c1d8c48b3922bb70d2d642e10f34850a1dd29bd4a8098045a9317abda",
+            "type": "regular"
+          },
+          "path": "src/runtime/retrieval_replay.py"
+        }
+      ],
+      "name": "Runtime ownership/continuity \u2014 classify by causal boundary before edits"
+    },
+    {
+      "id": "work-group-07",
+      "items": [
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 9161,
+            "mode": 420,
+            "sha256": "0512ead7a515f6ab5c7ef730489d6c4192a84b304997678a9862f594fb9c2511",
+            "type": "regular"
+          },
+          "path": "tests/fixtures/native_archive_acceptance_corpus.json"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 2558,
+            "mode": 420,
+            "sha256": "70f4d33e1d085b11cc29ceba20211b7fe8c3b64d826761e13710d7bc29a1ecce",
+            "type": "regular"
+          },
+          "path": "tests/fixtures/native_archive_acceptance_expected.json"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 6228,
+            "mode": 420,
+            "sha256": "a31f856e45f0c21c2fbdf96e1d24dfb13f4b47d72638f21357dab1418cc56594",
+            "type": "regular"
+          },
+          "path": "tests/js/app_http_library_harness.js"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 2228,
+            "mode": 420,
+            "sha256": "bc6a3b7c079ad0579c7ccd901e8cd41a444c1ab545f877dc40ca8b608af3fcaf",
+            "type": "regular"
+          },
+          "path": "tests/js/app_http_presence_harness.mjs"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 9159,
+            "mode": 420,
+            "sha256": "79314edc78126745c64ad433d99f46b3e4a37fc36bfe3feeebdf4bb0e1f430a5",
+            "type": "regular"
+          },
+          "path": "tests/js/app_http_test_center_harness.js"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 4759,
+            "mode": 420,
+            "sha256": "f64cb0aaafa463219f5f6b4972a8e73e6fbd302b64600e33d640ec4008e258ea",
+            "type": "regular"
+          },
+          "path": "tests/js/app_http_visualization_harness.js"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 12969,
+            "mode": 420,
+            "sha256": "75e1789a03196b3562542f0f8da42699eaa16d3cfadd391492495d061f8c35b2",
+            "type": "regular"
+          },
+          "path": "tests/js/app_retrieval_clarification_harness.js"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 15326,
+            "mode": 420,
+            "sha256": "0d46c603292c8ceb1bfe1b37b9f17e712aef9a335340f9f0cd6422757e90aec8",
+            "type": "regular"
+          },
+          "path": "tests/test_acceptance_center.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 2872,
+            "mode": 420,
+            "sha256": "4ef73981c56aab8b1b0601f167f984e167dfda3290d1983839d6c61d5e7967ff",
+            "type": "regular"
+          },
+          "path": "tests/test_acceptance_center_http_e2e.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 12318,
+            "mode": 420,
+            "sha256": "c1079bd15b3ddbf9069be3bb4e417080760226797b3fd21e7d263530e42f804f",
+            "type": "regular"
+          },
+          "path": "tests/test_capture_events.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 9973,
+            "mode": 420,
+            "sha256": "c739d810e85385df40bb2eb049645403146614e7543c17e67d629f8209d8b8ff",
+            "type": "regular"
+          },
+          "path": "tests/test_context_composer.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 2038,
+            "mode": 420,
+            "sha256": "53c6ecf262d03b231ae1389a5d7399a0c0a21b372fc1467da0c929b36b22a398",
+            "type": "regular"
+          },
+          "path": "tests/test_context_feedback.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 8036,
+            "mode": 420,
+            "sha256": "aa2ec601c91f9e3d811ab8cc8047c508a12aafd72c9491bdc4bd634278546357",
+            "type": "regular"
+          },
+          "path": "tests/test_context_receipts.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 5186,
+            "mode": 420,
+            "sha256": "234da73944bc05ed23409eed561440a6d7435bf7f8a9ab4c897e149b6981f386",
+            "type": "regular"
+          },
+          "path": "tests/test_continuity_retrieval.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 4369,
+            "mode": 420,
+            "sha256": "a601da7b327d506653905580e030c165b9f71d3393f093282eafecd7042ca197",
+            "type": "regular"
+          },
+          "path": "tests/test_development_dashboard.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 13561,
+            "mode": 420,
+            "sha256": "0c822b638b8159a1826431ba87881035ee0d942372580b003dec357aea531b6d",
+            "type": "regular"
+          },
+          "path": "tests/test_development_observations.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 5155,
+            "mode": 420,
+            "sha256": "7be26fbd53edd342ce0000080c4f028476dd2c74276bef2735edc03931232448",
+            "type": "regular"
+          },
+          "path": "tests/test_evidence_transmission.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 11412,
+            "mode": 420,
+            "sha256": "ad024f77d334cf0addc93af752583a5839b35a1e93d817c959c38f53f963a6fd",
+            "type": "regular"
+          },
+          "path": "tests/test_historical_search.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 4834,
+            "mode": 420,
+            "sha256": "e8f7e4509760fd998e2a66ac0dfd22089835b5a3f4a7e611f1f7dd486da194af",
+            "type": "regular"
+          },
+          "path": "tests/test_history_http_e2e.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 16764,
+            "mode": 420,
+            "sha256": "286a8b1b821c10d0cb95aa43cecd7255ba0a3049c8b3f9aa711997a9fae33996",
+            "type": "regular"
+          },
+          "path": "tests/test_history_staging.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 7016,
+            "mode": 420,
+            "sha256": "e05d9b02cd27d4617682dd810f2ea9697846ca76151d493511e02a3d342993d7",
+            "type": "regular"
+          },
+          "path": "tests/test_history_validation.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 7053,
+            "mode": 420,
+            "sha256": "72abe285aa0d23b7216acdd7d0e10e046d28a4bcf15b542ad9ed387a42ee661e",
+            "type": "regular"
+          },
+          "path": "tests/test_legacy_compatibility.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 4760,
+            "mode": 420,
+            "sha256": "4881c83436bc0bf9d6c01574bdcf40b81410978de46e106e3a56138293084e73",
+            "type": "regular"
+          },
+          "path": "tests/test_library_http_e2e.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 12283,
+            "mode": 420,
+            "sha256": "cccb1565a3c398176b58db3a9cee9de08fa2c870b3d83d27d0be630ae22f3d04",
+            "type": "regular"
+          },
+          "path": "tests/test_library_store.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 7391,
+            "mode": 420,
+            "sha256": "9b49f5e92e5c97ef40201138ed538b2ffc570863ae1ad5fa6a42ffc503f2dd04",
+            "type": "regular"
+          },
+          "path": "tests/test_live_persistence.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 9666,
+            "mode": 420,
+            "sha256": "930a5e79129c15342160a230ad814257aade24cd3ae22d847e7304cfcea9692d",
+            "type": "regular"
+          },
+          "path": "tests/test_live_retrieval_permit.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "modified",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 21802,
+            "mode": 420,
+            "sha256": "685b5336fe24509e9f38478622b92a97d66cb2cbb1f574aca119cdb7b0b6c54e",
+            "type": "regular"
+          },
+          "path": "tests/test_memory_consolidate.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "modified",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 13231,
+            "mode": 420,
+            "sha256": "41dca90db5b0b26c524bc6398c28c6fea7afb7cba94bb1ce9f3a3e62979e570e",
+            "type": "regular"
+          },
+          "path": "tests/test_memory_pipeline.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "modified",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 6413,
+            "mode": 420,
+            "sha256": "3c872c2f6083b721d788cc46b0a9ee4a2504b749e8912a6ccbbd96504aeaccd1",
+            "type": "regular"
+          },
+          "path": "tests/test_memory_retrieval.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "modified",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 108990,
+            "mode": 420,
+            "sha256": "e0e15e3925f45cefa3db9e194dd2ed3c2c79095db0418e698b9259d093ab36ef",
+            "type": "regular"
+          },
+          "path": "tests/test_memory_runtime.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "modified",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 11779,
+            "mode": 420,
+            "sha256": "469340be5167f3b5fad0dc6ec1018e36db05844f60eb03b68591239ab9dc61e0",
+            "type": "regular"
+          },
+          "path": "tests/test_memory_semantic_provider.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "modified",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 15048,
+            "mode": 420,
+            "sha256": "94f8e884ffe816c2381652801db6a3594e70b2f846e468f6d4aca768a5dd752e",
+            "type": "regular"
+          },
+          "path": "tests/test_memory_store.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 14419,
+            "mode": 420,
+            "sha256": "9f983b1cf2852fa9cec68f75bef2fa1921874ba3cec2bad8aee58c3265ccafe7",
+            "type": "regular"
+          },
+          "path": "tests/test_memory_worker.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 3001,
+            "mode": 420,
+            "sha256": "3e57c3534c5b76617383963c4ec360e35ac3f7b45e8f32aa287afb78bb7b1042",
+            "type": "regular"
+          },
+          "path": "tests/test_native_archive_corpus_acceptance.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 32917,
+            "mode": 420,
+            "sha256": "560a130a48017fe37ed01dcb4b856d9526cf471cf4c3b8b5320a7ad369e149e7",
+            "type": "regular"
+          },
+          "path": "tests/test_native_continuity_projection.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 15985,
+            "mode": 420,
+            "sha256": "5823b1fe60f8aa257095a776f9fa85cefc9013987af4b16a74efebe6cbea7001",
+            "type": "regular"
+          },
+          "path": "tests/test_native_retrieval_ambiguity.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 9614,
+            "mode": 420,
+            "sha256": "612a54954a389ea2c070c7b1a75f68b2f8005b6bfdf42ad57010687d41e1c0a8",
+            "type": "regular"
+          },
+          "path": "tests/test_phase1_library.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 22940,
+            "mode": 420,
+            "sha256": "8d149893292e4d5e2fbe696add105b8ddf442885acf799af52ff9f47dbbaf5b1",
+            "type": "regular"
+          },
+          "path": "tests/test_planner_chat_http_e2e.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 9382,
+            "mode": 420,
+            "sha256": "12b831370cc1580f79fa0c76dae3f958c93aa46f0c785f5a392533bf12014c3e",
+            "type": "regular"
+          },
+          "path": "tests/test_processing_ledger.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 6092,
+            "mode": 420,
+            "sha256": "1de6dcc128310206c20872b02056cfbdc2608c1ad3e32a627ebd10ccc9a6fb30",
+            "type": "regular"
+          },
+          "path": "tests/test_production_retrieval_adapters.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 3102,
+            "mode": 420,
+            "sha256": "bfdd9e31b177d96206efa5ee60ee364dd6f2a130f34d9cd1018ecf2a4e38c7cd",
+            "type": "regular"
+          },
+          "path": "tests/test_public_experience_contract.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 10028,
+            "mode": 420,
+            "sha256": "7dffdc3fc603f1a72580d37e0c2896b4778912839657931d7b84062fe71bd5b3",
+            "type": "regular"
+          },
+          "path": "tests/test_retrieval_planner.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 5779,
+            "mode": 420,
+            "sha256": "45bedce689a262937ff5bbe951db9b33484cc92b902d520bf26affdec42ba7db",
+            "type": "regular"
+          },
+          "path": "tests/test_retrieval_replay.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 1923,
+            "mode": 420,
+            "sha256": "037c3d2b2a75e6966663d3c424e717996671f6105cc8b860c6980496d92be3fc",
+            "type": "regular"
+          },
+          "path": "tests/test_rider_acceptance_suite.py"
+        },
+        {
+          "disposition": "preserve; inspect original owners and qualification before exact batch review",
+          "git_state": "untracked",
+          "independent_acceptance": "not established for this retained delta",
+          "integration": "not included in baseline commit",
+          "node": {
+            "byte_length": 4168,
+            "mode": 420,
+            "sha256": "c444b6e246276792b366be5870108608420e1bcf86076493687b8fe50e668164",
+            "type": "regular"
+          },
+          "path": "tests/test_visualization_http_e2e.py"
+        }
+      ],
+      "name": "Tests \u2014 map to their matching implementation before any integration"
+    }
+  ],
+  "locator_root": "machine-local console-preview-recovery-20260909 retention root; not a public URL",
+  "meaning": "Source/type/mode bindings establish preservation, not acceptance, deployment, or authority. Refresh this inventory through a reviewed update when grouped paths change.",
+  "path_count": 126,
+  "schema_version": 1,
+  "source_inventory_locator": "console-cleanup-continuation-20260911-v1/cleanup-inventory-pre-console-close.json",
+  "source_inventory_sha256": "ff6ea6d6e67abdfb12aea79ffaca15eab2b2ad83ddd8e091a86f3ff127bddff5",
+  "status_sha256": "5a157f2b2bfb854099a34d7a84ce3a91ec0729a027df4915f9f574fd46b34134"
+}

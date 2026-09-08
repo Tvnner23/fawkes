@@ -1,0 +1,74 @@
+{
+  "base_commit": "e4fdddb7af525dbf32bb804ff6727313224ce430",
+  "claims": "These are bounded facts derived from validated canonical records and installation evidence, not new receipts or acceptance of unfinished work.",
+  "cleanup_batch1": {
+    "acceptance_receipt": "8eabea2aacbc31ebd03250d4eb219811e595f3e984f31fc6c10c4437064283b2",
+    "campaign": "repository-professionalization-batch1-contributor-map-20260911-r3",
+    "commit": "74050de912f877f4fe3249284cf373b797ee7b11"
+  },
+  "console": {
+    "acceptance_receipt": "6cccfbb359d3e080886383a6b658138bdb57eba8015b1218682477a2ede3ccba",
+    "accepted_integrated_deployed_commit": "e4fdddb7af525dbf32bb804ff6727313224ce430",
+    "application_count": 1,
+    "limitations": [
+      "PC and bridge must be available; not standalone Pi",
+      "No new physical reboot claim"
+    ],
+    "mutation": "2928afac5743ef1ebea608a996e0f879a94231af32ccb1a3a4c79f86d45d64e4",
+    "physical_menu_check": "passed, Tanner observed",
+    "prior_physical_evidence_reused": [
+      "pinch",
+      "finger scrolling",
+      "Idle/Matrix wake",
+      "real approval trial",
+      "Windows verbatim paste",
+      "same-session Pi reply"
+    ],
+    "snapshot": "candidate-snapshot-f33f96b58d91d4ee36a380b6ca803384128ed7c852536925a04c74f0188e9095",
+    "worker_thread": "01a06f22-5b47-72c1-9b9c-b70157913436"
+  },
+  "console_evidence": {
+    "fresh_readonly_verification": {
+      "retained_path": "pi-console-final-v1/followup-g17-worker-conversation/followup-g22-worker-page-menu/delivery-v1/deployment-v1/worker-readiness-20260913T040701384388Z.json",
+      "sha256": "a1e381d9e339673d1ce7d1d2174a0dd24793baedd8250ebc23a315810da4a969"
+    },
+    "integration": {
+      "retained_path": "pi-console-final-v1/followup-g17-worker-conversation/followup-g22-worker-page-menu/delivery-v1/integration-v1/integration-result.json",
+      "sha256": "84b0b7a9636a4be93c4cfb6dcab73d0c7ac91ff3cc5b989b67919985137dcc25"
+    },
+    "pi_installation": {
+      "retained_path": "pi-console-final-v1/followup-g17-worker-conversation/followup-g22-worker-page-menu/delivery-v1/deployment-v1/pi-rollout-output-20260913T035351087.txt",
+      "sha256": "f67042f2bea010ba84a6e80c1b4a6ed7544a2d46e316987908753d876606497a"
+    },
+    "prior_evidence": {
+      "retained_path": "pi-console-final-v1/followup-g17-worker-conversation/followup-g22-worker-page-menu/closeout-v1/g22-accepted-rollout-handoff.json",
+      "sha256": "4122022951ca11cf1edc1d721a27d4d4a0ca369726fe29027b1b8de7d065dc81"
+    },
+    "review": {
+      "retained_path": "pi-console-final-v1/followup-g17-worker-conversation/followup-g22-worker-page-menu/evidence/closed-review.json",
+      "sha256": "b1cd5ffea9986e9a636d23ce60e097627c1f5cdd286440da93262b755b89e484"
+    }
+  },
+  "evidence_root": "machine-local console-preview-recovery-20260909 retention root; private original reports are not bundled",
+  "github_backup": {
+    "at": "2026-09-13T04:29:44.983152+00:00",
+    "backup_is_full_working_tree": false,
+    "destination_ref": "refs/heads/main",
+    "head": "e4fdddb7af525dbf32bb804ff6727313224ce430",
+    "non_force": true,
+    "private_verified": true,
+    "remote_main_verified": true,
+    "status": "backup_verified",
+    "uncommitted_paths_excluded": 126,
+    "url": "https://github.com/Tvnner23/fawkes.git"
+  },
+  "github_backup_evidence": {
+    "retained_path": "cleanup-roadmap-20260913-v1/github-backup-20260913T042944.json",
+    "sha256": "27fc638221ce66572ae818e646fbf6016dd80a6d04fb29347c00b6b12b3ef906"
+  },
+  "historical_pointer_sha256": "0c7d37d33a43033d96cb44b8a917891de567b8663fac63a7daf7358fba26f88c",
+  "milestone_completion_sha256": "12ed0744781d69c517abfd3ef09ccdc097795831b051c968ae1f37658df4df0b",
+  "schema_version": 1,
+  "unfinished_inventory_sha256": "5f4f2ed348eb040b83f04d0378d2bfe931cfee8e9c84c90b4f3eddb8aac6409f",
+  "verified_at": "2026-09-13T04:09:28.186356+00:00"
+}
