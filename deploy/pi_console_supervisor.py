@@ -19,6 +19,8 @@ import time
 import urllib.request
 
 from browser_pipe import ORIGIN, PipeBrowser, SetupError
+from pi_shutdown_state import LocalShutdown, SaveError, THREAD
+from pi_shutdown_browser import BrowserShutdown
 
 ROOT = Path(__file__).resolve().parent
 RUNTIME = Path("/run/user") / str(os.getuid())
@@ -239,16 +241,62 @@ def sign_in_expression(token):
     })()""" % (LOGIN_READY, json.dumps(token))
 
 
-def open_console(browser, token, matrix):
-    browser.navigate("/")
-    browser.wait_for("(" + LOGIN_READY + ") || (" + CONSOLE_READY + ")",
-                     "The preview page did not load.", timeout=25)
+def local_shutdown_tick(browser, shutdown):
+    shutdown.install()
+    result = shutdown.poll()
+    if result and result['state'] == 'requested':
+        status('SHUTTING_DOWN', 'Pi shutdown requested; PC and Worker remain running.')
+        while browser.process.poll() is None:
+            time.sleep(.25)
+        raise SystemExit(0)
+    if result:
+        status('SHUTDOWN_UNCONFIRMED', result['message'])
+
+
+def responsive_wait(browser, expression, message, *, timeout, shutdown=None):
+    if shutdown is None:
+        return browser.wait_for(expression, message, timeout=timeout)
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        local_shutdown_tick(browser, shutdown)
+        if browser.evaluate(expression):
+            return
+        time.sleep(.15)
+    raise SetupError(message)
+
+
+def guarded_navigation(browser, shutdown, action):
+    # Readiness is not permission to interrupt a hold or discard an unsaved
+    # page. Service the same local reader while waiting; never renew a hold.
+    while not prepare_navigation(browser, shutdown):
+        if browser.process.poll() is not None:
+            raise SetupError('The browser ended before navigation could be saved.')
+        time.sleep(.15)
+    try:
+        result=action()
+    except BaseException:
+        if shutdown is not None:
+            shutdown.abort_navigation()
+        raise
+    if shutdown is not None:
+        shutdown.finish_navigation()
+    return result
+
+
+def open_console(browser, token, matrix, shutdown=None):
+    def navigate_root():
+        browser.navigate("/")
+        responsive_wait(browser, "(" + LOGIN_READY + ") || (" + CONSOLE_READY + ")",
+                         "The preview page did not load.", timeout=25, shutdown=shutdown)
+    guarded_navigation(browser, shutdown, navigate_root)
     if not browser.evaluate(CONSOLE_READY):
         # Normal app sign-in, using the existing credential supplied by the PC.
-        if not browser.evaluate(sign_in_expression(token)):
-            raise SetupError("The expected sign-in form is unavailable.")
-    browser.wait_for(CONSOLE_READY, "Waiting for authenticated Fawkes data.", timeout=35)
-    if not browser.evaluate(SUMMARY):
+        def sign_in():
+            if not browser.evaluate(sign_in_expression(token)):
+                raise SetupError("The expected sign-in form is unavailable.")
+            responsive_wait(browser, CONSOLE_READY, "Waiting for authenticated Fawkes data.", timeout=35, shutdown=shutdown)
+        guarded_navigation(browser, shutdown, sign_in)
+    if not guarded_navigation(browser, shutdown, lambda: shutdown.select_summary(SUMMARY) if shutdown is not None else browser.evaluate(SUMMARY)):
         raise SetupError("The Summary tab could not be identified.")
     # Config was set from the actual Summary control, not a fabricated route.
     browser.evaluate(matrix)
@@ -266,11 +314,42 @@ main{max-width:500px}p{color:#7ca991;line-height:1.5}h1{font-size:38px;font-weig
 </main></body></html>"""
 
 
-def show_waiting(browser, waiting_url, matrix):
-    browser.call("Page.navigate", {"url": waiting_url}, browser.session)
-    browser.wait_for("document.readyState === 'complete' && location.protocol === 'file:'",
-                     "The local waiting screen did not open.", timeout=15)
-    browser.evaluate(matrix)
+def prepare_navigation(browser, shutdown=None):
+    if shutdown is None:
+        return True
+    local_shutdown_tick(browser, shutdown)
+    try:
+        if shutdown.navigation_token is not None:
+            shutdown.abort_navigation()
+        if not shutdown.begin_navigation():
+            return False
+        # Capture input entered during the preceding network wait immediately
+        # before replacing the document, not only before starting that wait.
+        shutdown.checkpoint()
+    except (SetupError, SaveError, OSError, ValueError, TypeError):
+        try:shutdown.abort_navigation()
+        except (SetupError, SaveError, OSError, ValueError, TypeError):pass
+        status('LOCAL_STATE_UNSAVED', 'Draft could not be saved; keep this page open.')
+        return False
+    return True
+
+
+def show_waiting(browser, waiting_url, matrix, shutdown=None):
+    if not prepare_navigation(browser, shutdown):
+        return False
+    try:
+        browser.call("Page.navigate", {"url": waiting_url}, browser.session)
+        browser.wait_for("document.readyState === 'complete' && location.protocol === 'file:'",
+                         "The local waiting screen did not open.", timeout=15)
+        browser.evaluate(matrix)
+    except BaseException:
+        if shutdown is not None:
+            shutdown.abort_navigation()
+        raise
+    else:
+        if shutdown is not None:
+            shutdown.finish_navigation()
+    return True
 
 
 def run():
@@ -299,6 +378,8 @@ def run():
     env.update(XDG_RUNTIME_DIR=str(RUNTIME), WAYLAND_DISPLAY="wayland-0")
     private_keyring(env, session)
     matrix = (ROOT / "matrix_idle.js").read_text(encoding="utf-8")
+    hold = (ROOT / 'pi_console_idle_hold.js').read_text(encoding='utf-8')
+    shutdown_owner = LocalShutdown(Path.home()/'.local/state/fawkes-pi-console-shutdown')
     waiting = session / "waiting.html"
     waiting.write_text(WAITING, encoding="utf-8")
     args = [shutil.which("chromium"), "--ozone-platform=wayland", "--disable-gpu",
@@ -307,18 +388,36 @@ def run():
             "--kiosk", "--remote-debugging-pipe", "about:blank"]
     with open(os.devnull, "wb") as quiet:
         browser = PipeBrowser(args, env, quiet)
+        shutdown = None
         try:
             browser.attach()
+            shutdown = BrowserShutdown(browser, shutdown_owner, THREAD, waiting.as_uri(), hold, matrix)
+            shutdown.restore_hook()
             show_waiting(browser, waiting.as_uri(), matrix)
+            shutdown.install()
             showing_console = False
             last_attempt = 0.0
             failures = 0
+            next_health = 0.0
             while browser.process.poll() is None:
+                local_shutdown_tick(browser, shutdown)
+                if time.monotonic()<next_health:
+                    time.sleep(.15);continue
+                next_health=time.monotonic()+5
+                # Save before any bridge-loss navigation. A failed save must
+                # leave the current document/draft available, not erase it.
+                try:shutdown.checkpoint()
+                except (SetupError,SaveError,OSError,ValueError,TypeError):
+                    status('LOCAL_STATE_UNSAVED','Draft could not be saved; keep this page open.')
+                    time.sleep(.15);continue
                 healthy = preview_ready()
                 if not healthy:
                     failures += 1
                     if showing_console and failures >= 2:
-                        show_waiting(browser, waiting.as_uri(), matrix)
+                        if not show_waiting(browser, waiting.as_uri(), matrix, shutdown):
+                            time.sleep(.15)
+                            continue
+                        shutdown.install()
                         showing_console = False
                     status("WAITING_PC", "Waiting for the PC preview; reconnecting automatically.")
                 else:
@@ -333,18 +432,23 @@ def run():
                         last_attempt = time.monotonic()
                         status("SIGNING_IN", "Opening Fawkes Summary.")
                         try:
-                            open_console(browser, token, matrix)
+                            open_console(browser, token, matrix, shutdown)
+                            shutdown.install()
                             showing_console = True
                             ready_status(browser)
                         except SetupError as error:
                             status("RETRYING", str(error))
-                            show_waiting(browser, waiting.as_uri(), matrix)
+                            show_waiting(browser, waiting.as_uri(), matrix, shutdown)
+                            shutdown.install()
                         finally:
                             token = None
                     elif not token:
                         status("WAITING_BRIDGE", "Waiting for the PC sign-in connection.")
-                time.sleep(5)
+                time.sleep(.15)
         finally:
+            if shutdown is not None:
+                try:shutdown.checkpoint()
+                except (SetupError,SaveError,OSError,ValueError,TypeError):pass
             browser.close()
             shutil.rmtree(session, ignore_errors=True)
     raise SetupError("The dedicated browser exited; restarting it.")
