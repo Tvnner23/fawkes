@@ -13,46 +13,43 @@
     <header class="console-header">
       <div class="brand-row">
         <div class="brand-identity">
-          <p class="eyebrow">FAWKES · DEVELOPMENT</p>
-          <h1 id="page-title">Activity Summary</h1>
+          <details id="page-menu" class="page-menu">
+            <summary aria-label="Choose console page">☰ <span id="page-title">Activity Summary</span></summary>
+            <nav class="page-nav" aria-label="Console pages">
+              <button id="previous-page" type="button" aria-label="Previous page">‹</button>
+              <ol id="page-indicators">
+                <li><button type="button" data-page-target="0" aria-label="Activity Summary" aria-current="page">Summary</button></li>
+                <li><button type="button" data-page-target="1" aria-label="Campaign Status">Campaign</button></li>
+                <li><button type="button" data-page-target="2" aria-label="Repository View">Repo</button></li>
+                <li><button type="button" data-page-target="3" aria-label="Architecture View">System map</button></li>
+                <li><button type="button" data-page-target="4" aria-label="Worker conversation">Worker</button></li>
+              </ol>
+              <button id="next-page" type="button" aria-label="Next page">›</button>
+            </nav>
+          </details>
         </div>
-        <div class="feed-freshness" aria-label="Managed Worker feed status">
-          <span id="connection-state" class="state unavailable" aria-live="polite">◌ Worker unknown</span>
-          <span id="last-sync" class="freshness-time">No verified sync</span>
-        </div>
+        <details id="connection-details" class="feed-freshness" aria-label="Managed Worker feed status and details">
+          <summary><span id="connection-state" class="state unavailable" aria-live="polite">◌ Worker unknown</span></summary>
+          <div class="status-cluster" aria-label="Preview, campaign and Attention status">
+            <span id="last-sync" class="freshness-time">No verified sync</span>
+            <span id="preview-context" class="context-badge">CONTEXT UNKNOWN</span>
+            <span id="bridge-state" class="context-badge">PC BRIDGE NOT OBSERVED</span>
+            <span id="campaign-state" class="context-badge">JOB UNKNOWN</span>
+            <span id="attention-state" class="context-badge">ATTENTION UNKNOWN</span>
+          </div>
+        </details>
         <div id="console-idle-slot" class="idle-slot">
           <button id="console-idle" type="button" class="idle-button" aria-label="Enter Matrix idle screen">Idle</button>
         </div>
       </div>
-      <div class="status-cluster" aria-label="Preview, campaign and Attention status">
-        <span id="preview-context" class="context-badge">CONTEXT UNKNOWN</span>
-        <span id="bridge-state" class="context-badge">PC BRIDGE NOT OBSERVED</span>
-        <span id="campaign-state" class="context-badge">JOB UNKNOWN</span>
-        <span id="attention-state" class="context-badge">ATTENTION UNKNOWN</span>
-      </div>
-      <nav class="page-nav" aria-label="Console pages">
-        <button id="previous-page" type="button" aria-label="Previous page">‹</button>
-        <ol id="page-indicators">
-          <li><button type="button" data-page-target="0" aria-label="Activity Summary" aria-current="page">Summary</button></li>
-          <li><button type="button" data-page-target="1" aria-label="Campaign Status">Campaign</button></li>
-          <li><button type="button" data-page-target="2" aria-label="Repository View">Repo</button></li>
-          <li><button type="button" data-page-target="3" aria-label="Architecture View">System map</button></li>
-          <li><button type="button" data-page-target="4" aria-label="Worker conversation">Worker</button></li>
-        </ol>
-        <button id="next-page" type="button" aria-label="Next page">›</button>
-      </nav>
     </header>
 
     <section id="page-stack" class="page-stack">
       <section class="console-page" data-page="0" aria-label="Activity Summary">
-        <div class="summary-toolbar">
-          <span id="summary-selection" class="meta">Current objective</span>
-          <button id="reply-to-worker" type="button" class="primary-button">Reply to Worker</button>
-          <p id="update-result" aria-live="polite">Open Worker for the full conversation, replies and Send update to PC. Historical updates remain below.</p>
-        </div>
         <div class="page-scroll" tabindex="0">
           <div class="page-intro">
             <p class="eyebrow">YOUR REQUESTED JOB</p>
+            <p id="summary-selection" class="meta">Current objective</p>
             <p id="summary-intro">Waiting for an authenticated read-only projection.</p>
           </div>
           <div id="attention-slot"></div>
@@ -62,6 +59,7 @@
               <h3 id="update-heading">Completed + working on</h3>
             </div>
             <p>Saved updates remain available here if Windows clipboard delivery fails. The manual Copy button below copies only on the device you use.</p>
+            <p id="update-result" aria-live="polite"></p>
             <button id="permission-history" type="button" class="secondary-button">Permission history</button>
             <div id="prepared-updates" class="prepared-updates"></div>
           </section>
@@ -262,10 +260,10 @@
           </div>
           <textarea id="worker-reply" rows="2" maxlength="16000" spellcheck="true" placeholder="Type your reply. Sending does not approve a permission request."></textarea>
           <div id="worker-keyboard" class="worker-keyboard" aria-label="Touchscreen keyboard" hidden></div>
-          <div class="worker-feedback" tabindex="0" aria-label="Connection and delivery status">
+          <div class="worker-feedback gesture-surface" tabindex="0" aria-label="Connection and delivery status; scroll along this line for complete delivery details">
             <span id="worker-session-state" class="meta" data-connection="unknown" aria-live="polite">Worker connection not verified</span>
-            <p id="worker-copy-result" aria-live="polite">Copies the latest complete final message to Windows, verbatim. Wait for Windows confirmation before Ctrl+V.</p>
-            <p id="worker-reply-result" aria-live="polite">Replies require this exact session to be connected.</p>
+            <p id="worker-copy-result" aria-live="polite"></p>
+            <p id="worker-reply-result" aria-live="polite"></p>
           </div>
         </form>
       </section>

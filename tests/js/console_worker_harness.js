@@ -28,7 +28,8 @@ assert.deepEqual(plain(api.insertKey('Hi 🐦',5,5,'Backspace')),{text:'Hi ',pos
 assert.deepEqual(plain(api.insertKey('Hello',1,4,'i')),{text:'Hio',position:2});
 const html=fs.readFileSync('src/app/static/dev-console/index.html','utf8');
 assert(!html.includes('id="save-console-update"'));
-assert(html.includes('id="reply-to-worker"'));
+assert(!html.includes('id="reply-to-worker"'));
+assert(html.includes('id="page-menu"') && html.includes('data-page-target="4"'));
 assert(html.indexOf('id="worker-send-update"')>html.indexOf('id="worker-page"'));
 assert(html.includes('id="worker-reply-form"')&&html.includes('id="worker-keyboard"'));
 assert.equal(load('console.js').PAGE_TITLES.length,5);
@@ -150,8 +151,26 @@ async function recoveryCases(){
   // G17-006: actual console boot must leave cursor navigation to the textarea.
   const fixture=fakeDocument();const page=new FakeElement('section');page.className='console-page';page.dataset.page='4';fixture.pages.push(page);
   const button=new FakeElement('button');button.dataset.pageTarget='4';fixture.indicators.push(button);
+  const menus=new Map(['page-menu','connection-details'].map(id=>[id,new FakeElement('details',id)]));
+  const originalById=fixture.document.getElementById.bind(fixture.document);
+  fixture.document.getElementById=id=>menus.get(id)||originalById(id);
   const boot=consoleApi.boot({document:fixture.document,fetch:async()=>({ok:true,status:200,json:async()=>rawProjection}),scheduler:new Scheduler(),projectionScheduler:new Scheduler(),baseUrl:'https://localhost:8791/',pollIntervalMs:0,disableUpdateRefresh:true});
+  try {
   await settle();boot.navigation.go(4);
+  // G21 compact chrome keeps current page/accent identity and closes both
+  // native disclosures on transitions instead of leaving content covered.
+  assert.equal(fixture.shell.dataset.page,'4');
+  const pageMenu=fixture.document.getElementById('page-menu');
+  const connectionDetails=fixture.document.getElementById('connection-details');
+  pageMenu.open=true; connectionDetails.open=true;
+  await button.emit('click',{});
+  assert.equal(fixture.shell.dataset.page,'4');
+  assert.equal(pageMenu.open,false); assert.equal(connectionDetails.open,false);
+  pageMenu.open=true; connectionDetails.open=true;
+  boot.navigation.go(3);
+  assert.equal(fixture.shell.dataset.page,'3');
+  assert.equal(pageMenu.open,false); assert.equal(connectionDetails.open,false);
+  boot.navigation.go(4);
   const input=new FakeElement('textarea','worker-reply');const original=input.matches.bind(input);
   input.matches=selector=>selector==='textarea'||original(selector);
   for(const key of ['ArrowLeft','ArrowRight']){
@@ -170,7 +189,6 @@ async function recoveryCases(){
   }
   // G20: ALL Worker-page gestures stay here, including a key/button or plain
   // conversation surface. Input-only exclusions did not protect those starts.
-  try {
   for (const tag of ['button','pre','label','div']) {
     const target=new FakeElement(tag);
     for (const [start,end] of [[200,340],[340,200]]) {

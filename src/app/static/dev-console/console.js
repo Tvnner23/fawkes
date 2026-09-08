@@ -2112,6 +2112,13 @@
       // A held gesture belongs to its uninterrupted page visit, not merely a
       // page number that could be left and revisited before pointer release.
       pointerStart = null;
+      shell.dataset.page = String(page);
+      // Compact menus reflow the header while open, rather than covering a
+      // pending request. A page transition closes them, including arrow/swipe.
+      for (const id of ["page-menu", "connection-details"]) {
+        const menu = documentRef.getElementById(id);
+        if (menu) menu.open = false;
+      }
       pages.forEach((item, index) => { item.hidden = index !== page; });
       shell.dataset.workerScreen = String(page === 4);
       // Move the ONE existing companion-bound Idle button; do not clone its
@@ -2375,7 +2382,15 @@
 
     documentRef.getElementById("previous-page").addEventListener("click", () => navigation.previous());
     documentRef.getElementById("next-page").addEventListener("click", () => navigation.next());
-    indicators.forEach((item) => item.addEventListener("click", () => navigation.go(Number(item.dataset.pageTarget), "indicator")));
+    indicators.forEach((item) => item.addEventListener("click", () => {
+      // Choosing the already-current page also dismisses the native menu;
+      // navigation correctly emits no page-change event for that selection.
+      for (const id of ["page-menu", "connection-details"]) {
+        const menu = documentRef.getElementById(id);
+        if (menu) menu.open = false;
+      }
+      navigation.go(Number(item.dataset.pageTarget), "indicator");
+    }));
     campaignElements.selector.addEventListener("change", () => {
       explicitCampaignSelection = true;
       selectedCampaignId = safeIdentifier(campaignElements.selector.value, 180);

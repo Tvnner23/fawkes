@@ -1,4 +1,36 @@
 # Pi Worker conversation and Windows handoff
+## Shared console TV theme and compact chrome
+
+Tanner's G21 amendment applies the Worker-sized compact header and TV framing
+to Summary, Campaign, Repository and System map. A native page-menu disclosure
+keeps all five pages and previous/next controls available; connection details
+retain last synchronization, build, bridge, job and Attention information. Both
+expand in layout instead of covering content, and close on a page transition.
+The managed-feed label remains centered and independent of job state. Worker
+still has only Back, Send update to PC and the same Idle node in its top strip.
+
+Summary's entire Reply to Worker toolbar is removed at Tanner's request. The
+page menu is the entry to Worker. Historical update retrieval and manual-copy
+results stay in their existing Summary archive panel; no records are deleted.
+
+Each page retains its established accent: cyan Summary, violet Campaign, ice
+blue Repository and teal System map. Tinted panels, controls and headings make
+regions distinct; actual health, waiting, error and diff meanings remain
+unchanged. Worker uses green message panels, cyan Tanner/input, blue keys,
+amber metal divider/special keys and a neutral top bar. Effects are static CSS,
+with sharp text and reduced-motion support. No new image assets or runtime.
+
+Worker's always-present connection label and actual clipboard/reply results
+share one28px line. Idle explanatory boilerplate is removed, not real outcome
+text. Full untruncated results remain in that horizontally scrollable, focusable
+line; pending/failure/unknown are never promoted to copied/received. Worker
+allows horizontal native scrolling within it without enabling page-swiping.
+The input and keyboard retain simultaneous visibility. No conversation, Windows
+writer, permission, same-session or model configuration owners are changed.
+
+This section supersedes older Summary-entry, header and stacked-status
+presentation descriptions below, not the historical qualification or receipts.
+
 ## Worker-only gesture and control divider
 
 Tanner reported page-swiping interfering with typing. The entire Worker page
