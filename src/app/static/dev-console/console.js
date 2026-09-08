@@ -2109,6 +2109,9 @@
     }
 
     function showPage(page) {
+      // A held gesture belongs to its uninterrupted page visit, not merely a
+      // page number that could be left and revisited before pointer release.
+      pointerStart = null;
       pages.forEach((item, index) => { item.hidden = index !== page; });
       shell.dataset.workerScreen = String(page === 4);
       // Move the ONE existing companion-bound Idle button; do not clone its
@@ -2619,15 +2622,19 @@
     });
     const stack = documentRef.getElementById("page-stack");
     stack.addEventListener("pointerdown", (event) => {
-      pointerStart = {x: event.clientX, y: event.clientY,
+      pointerStart = {x: event.clientX, y: event.clientY, page: navigation.page,
         codeScroll: Boolean(event.target.closest
           && event.target.closest(".code-scroll, .gesture-surface, input, textarea, select, [contenteditable]:not([contenteditable='false'])"))};
       navigation.activity();
     });
     stack.addEventListener("pointerup", (event) => {
       if (!pointerStart) return;
-      navigation.swipe(pointerStart.x, pointerStart.y, event.clientX, event.clientY,
-        {codeScroll: pointerStart.codeScroll});
+      // Worker is a typing/reading surface: Back is the explicit exit.
+      // Also discard a gesture carried across an explicit page transition.
+      if (navigation.page !== 4 && pointerStart.page === navigation.page) {
+        navigation.swipe(pointerStart.x, pointerStart.y, event.clientX, event.clientY,
+          {codeScroll: pointerStart.codeScroll});
+      }
       pointerStart = null;
     });
     stack.addEventListener("pointercancel", () => { pointerStart = null; });

@@ -168,7 +168,50 @@ async function recoveryCases(){
     await stack.emit('pointerup',{target,clientX:300,clientY:402});
     assert.equal(boot.navigation.page,4);
   }
-  boot.stop();
-  console.log('11 complete-boot recovery/input scenarios passed; no real network, clipboard or provider.');
+  // G20: ALL Worker-page gestures stay here, including a key/button or plain
+  // conversation surface. Input-only exclusions did not protect those starts.
+  try {
+  for (const tag of ['button','pre','label','div']) {
+    const target=new FakeElement(tag);
+    for (const [start,end] of [[200,340],[340,200]]) {
+      await stack.emit('pointerdown',{target,clientX:start,clientY:400});
+      await stack.emit('pointerup',{target,clientX:end,clientY:402});
+      assert.equal(boot.navigation.page,4,'Worker swipe on '+tag+' must not navigate');
+    }
+  }
+  const surface=new FakeElement('div');
+  await stack.emit('pointerdown',{target:surface,clientX:200,clientY:400});
+  boot.navigation.go(1); // explicit navigation while a pointer is outstanding
+  await stack.emit('pointerup',{target:surface,clientX:340,clientY:402});
+  assert.equal(boot.navigation.page,1,'old Worker gesture must not act on another page');
+  await stack.emit('pointerdown',{target:surface,clientX:340,clientY:400});
+  boot.navigation.go(4);
+  await stack.emit('pointerup',{target:surface,clientX:200,clientY:402});
+  assert.equal(boot.navigation.page,4,'gesture entering Worker must not navigate');
+  // G20-001: page numbers alone do not distinguish a departed-and-returned
+  // page. Exercise the actual registered keyboard navigation handlers too.
+  const shell=fixture.document.getElementById('dev-console');
+  boot.navigation.go(3);
+  await stack.emit('pointerdown',{target:surface,clientX:340,clientY:400});
+  await shell.emit('keydown',{target:surface,key:'ArrowRight',preventDefault(){}});
+  await shell.emit('keydown',{target:surface,key:'ArrowLeft',preventDefault(){}});
+  assert.equal(boot.navigation.page,3);
+  await stack.emit('pointerup',{target:surface,clientX:200,clientY:402});
+  assert.equal(boot.navigation.page,3,'leave-and-return must invalidate the held gesture');
+  boot.navigation.go(1);
+  await stack.emit('pointerdown',{target:surface,clientX:340,clientY:400});
+  boot.navigation.go(2); boot.navigation.go(1);
+  await stack.emit('pointerup',{target:surface,clientX:200,clientY:402});
+  assert.equal(boot.navigation.page,1,'programmatic round-trip must invalidate the held gesture');
+  boot.navigation.go(1);
+  await stack.emit('pointerdown',{target:surface,clientX:340,clientY:400});
+  await stack.emit('pointerup',{target:surface,clientX:200,clientY:402});
+  assert.equal(boot.navigation.page,2,'other console pages retain swipe navigation');
+  await stack.emit('pointerdown',{target:surface,clientX:200,clientY:400});
+  await stack.emit('pointercancel',{});
+  await stack.emit('pointerup',{target:surface,clientX:340,clientY:402});
+  assert.equal(boot.navigation.page,2,'cancelled gesture cannot navigate');
+  } finally { boot.stop(); }
+  console.log('11 inherited complete-boot scenarios and14 Worker gesture/cross-page cases passed; no real network, clipboard or provider.');
 }
 recoveryCases().catch(error=>{console.error(error);process.exitCode=1;});

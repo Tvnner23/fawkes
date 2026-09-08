@@ -253,12 +253,14 @@
           </details>
         </div>
         <form id="worker-reply-form" class="worker-reply-form">
-          <label for="worker-reply">TANNER <span>// REPLY TO THIS WORKER</span></label>
-          <textarea id="worker-reply" rows="2" maxlength="16000" spellcheck="true" placeholder="Type your reply. Sending does not approve a permission request."></textarea>
-          <div class="worker-reply-actions">
-            <button id="worker-keyboard-toggle" type="button" class="secondary-button" aria-expanded="false">Keyboard</button>
-            <button id="worker-send-reply" type="submit" class="primary-button" disabled>Send reply</button>
+          <div class="worker-reply-divider">
+            <label for="worker-reply">TANNER <span>// YOUR REPLY</span></label>
+            <div class="worker-reply-actions">
+              <button id="worker-keyboard-toggle" type="button" class="secondary-button worker-tv-button" aria-expanded="false">Keyboard</button>
+              <button id="worker-send-reply" type="submit" class="primary-button worker-tv-button" disabled>Send reply</button>
+            </div>
           </div>
+          <textarea id="worker-reply" rows="2" maxlength="16000" spellcheck="true" placeholder="Type your reply. Sending does not approve a permission request."></textarea>
           <div id="worker-keyboard" class="worker-keyboard" aria-label="Touchscreen keyboard" hidden></div>
           <div class="worker-feedback" tabindex="0" aria-label="Connection and delivery status">
             <span id="worker-session-state" class="meta" data-connection="unknown" aria-live="polite">Worker connection not verified</span>

@@ -394,6 +394,9 @@ body { background: radial-gradient(circle at 50% 0, #152332, var(--background) 6
   --worker-phosphor: #dcf7de;
   --worker-muted: #a6bcae;
   --worker-edge: #596e61;
+  --tanner-text: #d4f0fc;
+  --tanner-accent: #84d8f2;
+  --tanner-screen: #0b1820;
   padding: 6px 6px 128px;
   border: 12px solid #424a37;
   border-top-color: #808568;
@@ -458,24 +461,34 @@ body { background: radial-gradient(circle at 50% 0, #152332, var(--background) 6
   border-radius: 12px;
 }
 #worker-page .worker-history-message .worker-message { margin: 12px 0 0; }
-#worker-page .worker-history-message[data-role="user"] { border-left-color: #69d8ff; }
+#worker-page .worker-history-message[data-role="user"] {
+  background: var(--tanner-screen); border-color: #537b8b; border-left-color: var(--tanner-accent);
+}
+#worker-page .worker-history-message[data-role="user"] .worker-message { color: var(--tanner-text); }
 #worker-page .worker-history-message > .meta { font-size: 15px; line-height: 1.5; color: #b3e39e; }
-#worker-page .worker-history-message[data-role="user"] > .meta { color: #69d8ff; }
+#worker-page .worker-history-message[data-role="user"] > .meta { color: var(--tanner-accent); }
 #worker-page details > summary { min-height: 48px; padding: 12px 0; color: #a6d8c2; cursor: pointer; font-size: 15px; }
 #worker-page .worker-link-details { border-bottom: 1px solid #34483b; }
 #worker-page .worker-reply-form {
-  background: #0b130f; border-color: var(--worker-edge); padding: 6px 12px;
+  background: #101d24; border-color: #537b8b; padding: 6px 12px;
   display: grid; gap: 4px; max-height: none; min-height: 0; overflow: visible;
   border-radius: 0 0 20px 20px;
 }
-#worker-page .worker-reply-form label { color: #69d8ff; margin: 0; font-size: 16px; line-height: 20px; }
-#worker-page .worker-reply-actions { margin-top: 0; }
+#worker-page .worker-reply-form label { color: var(--tanner-accent); margin: 0; font-size: 16px; line-height: 20px; }
+#worker-page .worker-reply-divider {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center;
+  gap: 12px; padding: 6px 10px; border: 2px solid #77806a; border-bottom-color: #242b21;
+  border-radius: 12px; background: linear-gradient(#424b3d, #242d25);
+  box-shadow: inset 0 1px #afb99a77, 0 2px #050a08;
+}
+#worker-page .worker-reply-divider label span { display: block; color: #d0dccc; }
+#worker-page .worker-reply-actions { margin-top: 0; gap: 12px; }
 #worker-page .worker-keyboard { margin-top: 0; }
 #worker-page .worker-feedback { display: grid; grid-template-rows: 18px 26px 26px; gap: 2px; min-width: 0; }
 #worker-page .worker-feedback > * { margin: 0; overflow-y: auto; touch-action: pan-y; overscroll-behavior: contain; }
 #worker-page textarea {
-  background: var(--worker-screen); color: var(--worker-phosphor);
-  border-color: var(--worker-edge); border-radius: 5px;
+  background: var(--tanner-screen); color: var(--tanner-text);
+  border-color: #84b5c6; border-radius: 5px;
   height: 54px; min-height: 54px; max-height: 54px; resize: none;
 }
 #worker-page textarea::placeholder { color: var(--worker-muted); opacity: 1; }
@@ -487,6 +500,23 @@ body { background: radial-gradient(circle at 50% 0, #152332, var(--background) 6
 #worker-page .secondary-button, #worker-page .worker-keyboard button {
   min-height: 48px; background: #152119; color: var(--worker-phosphor);
   border-color: var(--worker-edge); border-radius: 6px;
+}
+#worker-page .worker-keyboard button {
+  background: #192d38; color: var(--tanner-text); border-color: #638898;
+}
+#worker-page .worker-reply-divider .worker-tv-button {
+  border: 2px solid #a4ae92; border-bottom: 5px solid #101910;
+  border-radius: 9px; min-height: 52px; font-size: 16px; font-weight: 800;
+  background: linear-gradient(#566349, #303e2c); color: #f0ebce;
+  box-shadow: inset 0 1px #cad5b266, 0 2px #11180e;
+}
+#worker-page .worker-reply-divider #worker-send-reply {
+  background: linear-gradient(#ade6f5, #84c4d8); color: #091a23;
+  border-color: #c1e6ed; border-bottom-color: #355866;
+}
+#worker-page .worker-reply-divider .worker-tv-button:not(:disabled):active,
+#worker-page #worker-keyboard-toggle[aria-expanded="true"] {
+  box-shadow: inset 0 2px 5px #050a08aa; border-bottom-width: 2px;
 }
 #worker-page button:disabled { opacity: 0.65; cursor: not-allowed; }
 #worker-page :focus-visible { outline: 3px solid #69d8ff; outline-offset: 2px; }

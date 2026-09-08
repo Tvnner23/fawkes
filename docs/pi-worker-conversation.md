@@ -1,4 +1,28 @@
 # Pi Worker conversation and Windows handoff
+## Worker-only gesture and control divider
+
+Tanner reported page-swiping interfering with typing. The entire Worker page
+now ignores horizontal page-navigation gestures, including starts on keys,
+buttons, plain conversation text and the divider. Back remains the explicit
+exit; native vertical scrolling, text selection and the existing drag-click
+suppression remain intact. A gesture carried across an explicit page transition
+is discarded. Other console pages retain their existing swipe navigation.
+
+The same Keyboard and Send reply buttons form a raised, metal TV-control strip
+between messages and the input; there are no decorative fake controls or new
+actions. The label still belongs to the input. Moving these existing controls
+does not change submit, keyboard, receipt or permission semantics. At720x720
+the input, keys and Send reply remain visible together, including when a
+permission notice requires its reserved space.
+
+Worker message cards use pale phosphor green on near-black. TANNER cards, the
+input and keys use a distinct pale-cyan/dark-blue palette with explicit labels;
+Send reply is cyan, Send update remains green for outgoing Worker text.
+Neutral olive-metal framing and restrained cream switch labels separate the
+regions without recoloring actual connection, warning or error meanings.
+Colors reinforce names and boundaries, never substitute for status evidence.
+No native touch configuration, backend, clipboard or same-session code changes.
+
 ## Worker-only CRT appearance
 
 The TV-style frame has rounded olive-metal edges and a recessed dark screen.
@@ -22,7 +46,7 @@ The Worker page uses a lightweight near-black/phosphor-green CRT treatment,
 with restrained amber/cyan accents and an industrial inset bezel.
 It occupies the whole screen while selected: the surrounding console header,
 tabs and footer are hidden only there. Back (top left) returns to Summary;
-existing swipe navigation remains. The single companion-bound Idle button moves
+Worker-page swipe navigation is now disabled at Tanner's request. The single companion-bound Idle button moves
 to its compact Worker slot and back without cloning handlers or simulating taps.
 The composer status identifies this same conversation connection and its
 authoritative observed status; it is not the separate managed-approval feed.
