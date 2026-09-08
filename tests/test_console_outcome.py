@@ -25,6 +25,11 @@ def record():
 
 
 class OutcomeTests(unittest.TestCase):
+    def test_same_worker_final_notification_and_hidden_connection(self):
+        root=Path(__file__).resolve().parents[1]
+        p=subprocess.run(['node','tests/js/console_worker_notice_harness.js'],cwd=root,capture_output=True,text=True,timeout=20)
+        self.assertEqual(p.returncode,0,p.stdout+p.stderr)
+
     def test_explicit_complete_closeout_and_projection(self):
         r=record();before=copy.deepcopy(r)
         self.assertEqual(completed_objective(r)["gate_count"],3)

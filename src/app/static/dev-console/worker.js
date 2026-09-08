@@ -100,7 +100,7 @@
     const state = byId("worker-session-state"), replyResult = byId("worker-reply-result"), copyResult = byId("worker-copy-result");
     let current = null, busy = false, olderCursor = null, pendingReply = null, pendingCopy = null, shift = false;
     let lastSuccess = 0, currentHistory = "", readingOlder = false;
-    let refreshing = false, reconciling = false;
+    let refreshing = false, reconciling = false, lastHiddenPoll = 0;
     let retainedMessages = [], completedTurns = new Set(), historyCursorInitialized = false;
     let knownTurns = new Set(), completionTargets = new Set(), completionSeen = new Set(), completionCursor = null;
     const headCache={messages:[],anchor:null,gap:null};
@@ -220,12 +220,18 @@
       retain();
     }
     async function refresh() {
-      if (page.hidden || refreshing || busy) return;
+      // Completion alerts need this same authenticated connection on Summary
+      // too. Hidden pages read only the bounded head, not older history pages.
+      if (refreshing || busy || (page.hidden && Date.now()-lastHiddenPoll<10000)) return;
+      if (page.hidden) lastHiddenPoll=Date.now();
       refreshing = true;
       try {
         const value = projection(await request(URL));
         if (current && value.thread_id !== current.thread_id) throw new Error("Worker session changed; do not send to an unverified replacement");
         current = value; lastSuccess = Date.now();
+        if(root.CustomEvent && root.dispatchEvent) root.dispatchEvent(new root.CustomEvent(
+          "fawkes:worker-message-observation", {detail:{connected:true,projection:value}}));
+        if(page.hidden)return;
         learnTurns(value);
         byId("worker-session-identity").textContent = "Session " + value.thread_id + " · Verified " + value.verified_at;
         const final = value.latest_final;
@@ -280,17 +286,20 @@
         }
       } catch (error) {
         lastSuccess = 0; state.dataset.connection = "disconnected";
+        if(root.CustomEvent && root.dispatchEvent) root.dispatchEvent(new root.CustomEvent(
+          "fawkes:worker-message-observation", {detail:{connected:false}}));
         state.textContent = "Disconnected · retained text is last known";
         replyResult.textContent = error.message + (pendingReply ? " · Reply identity retained; no automatic resend." : "");
         if(progress && !progress.hidden) progress.textContent="Last known · "+progress.textContent.replace(/^(Last known · )+/, "");
       } finally { refreshing = false; controls(); }
+      if(page.hidden)return;
       // Receipt latency must not hold the projection or clipboard controls.
       // Only one observation is in flight; POSTs retain their own serialization.
       reconcileReply();
       if (reading && olderCursor && reading.scrollHeight<=reading.clientHeight+50) loadOlder();
     }
     async function reconcileReply() {
-      if (!pendingReply || reconciling || busy) return;
+      if (page.hidden || !pendingReply || reconciling || busy) return;
       const expected = pendingReply;
       reconciling = true;
       try {
@@ -302,7 +311,7 @@
       } finally { reconciling = false; controls(); }
     }
     async function loadOlder() {
-      if (!olderCursor || busy || refreshing) return; busy = true; controls();
+      if (page.hidden || !olderCursor || busy || refreshing) return; busy = true; controls();
       try { const value = projection(await request(URL + "?cursor=" + encodeURIComponent(olderCursor)));
         if (!current || value.thread_id !== current.thread_id) throw new Error("History belongs to a different Worker");
         learnTurns(value);
