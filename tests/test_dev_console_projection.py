@@ -195,7 +195,7 @@ class DevConsoleStaticContractTests(unittest.TestCase):
 
     def test_script_uses_only_compact_authenticated_read_only_projection(self):
         expected = {"/api/development/dev-console", "/api/development/console-updates",
-                    "/api/session/console-csrf"}
+                    "/api/session/console-csrf", "/api/development/dev-console/objectives/"}
         routes = set(re.findall(r"['\"](/api/[^'\"]+)['\"]", self.javascript))
         self.assertEqual(routes, expected)
         self.assertIn("credentials", self.javascript)

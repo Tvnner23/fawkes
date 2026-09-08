@@ -70,6 +70,59 @@ def _console_worker(value):
     return projected
 
 
+def _console_objective(value, campaign_id):
+    """Bound the compact view, not the immutable canonical objective (32KiB)."""
+    if value is None:
+        return None, None
+    if not isinstance(value, str):
+        raise ValueError("developer console objective must be text")
+    raw = value.encode("utf-8")
+    if len(raw) > 32_000:
+        raise ValueError("developer console objective exceeds canonical bound")
+    # Budget JSON content bytes, not just raw UTF-8: control characters may
+    # expand sixfold, and the excerpt occurs in both campaigns and jobs.
+    def encoded_size(text):
+        return len(json.dumps(text, ensure_ascii=False).encode("utf-8")) - 2
+    if encoded_size(value) <= DEV_CONSOLE_MAX_TEXT_BYTES:
+        return value, None
+    suffix = " … [objective excerpt; complete text in Details]"
+    low, high = 0, min(len(value), DEV_CONSOLE_MAX_TEXT_BYTES)
+    while low < high:
+        middle = (low + high + 1) // 2
+        if encoded_size(value[:middle] + suffix) <= DEV_CONSOLE_MAX_TEXT_BYTES:
+            low = middle
+        else:
+            high = middle - 1
+    excerpt = value[:low] + suffix
+    return excerpt, {"sha256": hashlib.sha256(raw).hexdigest(),
+                     "byte_length": len(raw), "excerpt": True}
+
+
+def developer_console_objective(chat_service, campaign_id, expected_sha256):
+    """Exact, passive read of one already-retained objective, never a mutation."""
+    payload = chat_service.list_codex_development_campaigns()
+    if not isinstance(payload, dict) or not isinstance(payload.get("campaigns"), list):
+        raise ValueError("developer console campaign source is malformed")
+    matches = [item for item in payload["campaigns"] if isinstance(item, dict)
+        and isinstance(item.get("live_activity"), dict)
+        and item["live_activity"].get("campaign_id") == campaign_id]
+    if not matches:
+        raise KeyError(campaign_id)
+    if len(matches) != 1:
+        raise ValueError("ambiguous campaign objective")
+    item = matches[0]
+    value = item["live_activity"].get("objective", item.get("objective", ""))
+    _console_objective(value, campaign_id)
+    if not isinstance(value, str):
+        raise ValueError("campaign objective unavailable")
+    raw = value.encode("utf-8")
+    digest = hashlib.sha256(raw).hexdigest()
+    if digest != expected_sha256:
+        raise ValueError("campaign objective changed; refresh its source reference")
+    return {"campaign_id": campaign_id, "objective": value, "sha256": digest,
+            "byte_length": len(raw), "creates_authority": False}
+
+
 def _console_needs_tanner(value):
     if value is None:
         return None
@@ -191,10 +244,12 @@ def _console_campaigns(payload):
         acceptance_satisfied = wrapper.get("acceptance_satisfied")
         if acceptance_satisfied is not None and not isinstance(acceptance_satisfied, list):
             raise ValueError("developer console campaign acceptance state is malformed")
+        campaign_id = _console_text(activity.get("campaign_id"), "campaign_id")
+        objective, objective_source = _console_objective(
+            activity.get("objective", wrapper.get("objective", "")), campaign_id)
         result.append({
-            "campaign_id": _console_text(activity.get("campaign_id"), "campaign_id"),
-            "objective": _console_text(activity.get("objective", wrapper.get("objective", "")),
-                                       "objective", optional=True),
+            "campaign_id": campaign_id,
+            "objective": objective,
             "created_at": _console_text(wrapper.get("created_at"), "created_at", optional=True),
             "updated_at": _console_text(wrapper.get("updated_at"), "updated_at", optional=True),
             "satisfied_condition_count": (
@@ -214,6 +269,8 @@ def _console_campaigns(payload):
             "managed_worker_activity": _console_managed_activity(wrapper.get("managed_worker_activity", [])),
             "console_reporting": _console_reporting(wrapper.get("console_reporting")),
         })
+        if objective_source is not None:
+            result[-1]["objective_source"] = objective_source
     return ordered_campaigns(result)
 
 
@@ -594,6 +651,8 @@ def _console_jobs(campaigns, attention):
             "source_record_sha256": reporting.get("record_sha256"),
             "next": next_step,
             "creates_authority": False})
+        if campaign.get("objective_source"):
+            jobs[-1]["objective_source"] = dict(campaign["objective_source"])
     ordered = [item["campaign_id"] for item in ordered_campaigns(campaigns)]
     primary = primary_campaign_id(campaigns)
     jobs.sort(key=lambda job: (job["job_id"] != primary, ordered.index(job["job_id"])))
@@ -679,6 +738,10 @@ def _console_update_text(projection, *, created_at, snapshot_id):
             f"  Current step: {job.get('current_step') or 'Unknown'}",
             f"  Last activity: {job.get('last_activity_at') or 'Unknown'}",
         ])
+        source = job.get("objective_source")
+        if isinstance(source, dict) and source.get("excerpt") is True:
+            lines.append(f"  Objective excerpt; complete retained UTF-8 text: {source['byte_length']} bytes, SHA-256 {source['sha256']}.")
+            lines.append(f"  Retrieve complete objective in authenticated PC console Details for campaign {job['job_id']}.")
         if job.get("accomplished"):
             lines.append(f"  Accomplished: {job['accomplished']}")
         if job.get("gained"):
@@ -1237,6 +1300,21 @@ class FawkesAppHandler(BaseHTTPRequestHandler):
                 self._json(200, self.server.chat_service.development_dashboard())
             except Exception:
                 self._json(503, {"error": {"code": "development_unavailable", "message": "Development information is unavailable right now."}})
+            return
+        objective_match = re.fullmatch(
+            r"/api/development/dev-console/objectives/([A-Za-z0-9][A-Za-z0-9_.-]{0,179})/([a-f0-9]{64})", path)
+        if objective_match:
+            if not self._require_auth(record_rider_activity=False):
+                return
+            try:
+                self._json(200, developer_console_objective(
+                    self.server.chat_service, *objective_match.groups()))
+            except KeyError:
+                self._json(404, {"error": {"code": "campaign_objective_not_found"}})
+            except ValueError:
+                self._json(409, {"error": {"code": "campaign_objective_changed_or_invalid"}})
+            except Exception:
+                self._json(503, {"error": {"code": "campaign_objective_unavailable"}})
             return
         if path == "/api/development/dev-console":
             if not self._require_auth(record_rider_activity=False):
@@ -1874,7 +1952,9 @@ class FawkesConsoleApprovalHandler(FawkesAppHandler):
         update = bool(re.fullmatch(
             r"/api/development/console-updates/console-update-[a-f0-9]{64}(?:\.txt)?", path))
         worker_reply = bool(re.fullmatch(r'/api/development/worker/replies/[0-9a-f-]{36}', path))
-        if path in allowed or exact or update or history or worker_reply:
+        objective = bool(re.fullmatch(
+            r"/api/development/dev-console/objectives/[A-Za-z0-9][A-Za-z0-9_.-]{0,179}/[a-f0-9]{64}", path))
+        if path in allowed or exact or update or history or worker_reply or objective:
             return super().do_GET()
         self._json(404, {"error": {"code": "unavailable_in_console"}})
 

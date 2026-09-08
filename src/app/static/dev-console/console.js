@@ -255,7 +255,8 @@
     if (!campaignId || !status) return null;
     const result = {
       campaign_id: campaignId,
-      objective: safeText(value.objective, 500) || campaignId,
+      objective: safeText(value.objective, 2048) || campaignId,
+      objective_source: normalizeObjectiveSource(value.objective_source),
       created_at: safeText(value.created_at, 80),
       status,
       current_stage: safeIdentifier(value.current_stage, 120) || status,
@@ -616,7 +617,8 @@
     for (const raw of payload) {
       if (!isObject(raw) || raw.creates_authority !== false) return {valid: false, jobs: []};
       const job = {
-        job_id: safeIdentifier(raw.job_id, 180), objective: safeText(raw.objective, 500),
+        job_id: safeIdentifier(raw.job_id, 180), objective: safeText(raw.objective, 2048),
+        objective_source: normalizeObjectiveSource(raw.objective_source),
         created_at: safeText(raw.created_at,80), is_current_objective:raw.is_current_objective===true,
         state: safeIdentifier(raw.state, 32), recorded_status: safeIdentifier(raw.recorded_status, 100),
         current_step: safeText(raw.current_step, 180), last_activity_at: safeText(raw.last_activity_at, 80),
@@ -886,6 +888,53 @@
     target.appendChild(card);
   }
 
+  function normalizeObjectiveSource(value) {
+    return isObject(value) && value.excerpt === true && /^[a-f0-9]{64}$/.test(value.sha256)
+      && Number.isInteger(value.byte_length) && value.byte_length > 0 && value.byte_length <= 32000
+      ? {sha256:value.sha256, byte_length:value.byte_length, excerpt:true} : null;
+  }
+
+  const completeObjectives = new Map();
+  function appendFullObjective(documentRef, target, job) {
+    const source = normalizeObjectiveSource(job.objective_source);
+    if (!source || !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,179}$/.test(job.job_id)) return;
+    const button = element(documentRef, "button", "primary-button action-button", "Read complete objective");
+    button.type = "button";
+    const output = element(documentRef, "p", "objective-complete", "");
+    output.style.whiteSpace = "pre-wrap";
+    const cacheKey = job.job_id + ":" + source.sha256;
+    if (completeObjectives.has(cacheKey)) output.textContent = completeObjectives.get(cacheKey);
+    button.addEventListener("click", async function () {
+      if (button.disabled) return;
+      button.disabled = true; output.textContent = "Loading the retained objective…";
+      try {
+        const response = await root.fetch("/api/development/dev-console/objectives/"
+          + encodeURIComponent(job.job_id) + "/" + source.sha256,
+          {credentials:"same-origin", cache:"no-store"});
+        if (!response.ok) throw new Error("Objective unavailable or changed; refresh before retrying.");
+        const text = await response.text();
+        if (text.length > 200000) throw new Error("Objective response exceeds its bound.");
+        const value = JSON.parse(text);
+        if (!isObject(value) || value.campaign_id !== job.job_id || value.sha256 !== source.sha256
+            || value.byte_length !== source.byte_length || typeof value.objective !== "string"
+            || value.creates_authority !== false)
+          throw new Error("Objective source binding differs.");
+        const bytes = new TextEncoder().encode(value.objective);
+        if (bytes.length !== source.byte_length) throw new Error("Objective length differs.");
+        const digest = Array.from(new Uint8Array(await root.crypto.subtle.digest("SHA-256", bytes)))
+          .map(x => x.toString(16).padStart(2,"0")).join("");
+        if (digest !== source.sha256) throw new Error("Objective digest differs.");
+        if (completeObjectives.size >= 32 && !completeObjectives.has(cacheKey))
+          completeObjectives.delete(completeObjectives.keys().next().value);
+        completeObjectives.set(cacheKey, value.objective);
+        output.textContent = value.objective;
+      } catch (error) {
+        output.textContent = "Complete objective could not be verified. The excerpt and original record are preserved. Refresh or retry.";
+      } finally { button.disabled = false; }
+    });
+    target.append(button, output);
+  }
+
   function renderJobs(documentRef, target, jobs, projectionState) {
     target.replaceChildren();
     // Canonical objective order is shared with Campaign and saved updates.
@@ -937,7 +986,7 @@
         ["Job state", (projectionState === "live" || projectionState === "sample" ? "" : "Last known ") + job.state.replace("_", " ")],
         ["Parent job", job.parent_campaign_id || "Not recorded; no parent completion inferred"],
         ["Source record digest", job.source_record_sha256 || "Unavailable"],
-        ["Complete objective", job.objective], ["Complete current step", job.current_step],
+        [job.objective_source ? "Objective excerpt" : "Complete objective", job.objective], ["Complete current step", job.current_step],
         ["Complete accomplishment", job.accomplished], ["Complete gain", job.gained], ["Complete next action", job.next],
         ["Public Worker result", job.public_result],
         ["Worker return", job.result_report || "No typed return available"],
@@ -945,6 +994,7 @@
         ["Observation", projectionTruthLabel(projectionState)],
         ["Scope", "Fawkes-managed jobs only; a separately opened standalone CLI is not attached"]
       ], true));
+      appendFullObjective(documentRef, details, job);
       card.appendChild(details);
       const link = element(documentRef, "a", "evidence-link", "Open campaign evidence");
       link.href = "#campaign-heading";
@@ -2802,7 +2852,7 @@
     renderRoadmapInventory,
     normalizeConsoleReporting, lifecycleTime, formatDuration, intervalSeconds, updateStageTimers, roleClocks,
     combinedModel, combinedLayout, combinedState, combinedControl, focusCombined, renderCombined, bindCombinedGestures, combinedOperationStatus,
-    renderJobs, renderCampaignDashboard,
+    renderJobs, renderCampaignDashboard, normalizeObjectiveSource, appendFullObjective,
     ConsoleNavigation,
     attachContentScrolling,
     boot,
