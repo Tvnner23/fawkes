@@ -226,7 +226,14 @@
       } catch(error) {if(generation!==sequence)return;stale=true;selected=null;cosmeticPending(false);render('Refresh failed: '+error.message);}
     }
     button.onclick=()=>{if(nativeWorkerPending&&!needsDecision(current)){
-      const worker=document.querySelector('[data-page-target="4"]');if(worker)worker.click();return;
+      const worker=document.querySelector('[data-page-target="4"]');
+      if(worker){
+        worker.click();
+        // Opening the page preserves conversation scroll; explicitly opening
+        // a decision must instead reveal its card. This never selects a choice.
+        root.dispatchEvent(new root.CustomEvent('fawkes:show-native-worker-decision'));
+      }
+      return;
     }panel.hidden=false;closedId=null;render();};
     root.addEventListener('fawkes:native-worker-attention',e=>{
       nativeWorkerPending=e.detail&&e.detail.pending===true;

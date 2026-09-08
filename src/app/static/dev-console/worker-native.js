@@ -105,9 +105,25 @@
         if(current)current={...current,connected:false,requests:current.requests.map(r=>({...r,actionable:false}))};pending(null);render();}
       finally{loading=false;}
     }
+    function revealDecision(){
+      const page=by('worker-page');
+      if(!page||page.hidden||!reading)return;
+      // Explicit attention navigation, not a background refresh. Give the
+      // request room without discarding draft text or changing any decision.
+      const keyboard=by('worker-keyboard'),toggle=by('worker-keyboard-toggle');
+      if(keyboard&&!keyboard.hidden&&toggle)toggle.click();
+      const request=current&&current.connected&&current.requests.find(r=>r.needs_decision||r.native_pending);
+      const card=request&&Array.from(cards.children).find(e=>e.dataset.requestKey===request.request_key);
+      // A PC resolution may win just before this click. Reveal the truthful
+      // current status instead; never revive a resolved request or send input.
+      const target=card||status;
+      reading.scrollTop+=target.getBoundingClientRect().top-reading.getBoundingClientRect().top;
+      target.tabIndex=-1;target.focus({preventScroll:true});
+    }
+    root.addEventListener('fawkes:show-native-worker-decision',revealDecision);
     by('worker-native-older').addEventListener('click',()=>refresh(cursor));
     const timer=root.setInterval(()=>refresh(),5000);refresh();
-    return{refresh,stop:()=>root.clearInterval(timer)};
+    return{refresh,stop:()=>{root.clearInterval(timer);root.removeEventListener('fawkes:show-native-worker-decision',revealDecision);}};
   }
   const api={boot};root.FawkesNativeWorkerApprovals=api;
   if(typeof module==='object'&&module.exports)module.exports=api;

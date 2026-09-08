@@ -140,3 +140,28 @@ same authoritative source. Missing or cyclic lifecycle evidence leaves original
 commentary visible without inventing completion. Only currently observed active
 turns contribute to the current-progress recap. Older lifecycle pages never
 replace the independently bounded latest-final lookup or its clipboard identity.
+
+## Native decision navigation correction
+
+The September 14 installed `97405c8` product reached Summary on Tanner's Pi,
+and Tanner confirmed its appearance and general operation. Its native attention
+launcher, however, only changed pages: a retained conversation scroll offset
+could leave the real pending card thousands of pixels above the visible area.
+The two observed task-required native requests offered three choices and
+completed after PC decisions; neither had a Pi selection receipt. They are not
+evidence of a successful Pi native decision return.
+
+An explicit tap on native attention now navigates to Worker and reveals the
+current pending card. If the touchscreen keyboard was open, the existing toggle
+collapses it to give the card reading space; draft text and insertion position
+remain intact. Scroll within the card to reach complete choice descriptions and
+confirmation. No choice is selected or submitted by navigation. Ordinary polls
+do not force the reading position or keyboard to change. If the PC resolved the
+request first, navigation reveals current status rather than reviving a choice.
+
+Regression qualification uses the real launcher with a long, scrolled
+conversation, including from another page and with the keyboard open. It does
+not use a test-only scrollIntoView to make the initial card accessible. Synthetic
+scrolling, keyboard/draft, refresh and PC-resolution checks supplement the
+unchanged exact-decision/receipt tests; they do not claim the physical Pi return
+path has passed. That remains a post-install check on a legitimate permission.

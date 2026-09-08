@@ -176,6 +176,17 @@ async function main(){
   await events['fawkes:console-observation']({detail:{attention:[]}});
   assert(descendants(panel).some(x=>x.textContent.includes('Remembered request identity mismatch')));
   assert(!buttons().some(x=>x.textContent==='Approve Once'));
+  let nativeNavigated=0,nativeRevealed=0;
+  root.document.querySelector=selector=>selector==='[data-page-target="4"]'?{click(){nativeNavigated++;}}:null;
+  const dispatch=root.dispatchEvent;
+  root.dispatchEvent=event=>{if(event.type==='fawkes:show-native-worker-decision'){
+    assert.equal(nativeNavigated,nativeRevealed+1,'page changes before native card reveal');nativeRevealed++;
+  }dispatch(event);};
+  events['fawkes:native-worker-attention']({detail:{pending:true,connected:true}});
+  const sentBeforeNative=posts.length;
+  launcher().onclick();assert.equal(nativeNavigated,1);assert.equal(nativeRevealed,1);
+  assert.equal(posts.length,sentBeforeNative,'opening native request never approves managed action');
+  console.log('native-launcher-reveal-ok');
   console.log('pi-native-attention-dom-ok');
 }
 main().catch(error=>{console.error(error);process.exitCode=1});
