@@ -54,6 +54,11 @@ const elements = {map: el('architecture-map'), detail: el('architecture-detail')
   combined: el('combined-view'), combinedMap: el('combined-map'), combinedSelect: el('combined-select'),
   combinedCoverage: el('combined-coverage'), combinedState: api.combinedState()};
 const state = elements.combinedState;
+const overview = api.combinedLayout(model, new Set());
+assert.strictEqual(overview.width, 660);
+assert.strictEqual(overview.height, 400, 'the whole collapsed overview fits the Current-sized viewport');
+assert.deepStrictEqual(JSON.parse(JSON.stringify(overview.positions.get('memory'))),
+  {x:390,y:34,width:130,height:64}, 'shared foundations use the Current arrangement');
 for (const group of model.groups) state.expanded.add(group.id);
 api.renderRoadmapInventory(fixture.document, elements, roadmap, {mode: 'combined'});
 assert.strictEqual(elements.overview.hidden, true);
@@ -61,6 +66,8 @@ assert.strictEqual(elements.inventory.hidden, true, 'Combined cannot stack the R
 assert.strictEqual(elements.combined.hidden, false);
 assert.strictEqual(elements.combinedMap.querySelectorAll('[data-combined-id]').length, model.nodes.length);
 const layout = api.combinedLayout(model, state.expanded);
+assert.ok(layout.width/layout.height>0.75 && layout.width/layout.height<3,
+  'expanding the whole inventory must not recreate an unreadable vertical strip');
 const boxes = Array.from(layout.positions.values());
 for (let a = 0; a < boxes.length; a++) for (let b = a + 1; b < boxes.length; b++) {
   const x = boxes[a], y = boxes[b];
@@ -82,6 +89,13 @@ assert.strictEqual(details.open, true);
 assert.strictEqual(elements.detail.scrollTop, 120);
 api.combinedControl(state, 'fit', layout);
 assert.ok(layout.width * state.zoom <= 660 && layout.height * state.zoom <= 400);
+const fullFit=state.zoom;
+api.combinedControl(state, 'out', layout);
+assert.ok(state.zoom < fullFit, 'zoom OUT must not jump IN at a fit below the old 0.15 clamp');
+for(let i=0;i<100;i++) api.combinedControl(state, 'out', layout);
+assert.ok(state.zoom>0 && Number.isFinite(state.zoom) && state.zoom<=fullFit);
+for(let i=0;i<100;i++) api.combinedControl(state, 'in', layout);
+assert.strictEqual(state.zoom, 3, 'zoom remains finitely bounded');
 api.combinedControl(state, 'reset'); assert.strictEqual(state.zoom, 1);
 api.renderRoadmapInventory(fixture.document, elements, roadmap, {mode: 'roadmap', selectedId: 'phase-18'});
 assert.strictEqual(elements.overview.hidden, true);
@@ -202,6 +216,10 @@ async function interactive() {
     await graph.emit('pointerup', {target: graph, pointerId: 2, clientX: 250, clientY: 100});
     await graph.emit('pointerup', {target: graph, pointerId: 1, clientX: 100, clientY: 100});
     assert.notStrictEqual(layer.attributes.transform, transform, 'pinch must zoom the same graph');
+    const beforePinchClick=graph.querySelectorAll('[data-combined-id]').length;
+    const afterPinchClick=await graph.emit('click', {target: group});
+    assert.strictEqual(afterPinchClick.defaultPrevented,true, 'pinch release cannot select or collapse a node');
+    assert.strictEqual(graph.querySelectorAll('[data-combined-id]').length,beforePinchClick);
     await graph.emit('keydown', {target: group, key: 'Enter'});
     assert.ok(!graph.querySelectorAll('[data-combined-id]').some(node => node.dataset.combinedId === 'track-phone'));
     const picker = get('combined-select'); picker.value = 'phase-39';

@@ -192,21 +192,22 @@
               </svg>
             </div>
             <section id="combined-view" class="combined-view" hidden aria-label="Connected system and capability map">
-              <details><summary>Connection legend</summary><p class="meta">Solid arrows: architectural relations. Dashed arrows: documented prerequisites. Dotted lines: topic grouping or source association, not ownership. Runtime is separate from maturity.</p></details>
               <div id="combined-controls" class="combined-controls gesture-surface" role="group" aria-label="Combined map controls">
+                <button type="button" data-combined-control="overview">Overview</button>
+                <button type="button" data-combined-control="fit">Fit all</button>
                 <button type="button" data-combined-control="in" aria-label="Zoom in">+</button>
                 <button type="button" data-combined-control="out" aria-label="Zoom out">−</button>
-                <button type="button" data-combined-control="left" aria-label="Pan left">←</button>
-                <button type="button" data-combined-control="right" aria-label="Pan right">→</button>
-                <button type="button" data-combined-control="up" aria-label="Pan up">↑</button>
-                <button type="button" data-combined-control="down" aria-label="Pan down">↓</button>
-                <button type="button" data-combined-control="reset">Reset zoom</button>
+                <span class="combined-hint">Drag · pinch to zoom</span>
               </div>
-              <label for="combined-select">Find and focus a component, phase or track</label>
-              <select id="combined-select" aria-label="Select any Combined map entity"></select>
-              <p id="combined-coverage" class="coverage-state"></p>
               <svg id="combined-map" class="combined-map gesture-surface" viewBox="0 0 660 400"
                    tabindex="0" role="group" aria-label="Connected map. Drag to pan, pinch or use buttons to zoom; select a group to expand it."></svg>
+              <p id="combined-coverage" class="coverage-state"></p>
+              <details class="combined-discovery"><summary>Find a capability · map key</summary>
+                <label for="combined-select">Focus any component, phase or track</label>
+                <select id="combined-select" aria-label="Select any Combined map entity"></select>
+                <p class="meta">Solid arrows: architectural relationships. Dashed arrows: documented prerequisites. Dotted lines: grouping or source association, not ownership. Partial means a built foundation has planned extensions. Runtime is separate.</p>
+                <p class="meta">Expand a foundation to reveal its capabilities in the same map. Fit all shows every expanded group; Overview folds them again. Zoom in to read individual capabilities. Use the arrow keys to pan and + / − to zoom.</p>
+              </details>
             </section>
             <section id="roadmap-inventory" class="roadmap-inventory" hidden>
               <div class="roadmap-toolbar">

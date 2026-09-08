@@ -304,13 +304,22 @@ body { background: radial-gradient(circle at 50% 0, #152332, var(--background) 6
 .combined-view[hidden] { display: none; }
 .combined-controls { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
 .combined-controls button { min-width: 48px; min-height: 48px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel); color: var(--ink); font: inherit; }
+.combined-hint { align-self: center; margin-left: auto; color: var(--muted); font-size: 0.74rem; }
+.combined-discovery > summary { min-height: 48px; padding: 12px 0; cursor: pointer; color: var(--teal); }
+#architecture-heading[hidden] { display: none; }
 .combined-view label { display: block; margin: 6px 0; color: var(--muted); font-size: 0.8rem; }
 .combined-view select { width: 100%; min-height: 48px; background: var(--panel); color: var(--ink); border: 1px solid var(--line); font: inherit; }
-.combined-map { width: 100%; height: auto; display: block; background: #101b25; border: 1px solid var(--line); border-radius: 13px; touch-action: none; user-select: none; overflow: hidden; }
+.combined-map { width: 100%; height: auto; max-height: 350px; display: block; background: radial-gradient(circle at center, rgba(86, 223, 201, 0.10), transparent 65%), var(--panel); border: 1px solid var(--line); border-radius: 13px; touch-action: none; user-select: none; overflow: hidden; }
 .combined-node rect { fill: var(--panel); stroke: var(--line); stroke-width: 2; rx: 10; }
 .combined-node { cursor: pointer; }
 .combined-node text { fill: var(--ink); text-anchor: middle; font-size: 18px; pointer-events: none; }
 .combined-node .combined-status { font-size: 14px; fill: var(--muted); }
+.combined-node.foundation text { font-size: 13px; font-weight: 800; }
+.combined-node.foundation .combined-status { font-size: 11px; }
+.combined-node.built rect { stroke: var(--mint); }
+.combined-node.in-progress rect { stroke: var(--blue); }
+.combined-node.planned rect { stroke: var(--amber); }
+.combined-node.foundation-built\;-expansions-planned rect { stroke: var(--amber); }
 .combined-node:focus-visible { outline: none; }
 .combined-node.planned rect, .combined-node.unknown rect { stroke-dasharray: 5 4; }
 .combined-node.partial rect, .combined-node.progressing rect { stroke: var(--amber); }

@@ -1257,7 +1257,9 @@
       const node = {id, name: component.title, summary: component.owner, kind: "component",
         maturity: component.maturity, source: component.evidence, children: []};
       nodes.push(node); groups.push(node);
-      edges.push({from: "combined-root", to: id, kind: "grouping", label: "contains"});
+      // The real architecture connects the shared foundations. Avoid ten
+      // redundant root spokes obscuring those documented relationships.
+      if (id === "identity") edges.push({from: "combined-root", to: id, kind: "grouping", label: "contains"});
     }
     const unmapped = new Map();
     for (const item of [...(roadmap && roadmap.phases || []), ...(roadmap && roadmap.tracks || [])]) {
@@ -1300,25 +1302,41 @@
   }
 
   function combinedLayout(model, expanded) {
-    const positions = new Map([["combined-root", {x: 180, y: 10, width: 300, height: 90}]]);
-    let y = 146;
-    for (let row = 0; row < model.groups.length; row += 2) {
-      let height = 90;
-      model.groups.slice(row, row + 2).forEach((group, column) => {
-        const x = 15 + column * 330;
-        positions.set(group.id, {x, y, width: 300, height: 90});
-        if (expanded.has(group.id)) group.children.forEach((id, index) => {
-          positions.set(id, {x: x + 10, y: y + 120 + index * 120, width: 280, height: 90});
-        });
-        height = Math.max(height, 90 + (expanded.has(group.id) ? group.children.length * 120 : 0));
-      });
-      y += height + 100;
+    // Same foundation placement as Current, not a second tall inventory list.
+    const anchors = {identity: [20, 34, 140], archive: [205, 34, 140],
+      memory: [390, 34, 130], library: [535, 34, 105], clients: [20, 134, 140],
+      development: [205, 134, 140], attention: [390, 110, 130], workers: [535, 134, 105],
+      application_git: [390, 260, 130], embodiment: [205, 292, 140]};
+    const positions = new Map([["combined-root", {x: 20, y: 292, width: 140, height: 64}]]);
+    let y = 420, unmappedCount = 0;
+    for (const group of model.groups) {
+      const anchor = anchors[group.id];
+      positions.set(group.id, anchor ? {x: anchor[0], y: anchor[1], width: anchor[2], height: 64}
+        : unmappedCount === 0 ? {x: 535, y: 292, width: 105, height: 64}
+          : {x: 20, y, width: 260, height: 90});
+      if (!anchor && unmappedCount++ > 0) y += 120;
     }
-    return {positions, width: 660, height: y};
+    // Compact two-dimensional capability islands, not a long vertical strip.
+    // Reserve the first island for Current's foundations. Each visible entity
+    // still has one identity and one non-overlapping box in this same SVG.
+    const open = model.groups.filter(group => expanded.has(group.id) && group.children.length);
+    const columns = Math.min(3, Math.ceil(Math.sqrt(open.length + 1)));
+    let rowY = 0, rowHeight = Math.max(400, y - 20);
+    open.forEach((group, slot) => {
+      const column = (slot + 1) % columns;
+      if (column === 0) {rowY += rowHeight + 40; rowHeight = 0;}
+      group.children.forEach((id, index) => positions.set(id, {
+        x: column * 700 + 20 + (index % 3) * 216,
+        y: rowY + 20 + Math.floor(index / 3) * 120, width: 196, height: 94}));
+      rowHeight = Math.max(rowHeight, Math.ceil(group.children.length / 3) * 120 + 20);
+    });
+    return {positions, width: Math.max(660, ...Array.from(positions.values(), p => p.x + p.width + 20)),
+      height: Math.max(400, ...Array.from(positions.values(), p => p.y + p.height + 20))};
   }
 
   function combinedState() {
-    return {expanded: new Set(), selected: "identity", x: 0, y: 0, zoom: 1, suppressClick: false};
+    return {expanded: new Set(), selected: "identity", x: 0, y: 0, zoom: 1, suppressClick: false,
+      minimumZoom: 0.15, initialized: false};
   }
 
   function transformCombined(graph, state) {
@@ -1327,14 +1345,15 @@
   }
 
   function combinedControl(state, action, layout) {
+    if (layout) state.minimumZoom = Math.min(0.15, Math.min(660 / layout.width, 400 / layout.height) / 2);
     if (action === "fit" && layout) {
-      state.zoom = Math.min(660 / layout.width, 400 / layout.height);
-      state.x = (660 - layout.width * state.zoom) / 2; state.y = 0;
+      state.zoom = Math.min(1, 660 / layout.width, 400 / layout.height);
+      state.x = (660 - layout.width * state.zoom) / 2; state.y = (400 - layout.height * state.zoom) / 2;
     } else if (action === "reset") {
       state.zoom = 1; state.x = 0; state.y = 0;
     } else if (action === "in" || action === "out") {
       const old = state.zoom;
-      state.zoom = Math.max(0.15, Math.min(2.5, old * (action === "in" ? 1.25 : 0.8)));
+      state.zoom = Math.max(state.minimumZoom, Math.min(3, old * (action === "in" ? 1.25 : 0.8)));
       state.x = 330 - (330 - state.x) * state.zoom / old;
       state.y = 200 - (200 - state.y) * state.zoom / old;
     } else {
@@ -1358,6 +1377,8 @@
     if (!elements.combinedMap) return null;
     const model = combinedModel(roadmap), layout = combinedLayout(model, state.expanded);
     const graph = elements.combinedMap;
+    state.minimumZoom = Math.min(0.15, Math.min(660 / layout.width, 400 / layout.height) / 2);
+    if (!state.initialized) {combinedControl(state, "fit", layout); state.initialized = true;}
     const renderKey = JSON.stringify([model, Array.from(state.expanded), state.selected]);
     if (graph.dataset.combinedRenderKey !== renderKey && !state.gesturing) {
     graph.dataset.combinedRenderKey = renderKey;
@@ -1372,11 +1393,18 @@
     model.edges.forEach((edge, index) => {
       const from = layout.positions.get(edge.from), to = layout.positions.get(edge.to);
       if (!from || !to) return; // Hidden endpoints remain discoverable in details.
-      const lane = edge.from === "combined-root" ? 110 + (index % 3) * 8
-        : Math.min(from.y, to.y) - 18 - (index % 3) * 12;
       const sx = from.x + from.width, sy = from.y + from.height / 2, ex = to.x, ey = to.y + to.height / 2;
+      const currentPaths = ["M160 66 H205", "M345 66 H390", "M520 66 H535",
+        "M90 134 V98", "M160 166 H205", "M345 166 L390 142",
+        "M345 182 C410 220 470 220 535 182", "M600 198 L500 260",
+        "M455 174 V260", "M275 198 V292", "M455 98 L325 292"];
+      const relation = COMBINED_RELATIONS.findIndex(item => item[0] === edge.from && item[1] === edge.to);
+      const lane = 8 + (index % 3) * 4;
+      const route = edge.kind === "architecture" && relation >= 0 ? currentPaths[relation]
+        : edge.from === "combined-root" ? `M${from.x} ${sy} H${lane} V${ey} H${ex}`
+        : `M${from.x + from.width / 2} ${from.y + from.height} V${from.y + from.height + 12} H${lane} V${ey} H${ex}`;
       const path = svgElement(documentRef, "path", {
-        d: `M${sx} ${sy} H${sx + 12} V${lane} H${ex - 12} V${ey} H${ex}`,
+        d: route,
         class: "combined-edge " + edge.kind, "aria-label": `${edge.from} → ${edge.to}: ${edge.label}`,
         ...(edge.kind === "architecture" || edge.kind === "prerequisite" ? {"marker-end": "url(#combined-arrow)"} : {})});
       path.appendChild(svgElement(documentRef, "title", {}, `${edge.kind}: ${edge.label}`));
@@ -1393,29 +1421,33 @@
       const group = node.children && node.children.length > 0;
       const button = svgElement(documentRef, "g", {class: "combined-node "
         + (node.maturity || "unknown").toLowerCase().replace(/ /g, "-")
+        + (position.height === 64 ? " foundation" : "")
         + (state.selected === node.id ? " selected" : ""), role: "button", tabindex: "0",
         transform: `translate(${position.x} ${position.y})`,
         "aria-label": node.name + (group ? `, ${node.children.length} capabilities; activate to expand or collapse` : ""),
         ...(group ? {"aria-expanded": String(state.expanded.has(node.id))} : {})});
       button.dataset.combinedId = node.id;
       button.appendChild(svgElement(documentRef, "rect", {width: position.width, height: position.height}));
-      const words = node.name.split(/\s+/), lines = [""];
+      const compactName = {archive: "Archive & evidence", development: "Development",
+        clients: "Clients & console", workers: "Workers", application_git: "Application & Git",
+        embodiment: "Physical embodiment"}[node.id] || (node.kind === "group" ? "Not mapped yet" : node.name);
+      const words = compactName.split(/\s+/), lines = [""];
       for (const word of words) {
-        if ((lines[lines.length - 1] + word).length > 27) lines.push("");
+        if ((lines[lines.length - 1] + word).length > Math.floor(position.width / (position.height === 64 ? 6.5 : 8))) lines.push("");
         lines[lines.length - 1] += (lines[lines.length - 1] ? " " : "") + word;
       }
       lines.slice(0, 2).forEach((line, index) => button.appendChild(svgElement(documentRef, "text",
-        {x: position.width / 2, y: 23 + index * 19}, line + (index === 1 && lines.length > 2 ? "…" : ""))));
-      button.appendChild(svgElement(documentRef, "text", {x: position.width / 2, y: 77, class: "combined-status"},
+        {x: position.width / 2, y: (position.height === 64 ? 18 : 23) + index * (position.height === 64 ? 15 : 19)}, line + (index === 1 && lines.length > 2 ? "…" : ""))));
+      button.appendChild(svgElement(documentRef, "text", {x: position.width / 2, y: position.height - 12, class: "combined-status"},
         (group ? (state.expanded.has(node.id) ? "− " : "+ ") + node.children.length + " · " : "")
-        + (String(node.maturity).startsWith("Foundation built") ? "Built + planned" : node.maturity || "group")
+        + (String(node.maturity).startsWith("Foundation built") ? "Partial" : node.maturity === "In progress" ? "In progress" : node.maturity || (node.kind === "group" ? "Unknown" : "Overview"))
         + (node.source_status === "proposed" ? " · proposed" : "")));
       layer.appendChild(button);
     }
     }
     transformCombined(graph, state);
     if (elements.combinedCoverage) elements.combinedCoverage.textContent = roadmap
-      ? `${Object.keys(ARCHITECTURE_COMPONENTS).length} components · ${roadmap.phases.length} phases · ${roadmap.tracks.length} tracks · groups are associations, not dependencies`
+      ? `${Object.keys(ARCHITECTURE_COMPONENTS).length} components · ${roadmap.phases.length} phases · ${roadmap.tracks.length} tracks. Tap a foundation to reveal its capabilities.`
       : "Roadmap unavailable; component reference only. Coverage is unknown.";
     if (elements.combinedSelect) {
       const optionsKey = JSON.stringify(model.nodes.map(node => [node.id, node.name]));
@@ -1471,6 +1503,7 @@
     };
     graph.addEventListener("pointerdown", (event) => {
       if (event.button !== undefined && event.button !== 0) return;
+      if (pointers.size >= 2) {state.suppressClick = true; return;}
       if (!pointers.size) {state.suppressClick = false; travel = 0;}
       pointers.set(event.pointerId, {x: event.clientX, y: event.clientY});
       state.gesturing = true;
@@ -1484,15 +1517,20 @@
       if (!pointers.has(event.pointerId)) return;
       pointers.set(event.pointerId, {x: event.clientX, y: event.clientY});
       const next = measure(), rect = graph.getBoundingClientRect();
-      const ratio = 660 / (rect.width || 660);
+      // SVG may be letterboxed by the responsive height cap. Pinch around
+      // the actual drawing coordinates, not the outer element's left edge.
+      const width = rect.width || 660, height = rect.height || width * 400 / 660;
+      const scale = Math.min(width / 660, height / 400), ratio = 1 / scale;
+      const left = rect.left + (width - 660 * scale) / 2;
+      const top = rect.top + (height - 400 * scale) / 2;
       const dx = next.x - previous.x, dy = next.y - previous.y;
       travel += Math.hypot(dx, dy);
       if (travel > 8) state.suppressClick = true;
       if (state.suppressClick) {
         if (previous.distance && next.distance) {
           const old = state.zoom;
-          state.zoom = Math.max(0.15, Math.min(2.5, old * next.distance / previous.distance));
-          const cx = (previous.x - rect.left) * ratio, cy = (previous.y - rect.top) * ratio;
+          state.zoom = Math.max(state.minimumZoom, Math.min(3, old * next.distance / previous.distance));
+          const cx = (previous.x - left) * ratio, cy = (previous.y - top) * ratio;
           state.x = cx - (cx - state.x) * state.zoom / old;
           state.y = cy - (cy - state.y) * state.zoom / old;
         }
@@ -1514,6 +1552,8 @@
   function renderRoadmapInventory(documentRef, elements, roadmap, options) {
     const value = options || {};
     const mode = ["current", "roadmap", "combined"].includes(value.mode) ? value.mode : "current";
+    const heading = documentRef.getElementById("architecture-heading");
+    if (heading) heading.hidden = mode === "combined";
     elements.overview.hidden = mode !== "current";
     elements.inventory.hidden = mode !== "roadmap";
     if (elements.combined) elements.combined.hidden = mode !== "combined";
@@ -2256,6 +2296,12 @@
         state.selected = node.dataset.combinedId;
         const selected = combinedModel(displayedProjection.roadmap).groups.find((group) => group.id === state.selected);
         if (selected) state.expanded.has(selected.id) ? state.expanded.delete(selected.id) : state.expanded.add(selected.id);
+        // Keep the chosen group and its first capabilities in view, rather
+        // than expanding silently below the visible overview.
+        if (selected && state.expanded.has(selected.id) && selected.children.length) {
+          const position = combinedLayout(combinedModel(displayedProjection.roadmap), state.expanded).positions.get(selected.children[0]);
+          state.zoom = 1; state.x = 20 - position.x; state.y = 28 - position.y;
+        }
         drawCombined(); navigation.activity();
       };
       architectureElements.combinedMap.addEventListener("click", activate);
@@ -2271,7 +2317,12 @@
       documentRef.getElementById("combined-controls").addEventListener("click", (event) => {
         const button = event.target.closest && event.target.closest("[data-combined-control]");
         if (!button) return;
-        combinedControl(architectureElements.combinedState, button.dataset.combinedControl);
+        const state = architectureElements.combinedState;
+        const model = combinedModel(displayedProjection && displayedProjection.roadmap);
+        const action = button.dataset.combinedControl;
+        if (action === "overview") state.expanded.clear();
+        combinedControl(state, action === "overview" ? "fit" : action, combinedLayout(model, state.expanded));
+        if (action === "overview") drawCombined();
         transformCombined(architectureElements.combinedMap, architectureElements.combinedState); navigation.activity();
       });
       architectureElements.combinedSelect.addEventListener("change", () => {
