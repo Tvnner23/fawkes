@@ -8,12 +8,17 @@ import socket
 import hashlib
 import secrets
 import time
+import re
+import threading
+import fcntl
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
-from src.runtime.chat_service import ChatServiceError, FawkesChatService
+from src.runtime.chat_service import (
+    ChatServiceError, FawkesChatService, sanitize_development_console_diff,
+)
 from src.runtime.autonomy_supervision import RiderActivityStore
 
 
@@ -24,8 +29,11 @@ SESSION_MAX_AGE_SECONDS = 30 * 24 * 60 * 60
 DEV_CONSOLE_MAX_CAMPAIGNS = 32
 DEV_CONSOLE_MAX_ACTIVITY_ITEMS = 64
 DEV_CONSOLE_MAX_ATTENTION_ITEMS = 16
+DEV_CONSOLE_MAX_REPOSITORY_FILES = 32
 DEV_CONSOLE_MAX_TEXT_BYTES = 2_048
 DEV_CONSOLE_MAX_RESPONSE_BYTES = 256_000
+DEV_CONSOLE_MAX_UPDATES = 40
+DEV_CONSOLE_MAX_UPDATE_BYTES = 96_000
 DEV_CONSOLE_COMPONENTS = (
     "app_server", "development_coordinator", "discord_bridge", "reviewer_launcher",
     "stack", "worker_launcher",
@@ -161,8 +169,30 @@ def _console_campaigns(payload):
         cancelled = activity.get("cancelled")
         if not isinstance(cancelled, bool):
             raise ValueError("developer console campaign cancellation state is malformed")
+        observations = wrapper.get("operational_learning_observations") or {}
+        if not isinstance(observations, dict):
+            raise ValueError("developer console campaign observations are malformed")
+        projected_observations = {}
+        for field in (
+            "builder_invocations", "logical_reviews", "review_transport_attempts",
+            "reviewer_process_invocations", "correction_count", "reviewer_defect_count",
+            "source_section_count",
+        ):
+            value = observations.get(field)
+            if value is not None:
+                if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                    raise ValueError("developer console campaign observation is malformed")
+                projected_observations[field] = value
+        acceptance_satisfied = wrapper.get("acceptance_satisfied")
+        if acceptance_satisfied is not None and not isinstance(acceptance_satisfied, list):
+            raise ValueError("developer console campaign acceptance state is malformed")
         result.append({
             "campaign_id": _console_text(activity.get("campaign_id"), "campaign_id"),
+            "objective": _console_text(activity.get("objective", wrapper.get("objective", "")),
+                                       "objective", optional=True),
+            "satisfied_condition_count": (
+                len(acceptance_satisfied) if acceptance_satisfied is not None else None),
+            "operational_learning_observations": projected_observations,
             "status": _console_text(activity.get("status"), "status"),
             "current_stage": _console_text(activity.get("current_stage"), "current_stage"),
             "iteration": iteration,
@@ -174,8 +204,75 @@ def _console_campaigns(payload):
             "recovery_references": _console_recovery_references(
                 activity.get("recovery_references")),
             "activity": _console_activity(activity.get("activity", [])),
+            "managed_worker_activity": _console_managed_activity(wrapper.get("managed_worker_activity", [])),
         })
     return result
+
+
+def _console_managed_activity(value):
+    if not isinstance(value, list): raise ValueError("managed activity must be a list")
+    result = []
+    for item in value[:8]:
+        if item.get("state") not in {"running", "waiting", "completed", "failed", "disconnected"}:
+            raise ValueError("unknown managed Worker state")
+        record = {key:_console_text(item.get(key), key) for key in
+                  ("invocation_id", "worker_id", "updated_at", "state")}
+        record["events"] = [{key:_console_text(event.get(key), key) for key in
+            ("event_id", "created_at", "kind", "state", "public_message")}
+            for event in item.get("events", [])[-64:]]
+        result.append(record)
+    return result
+
+
+def _console_repository(payload):
+    if not isinstance(payload, dict):
+        raise ValueError("developer console repository source is malformed")
+    if payload.get("creates_authority") is not False \
+            or payload.get("creates_continuing_authority") is not False:
+        raise ValueError("developer console repository authority is malformed")
+    summary = payload.get("status_summary")
+    if not isinstance(summary, dict):
+        raise ValueError("developer console repository summary is malformed")
+    projected_summary = {}
+    for field in (
+        "dirty_paths", "tracked_changes", "untracked_paths", "staged_paths",
+        "deleted_paths",
+    ):
+        value = summary.get(field)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise ValueError("developer console repository count is malformed")
+        projected_summary[field] = value
+    files = payload.get("files")
+    if not isinstance(files, list) or len(files) > DEV_CONSOLE_MAX_REPOSITORY_FILES:
+        raise ValueError("developer console repository files are malformed")
+    projected_files = []
+    for source in files:
+        if not isinstance(source, dict):
+            raise ValueError("developer console repository file is malformed")
+        path = _console_text(source.get("path"), "repository path")
+        parts = Path(path).parts
+        if not path or Path(path).is_absolute() or any(part in {"", ".", ".."} for part in parts):
+            raise ValueError("developer console repository path is outside its scope")
+        projected_file = {field: _console_text(source.get(field), field)
+            for field in (
+                "path", "mode", "object_type", "object_id", "head_change",
+                "worktree_state", "revision", "review_status",
+            )}
+        projected_file["diff_excerpt"] = sanitize_development_console_diff(
+            _console_text(source.get("diff_excerpt"), "diff_excerpt"))
+        projected_files.append(projected_file)
+    return {
+        "branch": _console_text(payload.get("branch"), "repository branch"),
+        "head": _console_text(payload.get("head"), "repository HEAD"),
+        "comparison_base": _console_text(
+            payload.get("comparison_base"), "repository comparison base"),
+        "selection_basis": _console_text(
+            payload.get("selection_basis"), "repository selection basis"),
+        "status_summary": projected_summary,
+        "files": projected_files,
+        "creates_authority": False,
+        "creates_continuing_authority": False,
+    }
 
 
 def _console_attention(payload):
@@ -216,11 +313,172 @@ def _console_components(payload):
     return result
 
 
+_ROADMAP_SUMMARIES = (
+    "Protects identity, integrity, privacy and recovery so Fawkes can change without losing who he is.",
+    "Lets Fawkes keep durable media and documents with clear ownership and provenance.",
+    "Lets every processing attempt be tracked once, resumed safely and audited later.",
+    "Lets Tanner stage exported conversations for controlled review before they affect Fawkes.",
+    "Lets Fawkes search retained history and approved outside sources when asked.",
+    "Tests historical imports and retrieval quality before old material influences current answers.",
+    "Lets developers replay retrieval decisions and diagnose why a result was selected.",
+    "Lets Fawkes plan one bounded search across Library, Archive and semantic projections.",
+    "Lets Fawkes connect relevant knowledge across conversations while preserving source boundaries.",
+    "Builds a verified context package so responses receive relevant, attributable information.",
+    "Lets Fawkes propose and test scoped improvements without granting himself authority.",
+    "Lets Fawkes distinguish what used to be true from what is true now.",
+    "Lets Fawkes track claims, supporting evidence and when that evidence may have gone stale.",
+    "Lets historical material enter current knowledge only through explicit controlled review.",
+    "Lets Fawkes remember decisions, their reasons and what actually happened afterward.",
+    "Lets Fawkes build a revisable understanding of relationships while respecting each person's privacy.",
+    "Lets Fawkes develop a coherent personality and assess changes without pretending certainty.",
+    "Lets Fawkes deliver bounded improvements through independent review and Tanner's permissions.",
+    "Lets Fawkes route work among suitable models while enforcing durable spending limits.",
+    "Lets Fawkes understand approved video content as time-based evidence rather than isolated frames.",
+    "Lets Fawkes form a sourced, revisable view of his surroundings and their current state.",
+    "Lets Fawkes understand dates, schedules and deadlines without inventing current facts.",
+    "Lets authorized workflows continue across restarts while retaining explicit stop conditions.",
+    "Lets Fawkes offer timely help from verified context without acting beyond Tanner's authority.",
+    "Lets Fawkes rehearse consequential actions safely before any real-world effect occurs.",
+    "Lets tools use scoped credential references without exposing secrets to ordinary reasoning.",
+    "Keeps physical and environmental actions inside explicit safety and human-control boundaries.",
+    "Lets Fawkes use supervised tools and actions with exact scope, evidence and recovery.",
+    "Lets Fawkes express one continuous Phoenix identity through evolving visual forms.",
+    "Lets the same Fawkes stay coordinated across console, computer, phone and supported forms.",
+    "Lets Tanner read and learn with guided context, notes and progress that remain source-bound.",
+    "Lets Tanner talk naturally with Fawkes, interrupt him and hear his replies.",
+    "Lets meaningful Fawkes events have consistent, controllable sounds without turning noise into status.",
+    "Lets approved devices, homes and vehicles expose narrowly scoped capabilities to Fawkes.",
+    "Lets Fawkes carry verified continuity between supported installations without cloning hidden authority.",
+    "Lets multiple individual Phoenixes coexist while preserving each identity and Rider relationship.",
+    "Lets households share selected capabilities with consent, privacy and relationship compartments.",
+    "Lets Phoenixes provide attributable testimony without making another Phoenix's claims automatically true.",
+    "Lets Phoenixes communicate through authenticated, consent-aware channels with retained provenance.",
+    "Lets a wider Phoenix ecosystem interoperate while keeping identity, consent and authority explicit.",
+)
+
+_ROADMAP_TRACKS = (
+    ("track-presence", "Presence and expression", "Lets Fawkes communicate identity and state through a restrained in-app presence.", "presence", "canonical"),
+    ("track-ghost-rider", "Ghost Rider evaluation", "Tests Fawkes with simulated Rider interactions before changes reach real users.", "assurance", "canonical"),
+    ("track-multi-worker", "Multi-Worker coordination", "Lets specialized Workers collaborate through exact packages, budgets and independent assurance.", "development", "canonical"),
+    ("track-public", "Public experience", "Lets visitors meet a deliberately limited public Fawkes without entering Tanner's private instance.", "clients", "canonical"),
+    ("track-social", "Scoped social and messaging", "Lets approved messaging adapters communicate without becoming unrestricted publication authority.", "clients", "proposed"),
+    ("track-approval", "Secure human approval", "Lets consequential requests pause for an exact authenticated human decision before continuing.", "attention", "canonical"),
+    ("track-phone", "Phone companion", "Lets Tanner reach the same authenticated Fawkes from a supported phone companion.", "clients", "canonical"),
+    ("track-embodiment", "Progressive physical bodies", "Lets one Fawkes gain increasingly capable physical forms without moving identity into hardware.", "embodiment", "canonical"),
+    ("track-dedicated-home", "Dedicated home infrastructure", "Keeps Fawkes available when Tanner's personal computer is shut down.", "infrastructure", "recorded_requirement"),
+    ("track-console-controls", "Console physical controls", "Adds a power and idle button, wheel, clicker and volume slider after hardware selection and installation.", "embodiment", "recorded_requirement"),
+    ("track-console-audio", "Console sound and speakers", "Lets the console play supported alerts after speakers, safe output points and volume limits are verified.", "embodiment", "recorded_requirement"),
+    ("track-console-enclosure", "Console cooling and enclosure", "Lets the console operate in a protected shell with verified cooling and service access.", "embodiment", "recorded_requirement"),
+    ("track-recovery", "Recovery and portable continuity", "Lets Fawkes restore verified state after failures without rewriting history or authority.", "identity", "canonical"),
+    ("track-realtime", "Realtime conversation", "Lets voice, interruption, device presence and status stay coordinated across supported surfaces.", "clients", "canonical"),
+)
+
+def _console_roadmap(repository, *, source_revision):
+    roadmap = Path(repository) / "docs/phoenix/CANONICAL_ROADMAP.md"
+    source = roadmap.read_bytes()
+    text = source.decode("utf-8")
+    addendum_path = "src/app/static/dev-console/roadmap-addendum.txt"
+    # One packaged, noncanonical source, never an arbitrary filesystem path.
+    with (Path(repository) / addendum_path).open("rb") as stream:
+        addendum = stream.read(16_385)
+    if not addendum or len(addendum) > 16_384:
+        raise ValueError("retained roadmap addendum exceeds its source bound")
+    addendum_text = addendum.decode("utf-8")
+    canonical_binding = {"source_sha256": hashlib.sha256(source).hexdigest(),
+        "source_bytes": len(source), "source_revision": source_revision,
+        "source_excerpt": ""}
+    addendum_binding = {"source_sha256": hashlib.sha256(addendum).hexdigest(),
+        "source_bytes": len(addendum), "source_revision": source_revision,
+        "source_excerpt": addendum_text}
+    phases = []
+    for number, summary in enumerate(_ROADMAP_SUMMARIES):
+        match = re.search(rf"^## Phase {number} [—-] (.+)$", text, re.MULTILINE)
+        if not match:
+            raise ValueError(f"canonical roadmap Phase {number} is unavailable")
+        raw_title = match.group(1).strip()
+        title = raw_title.replace(" — COMPLETE", "")
+        next_phase = re.search(r"^## Phase \d+ [—-] ", text[match.end():], re.MULTILINE)
+        section = text[match.end():match.end() + next_phase.start()] if next_phase else text[match.end():]
+        recorded_complete = (raw_title.endswith(" — COMPLETE") or bool(re.search(
+            rf"^\*\*Phase {number} [—-] [^\n]+ is COMPLETE\.\*\*", section, re.MULTILINE)))
+        maturity = "implemented" if recorded_complete else "planned"
+        # A recorded completed milestone remains complete even where the
+        # associated foundation has later planned extensions.
+        if maturity != "implemented" and number in {0, 1, 2, 3, 4, 5, 6, 7, 8, 10}:
+            maturity = "partial"
+        phases.append({"id": f"phase-{number}", "kind": "phase", "number": number,
+            "name": title, "summary": summary, "maturity": maturity,
+            "source": "docs/phoenix/CANONICAL_ROADMAP.md", "source_status": "canonical",
+            "group": ("Foundations and continuity" if number <= 9 else
+                      "Knowledge and improvement" if number <= 18 else
+                      "Agency and safety" if number <= 27 else
+                      "Presence, devices and ecosystem"),
+            # Phase numbering is an identity, not an invented dependency edge.
+            "prerequisites": [],
+            "runtime_state": "unknown", **canonical_binding})
+    documented_prerequisites = {"track-presence": ["phase-0", "phase-1"]}
+    tracks = [{"id": item[0], "kind": "track", "name": item[1], "summary": item[2],
+        "maturity": "planned", "source": ("docs/phoenix/CANONICAL_ROADMAP.md" if item[4] == "canonical"
+            else addendum_path), "source_status": item[4],
+        "group": "Cross-cutting and product tracks", "mapped_component": item[3],
+        "prerequisites": documented_prerequisites.get(item[0], []),
+        "runtime_state": "unknown",
+        **(canonical_binding if item[4] == "canonical" else addendum_binding)} for item in _ROADMAP_TRACKS]
+    return {"schema_version": "fawkes.console.roadmap.v1", "source_path": str(roadmap.relative_to(repository)),
+        "source_sha256": hashlib.sha256(source).hexdigest(), "source_bytes": len(source),
+        "source_revision": _console_text(source_revision, "roadmap source revision"),
+        "phases": phases, "tracks": tracks, "expected_phase_ids": [f"phase-{n}" for n in range(40)],
+        "coverage_complete": len(phases) == 40, "creates_authority": False,
+        "creates_continuing_authority": False}
+
+def _console_jobs(campaigns, attention):
+    actionable_campaigns = {item["campaign_id"] for item in attention
+                            if item.get("actionable") is True}
+    terminal_statuses = {"succeeded", "failed_safe", "denied", "expired", "cancelled"}
+    jobs = []
+    for campaign in campaigns:
+        stamps = [event.get("created_at") for event in campaign.get("activity", [])]
+        stamps.extend(item.get("updated_at") for item in campaign.get("managed_worker_activity", []))
+        last = max((stamp for stamp in stamps if stamp), default=None)
+        status = campaign["status"]
+        actionable = campaign["campaign_id"] in actionable_campaigns
+        successful = status == "succeeded"
+        historical = status in terminal_statuses
+        if actionable or status == "tanner_escalation":
+            state = "needs_you"
+        elif historical:
+            state = "done"
+        else:
+            state = "working"
+        objective = campaign.get("objective") or campaign["campaign_id"]
+        jobs.append({"job_id": campaign["campaign_id"], "objective": objective,
+            "state": state, "recorded_status": status, "current_step": campaign.get("current_stage") or status,
+            "last_activity_at": last, "worker": campaign.get("builder"),
+            "successful": successful, "historical": historical,
+            "accomplished": (("The canonical campaign reached its successful recorded outcome."
+                if successful else "The campaign ended without a successful outcome; its evidence remains available.")
+                if state == "done" else None),
+            "gained": (("Its recorded result is available; acceptance, application and deployment remain separately identified."
+                if successful else "No deployed gain is claimed from this unsuccessful recorded outcome.")
+                if state == "done" else None),
+            "next": ("No suggested follow-on has been started." if state == "done" else
+                ((campaign.get("needs_tanner") or {}).get("decision_needed") or
+                 "Open the exact canonical Attention request." if state == "needs_you"
+                 else "Continue the authorized current step.")),
+            "creates_authority": False})
+    priority = {"needs_you": 0, "working": 1, "done": 2}
+    jobs.sort(key=lambda job: (priority[job["state"]],
+        -(datetime.fromisoformat(job["last_activity_at"].replace("Z", "+00:00")).timestamp()
+          if job["last_activity_at"] else 0)))
+    return jobs[:32]
+
+
 def developer_console_projection(chat_service):
     """Build one bounded, body-free and non-authorizing console projection."""
     campaigns = chat_service.list_codex_development_campaigns()
     attention = chat_service.development_attention_projection(pending_only=True)
     components = chat_service.production_component_status()
+    repository = chat_service.development_console_repository_projection()
     build = build_identity()
     projection = {
         "schema_version": "fawkes.dev_console.read_only.v1",
@@ -230,13 +488,238 @@ def developer_console_projection(chat_service):
         "campaigns": _console_campaigns(campaigns),
         "attention": _console_attention(attention),
         "components": _console_components(components),
+        "repository": _console_repository(repository),
+        "roadmap": _console_roadmap(
+            Path(os.getenv("FAWKES_DEVELOPMENT_ROOT", Path(__file__).resolve().parents[2])),
+            source_revision=repository["head"],
+        ),
         "creates_authority": False,
         "creates_continuing_authority": False,
     }
+    projection["jobs"] = _console_jobs(projection["campaigns"], projection["attention"])
+    # Recent observation window only, never a budget or authority decision.
+    # Bound activity independently so public progress cannot crowd out pending
+    # Attention. Full retained sidecars remain with their canonical owner.
+    managed = sorted((item for campaign in projection["campaigns"]
+        for item in campaign.get("managed_worker_activity", [])),
+        key=lambda item:item["updated_at"], reverse=True)
+    selected = {id(item) for item in managed[:4]}
+    omitted = sum(len(item["events"]) for item in managed[4:])
+    for campaign in projection["campaigns"]:
+        campaign["managed_worker_activity"] = [item for item in campaign["managed_worker_activity"]
+                                              if id(item) in selected]
+    managed = managed[:4]
+    while len(json.dumps(managed, ensure_ascii=False).encode("utf-8")) > 32768:
+        populated = [item for item in managed if item["events"]]
+        if not populated: raise ValueError("managed activity metadata exceeds its window")
+        oldest = min(populated, key=lambda item:item["events"][0]["created_at"])
+        oldest["events"].pop(0); omitted += 1
+    projection["managed_activity_window"] = {"omitted_events": omitted, "maximum_bytes": 32768}
     if len(json.dumps(projection, ensure_ascii=False).encode("utf-8")) > \
             DEV_CONSOLE_MAX_RESPONSE_BYTES:
         raise ValueError("developer console projection exceeds its byte limit")
     return projection
+
+
+def _console_update_text(projection, *, created_at, snapshot_id):
+    """Render one exact, public, bounded status handoff without raw event bodies."""
+    if not isinstance(projection, dict) or projection.get("creates_authority") is not False:
+        raise ValueError("console update projection is not observational")
+    lines = [
+        "FAWKES — COMPLETED + WORKING ON",
+        f"Snapshot: {snapshot_id}",
+        f"Created: {created_at}",
+        f"Last source update: {projection.get('observed_at') or 'Unknown'}",
+        "Observation: authenticated developer-console projection; current truth depends on its freshness",
+        "",
+        "REQUESTED JOBS",
+    ]
+    jobs = projection.get("jobs") if isinstance(projection.get("jobs"), list) else []
+    if not jobs:
+        lines.append("- No campaign/job records are available to this preview; this is not an all-history claim.")
+    for job in jobs[:32]:
+        state = str(job.get("state") or "unknown").replace("_", " ").upper()
+        objective = str(job.get("objective") or job.get("job_id") or "Unnamed job")
+        lines.extend([
+            f"- {state}: {objective}",
+            f"  Worker/job: {(job.get('worker') or {}).get('worker_id') or 'Not projected'} / {job.get('job_id') or 'Unknown'}",
+            f"  Current step: {job.get('current_step') or 'Unknown'}",
+            f"  Last activity: {job.get('last_activity_at') or 'Unknown'}",
+        ])
+        if job.get("accomplished"):
+            lines.append(f"  Accomplished: {job['accomplished']}")
+        if job.get("gained"):
+            lines.append(f"  Gained: {job['gained']}")
+        if job.get("next"):
+            lines.append(f"  Next: {job['next']}")
+    attention = [item for item in projection.get("attention", [])
+                 if isinstance(item, dict) and item.get("actionable")]
+    lines.extend(["", "BLOCKERS / DECISIONS"])
+    if not attention:
+        lines.append("- No presently actionable canonical Attention request is projected.")
+    for item in attention:
+        lines.append(f"- {item.get('blocked_action') or 'Decision required'}")
+        lines.append(f"  Why: {item.get('why_required') or 'Canonical owner requires Tanner'}")
+        lines.append(f"  Expires: {item.get('expires_at') or 'Unknown'}")
+    repository = projection.get("repository") or {}
+    build = projection.get("build") or {}
+    lines.extend([
+        "",
+        "COMPACT EVIDENCE",
+        f"- Repository: {repository.get('branch') or 'Unknown'} @ {repository.get('head') or 'Unknown'}",
+        f"- Working-tree paths observed: {(repository.get('status_summary') or {}).get('dirty_paths', 'Unknown')}",
+        f"- Console build: {build.get('release_id') or 'Unknown'} ({build.get('mode') or 'Unknown'})",
+        "- Review/application/deployment: consult each job's recorded state; this export grants no authority.",
+        "- Deferred: PC-independent hosting and physical console controls remain not started.",
+        "- Suggested next job (not started): repository cleanup/professionalization after console completion.",
+        "",
+        "STEERING QUESTION",
+        "What should Fawkes do next after any listed Needs You item and the current authorized job are resolved?",
+    ])
+    content = "\n".join(lines) + "\n"
+    if len(content.encode("utf-8")) > DEV_CONSOLE_MAX_UPDATE_BYTES:
+        raise ValueError("console update exceeds its byte limit")
+    return content
+
+
+class ConsoleUpdateStore:
+    """Append-only, authenticated console-to-PC status snapshots."""
+    _ID = re.compile(r"^console-update-[a-f0-9]{64}$")
+    _KEY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{15,127}$")
+
+    def __init__(self, root):
+        self.root = Path(root)
+        self._lock = threading.RLock()
+
+    @staticmethod
+    def _canonical(value):
+        return json.dumps(value, ensure_ascii=False, sort_keys=True,
+                          separators=(",", ":")).encode("utf-8")
+
+    def _prepare(self):
+        root_existed = self.root.exists()
+        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.root.chmod(0o700)
+        if not root_existed:
+            self._fsync_directory(self.root.parent)
+        for name in ("records", "idempotency"):
+            path = self.root / name
+            existed = path.exists()
+            path.mkdir(exist_ok=True, mode=0o700)
+            path.chmod(0o700)
+            if not existed:
+                self._fsync_directory(self.root)
+
+    @staticmethod
+    def _fsync_directory(path):
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        descriptor = os.open(path, flags)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+    @staticmethod
+    def _write_atomic(path, body):
+        temporary = path.parent / f".{path.name}.{secrets.token_hex(8)}.tmp"
+        try:
+            with temporary.open("xb") as handle:
+                os.chmod(temporary, 0o600)
+                handle.write(body)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+            ConsoleUpdateStore._fsync_directory(path.parent)
+        except BaseException:
+            temporary.unlink(missing_ok=True)
+            raise
+
+    def _read(self, snapshot_id, *, expected_idempotency_sha256=None):
+        if not self._ID.fullmatch(str(snapshot_id or "")):
+            raise KeyError("console update not found")
+        path = self.root / "records" / f"{snapshot_id}.json"
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+            content = value["content"]
+            if (value.get("schema_version") != "fawkes.console_update.v1"
+                    or value.get("snapshot_id") != snapshot_id
+                    or not isinstance(content, str)
+                    or len(content.encode("utf-8")) > DEV_CONSOLE_MAX_UPDATE_BYTES
+                    or hashlib.sha256(content.encode("utf-8")).hexdigest()
+                    != value.get("content_sha256")):
+                raise ValueError("console update integrity check failed")
+            retained_key = value.get("idempotency_sha256")
+            if (expected_idempotency_sha256 is not None
+                    and retained_key is not None
+                    and retained_key != expected_idempotency_sha256):
+                raise ValueError("console update idempotency binding failed")
+            return value
+        except FileNotFoundError as exc:
+            raise KeyError("console update not found") from exc
+
+    def save(self, *, idempotency_key, projection):
+        if not self._KEY.fullmatch(str(idempotency_key or "")):
+            raise ValueError("console update idempotency key is malformed")
+        with self._lock:
+            self._prepare()
+            key_digest = hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest()
+            key_path = self.root / "idempotency" / f"{key_digest}.txt"
+            lock_path = self.root / "idempotency" / f"{key_digest}.lock"
+            with lock_path.open("a+b") as descriptor:
+                os.chmod(lock_path, 0o600)
+                fcntl.flock(descriptor.fileno(), fcntl.LOCK_EX)
+                try:
+                    if key_path.exists():
+                        return self._read(
+                            key_path.read_text(encoding="ascii").strip(),
+                            expected_idempotency_sha256=key_digest,
+                        )
+                    seed = {"schema_version": "fawkes.console_update.identity.v2",
+                            "idempotency_sha256": key_digest}
+                    snapshot_id = "console-update-" + hashlib.sha256(
+                        self._canonical(seed)).hexdigest()
+                    record_path = self.root / "records" / f"{snapshot_id}.json"
+                    if record_path.exists():
+                        record = self._read(
+                            snapshot_id, expected_idempotency_sha256=key_digest)
+                    else:
+                        created_at = datetime.now(timezone.utc).isoformat()
+                        content = _console_update_text(
+                            projection, created_at=created_at, snapshot_id=snapshot_id)
+                        record = {"schema_version": "fawkes.console_update.v1",
+                                  "snapshot_id": snapshot_id, "created_at": created_at,
+                                  "projection_observed_at": projection.get("observed_at"),
+                                  "idempotency_sha256": key_digest,
+                                  "content_sha256": hashlib.sha256(
+                                      content.encode("utf-8")).hexdigest(),
+                                  "content": content, "creates_authority": False,
+                                  "creates_continuing_authority": False}
+                        self._write_atomic(record_path, self._canonical(record))
+                    self._write_atomic(key_path, (snapshot_id + "\n").encode("ascii"))
+                    return record
+                finally:
+                    fcntl.flock(descriptor.fileno(), fcntl.LOCK_UN)
+
+    def get(self, snapshot_id):
+        with self._lock:
+            self._prepare()
+            return self._read(snapshot_id)
+
+    def list(self):
+        with self._lock:
+            self._prepare()
+            records = []
+            for path in (self.root / "records").glob("console-update-*.json"):
+                try:
+                    record = self._read(path.stem)
+                except (KeyError, OSError, ValueError, json.JSONDecodeError):
+                    continue
+                records.append({key: record[key] for key in (
+                    "snapshot_id", "created_at", "projection_observed_at", "content_sha256")})
+            records.sort(key=lambda item: item["created_at"], reverse=True)
+            records = records[:DEV_CONSOLE_MAX_UPDATES]
+            return {"schema_version": "fawkes.console_updates.v1", "updates": records,
+                    "creates_authority": False, "creates_continuing_authority": False}
 
 
 class BrowserSessionStore:
@@ -249,7 +732,7 @@ class BrowserSessionStore:
 
     def create_bound(self):
         token = secrets.token_urlsafe(32)
-        csrf_token = secrets.token_urlsafe(32)
+        csrf_token = self._session_csrf(token)
         digest = hashlib.sha256(token.encode()).hexdigest()
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.root.chmod(0o700)
@@ -262,6 +745,21 @@ class BrowserSessionStore:
         temporary.chmod(0o600); temporary.replace(path)
         path.chmod(0o600)
         return token, csrf_token
+
+    @staticmethod
+    def _session_csrf(token):
+        return hmac.new(token.encode(), b"fawkes-browser-session-csrf-v1", hashlib.sha256).hexdigest()
+
+    def console_csrf(self, token):
+        """Recover only the current session's existing CSRF value, without writes.
+
+        Older random-CSRF sessions require fresh login. This neither extends a
+        session nor changes its stored digest or any Attention record.
+        """
+        csrf = self._session_csrf(token)
+        if not self.valid_csrf(token, csrf):
+            raise PermissionError("Sign in again to enable decisions in this browser session.")
+        return csrf
 
     def valid(self, token):
         if not token:
@@ -338,6 +836,18 @@ class FawkesAppHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _text(self, status, body, *, filename=None):
+        body = body.encode("utf-8") if isinstance(body, str) else bytes(body)
+        self.send_response(status)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        if filename:
+            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
         self.end_headers()
         self.wfile.write(body)
 
@@ -533,6 +1043,34 @@ class FawkesAppHandler(BaseHTTPRequestHandler):
                 self._json(503, {"error": {"code": "dev_console_projection_unavailable",
                     "message": "The read-only developer-console projection is unavailable right now."}})
             return
+        if path == "/api/development/console-updates":
+            if not self._require_auth(record_rider_activity=False):
+                return
+            try:
+                self._json(200, self.server.console_update_store.list())
+            except Exception:
+                self._json(503, {"error": {"code": "console_updates_unavailable",
+                    "message": "Prepared console updates are unavailable right now."}})
+            return
+        update_match = re.fullmatch(
+            r"/api/development/console-updates/(console-update-[a-f0-9]{64})(\.txt)?", path)
+        if update_match:
+            if not self._require_auth(record_rider_activity=False):
+                return
+            try:
+                update = self.server.console_update_store.get(update_match.group(1))
+                if update_match.group(2):
+                    self._text(200, update["content"],
+                               filename=f"{update['snapshot_id']}.txt")
+                else:
+                    self._json(200, update)
+            except KeyError:
+                self._json(404, {"error": {"code": "console_update_not_found",
+                    "message": "That prepared console update is not available."}})
+            except Exception:
+                self._json(503, {"error": {"code": "console_updates_unavailable",
+                    "message": "Prepared console updates are unavailable right now."}})
+            return
         if path == "/api/development/codex-campaigns":
             if not self._require_auth():
                 return
@@ -647,6 +1185,26 @@ class FawkesAppHandler(BaseHTTPRequestHandler):
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(body)
+            return
+        if path == "/api/development/console-updates":
+            if not self._require_auth(record_rider_activity=False):
+                return
+            if not self._require_attention_decision_auth():
+                return
+            try:
+                request = self._read_json()
+                if set(request) != {"idempotency_key"}:
+                    raise ValueError("only an idempotency key is accepted")
+                projection = developer_console_projection(self.server.chat_service)
+                update = self.server.console_update_store.save(
+                    idempotency_key=request["idempotency_key"], projection=projection)
+                self._json(201, update)
+            except (ValueError, ChatServiceError) as exc:
+                self._json(400, {"error": {"code": "invalid_console_update",
+                    "message": str(exc)}})
+            except Exception:
+                self._json(503, {"error": {"code": "console_update_failed",
+                    "message": "The previous prepared update was preserved, but a new update could not be saved."}})
             return
         observation_prefix = "/api/development/observations/"
         proposal_prefix = "/api/development/proposals/"
@@ -933,6 +1491,11 @@ class FawkesAppHandler(BaseHTTPRequestHandler):
 
     def _serve_static(self, path):
         names = {
+            "/console-login": ("console-login.html", "text/html; charset=utf-8"),
+            "/preview-login.js": ("preview-login.js", "text/javascript; charset=utf-8"),
+            "/attention-binding.js": ("attention-binding.js", "text/javascript; charset=utf-8"),
+            "/native-attention.js": ("native-attention.js", "text/javascript; charset=utf-8"),
+            "/native-attention.css": ("native-attention.css", "text/css; charset=utf-8"),
             "/": ("index.html", "text/html; charset=utf-8"),
             "/app.css": ("app.css", "text/css; charset=utf-8"),
             "/app.js": ("app.js", "text/javascript; charset=utf-8"),
@@ -984,27 +1547,98 @@ class FawkesAppHandler(BaseHTTPRequestHandler):
         identity = build_identity()["release_id"]
         if item[0].endswith("index.html"):
             body = body.replace(b"__FAWKES_BUILD_ID__", identity.encode("ascii"))
+        if item[0] == "dev-console/index.html":
+            console_context = os.getenv("FAWKES_DEV_CONSOLE_CONTEXT", "")
+            if (len(console_context) > 100 or any(
+                    character not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._:-"
+                    for character in console_context)):
+                console_context = ""
+            body = body.replace(
+                b"__FAWKES_CONSOLE_CONTEXT__", console_context.encode("ascii"))
+        asset_sha256 = hashlib.sha256(body).hexdigest()
         self.send_response(200)
         self.send_header("Content-Type", item[1])
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Fawkes-Build-ID", identity)
+        self.send_header("X-Fawkes-Asset-SHA256", asset_sha256)
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Content-Security-Policy", "default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:")
         self.end_headers()
         self.wfile.write(body)
 
 
+class FawkesConsoleApprovalHandler(FawkesAppHandler):
+    """Explicit minimal console surface; not the broad Chat/runtime controller.
+
+    Its injected service is bound to one campaign/Attention owner and root.
+    The running read-only preview does not select this handler.
+    """
+    def _same_origin(self):
+        origin = self.headers.get("Origin")
+        expected = ("https" if isinstance(self.connection, __import__('ssl').SSLSocket) else "http") + "://" + self.headers.get("Host", "")
+        if origin != expected:
+            self._json(403, {"error": {"code": "same_origin_required", "message": "A same-origin browser request is required."}})
+            return False
+        return True
+
+    def _require_auth(self, *, record_rider_activity=True):
+        # Passive console reads must not fabricate Rider activity.
+        return super()._require_auth(record_rider_activity=False)
+
+    def do_GET(self):
+        path = urlparse(self.path).path
+        if path == "/":
+            return self._serve_static("/console-login")
+        if path == "/preview-login.js":
+            return self._serve_static(path)
+        allowed = {"/dev-console", "/dev-console/", "/dev-console/console.js",
+            "/dev-console/console.css", "/attention-binding.js", "/native-attention.js",
+            "/native-attention.css", "/api/status", "/api/development/dev-console",
+            "/api/development/console-updates"}
+        exact = path.startswith("/api/development/attention/") and path.count("/") == 4
+        update = bool(re.fullmatch(
+            r"/api/development/console-updates/console-update-[a-f0-9]{64}(?:\.txt)?", path))
+        if path in allowed or exact or update:
+            return super().do_GET()
+        self._json(404, {"error": {"code": "unavailable_in_console"}})
+
+    def do_POST(self):
+        path = urlparse(self.path).path
+        if not self._same_origin():
+            return
+        if path == "/api/session/console-csrf":
+            try:
+                csrf = self.server.app_session_store.console_csrf(self._session_token())
+            except PermissionError as exc:
+                self._json(401, {"error": {"code": "console_login_required", "message": str(exc)}})
+                return
+            self._json(200, {"authenticated_rider": "tanner", "csrf_token": csrf})
+            return
+        decision = (path.startswith("/api/development/codex-campaigns/")
+                    and "/attention/" in path and path.endswith("/decision")
+                    and path.count("/") == 7)
+        if path in {"/api/session", "/api/session/logout",
+                    "/api/development/console-updates"} or decision:
+            return super().do_POST()
+        self._json(405, {"error": {"code": "unavailable_in_console"},
+                         "creates_authority": False, "creates_continuing_authority": False})
+
+
 class FawkesAppServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, address, *, chat_service, app_token, app_session_store=None):
+    def __init__(self, address, *, chat_service, app_token, app_session_store=None,
+                 console_update_store=None):
         super().__init__(address, FawkesAppHandler)
         self.chat_service = chat_service
         self.app_token = app_token
         state_root = Path(os.environ.get("FAWKES_DEVELOPMENT_ROOT", Path.cwd()))
         self.app_session_store = app_session_store or BrowserSessionStore(
             os.environ.get("FAWKES_APP_SESSION_ROOT", state_root / "database" / "app_sessions"))
+        self.console_update_store = console_update_store or ConsoleUpdateStore(
+            os.environ.get("FAWKES_CONSOLE_UPDATE_ROOT",
+                           state_root / "database" / "console_updates"))
 
 
 def main():

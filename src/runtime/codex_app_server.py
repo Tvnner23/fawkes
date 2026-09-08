@@ -20,6 +20,7 @@ import tempfile
 PROTOCOL_VERSION = "codex-app-server-0.151.0"
 SUPPORTED_CLI_VERSION = "codex-cli 0.151.0"
 REVIEWER_PROTOCOL_VERSION = "codex-app-server-0.153.4"
+MANAGED_PROTOCOL_VERSION = "codex-app-server-managed-0.153.4"
 REVIEWER_SCHEMA_MANIFEST_SHA256 = "5e5725a250e691329daf1e1ae5917a9bd0dd4452dc0bb724196a3b183cb1846d"
 SHELL_ENVIRONMENT_POLICY_OVERRIDE = "shell_environment_policy.inherit=all"
 PROTOCOL_SCHEMA_SHA256 = {
@@ -48,9 +49,11 @@ REVIEW_APPROVAL_BINDING_FIELDS = frozenset({
     "reviewer_worker_id", "reviewer_identity_sha256",
     "reviewer_invocation_id",
 })
-_SECRET = re.compile(
-    r"(?i)(authorization|token|api[_ -]?key|webhook|password|secret)\s*[:=]\s*\S+"
-)
+_SECRET = re.compile(r'''(?ix)
+    (?P<label>["']?(?:authorization|credential|token|api[_\s-]?key|webhook|password|secret)["']?)
+    \s*[:=]\s*(?:(?:bearer|basic|token)\s+)?
+    (?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^,\s;}\]]+)
+''')
 
 
 class CodexAppServerError(OSError):
@@ -64,7 +67,7 @@ class CodexAppServerError(OSError):
 def _safe(value, maximum=2_000):
     text = "".join(c for c in str(value or "")[:maximum] if c.isprintable())
     text = re.sub(r"(?:https?|wss?)://\S+", "<redacted-endpoint>", text)
-    return _SECRET.sub(lambda m: m.group(1) + "=<redacted>", text)
+    return _SECRET.sub(lambda m: m.group("label") + "=<redacted>", text)
 
 
 def _digest(value):
@@ -114,11 +117,115 @@ def _available_decisions(params):
     return {value for value in values if isinstance(value, str)}
 
 
+def _legacy_action_error(method, params):
+    """Validate the action-bearing fields of the pinned legacy request schemas.
+
+    ExecCommandApprovalParams/FileChange definitions are identical in the
+    retained 0.151.0 and 0.153.4 contracts. Reason text is never action material.
+    Empty file contents and empty command arguments remain valid.
+    """
+    if any(not isinstance(params.get(key), str) or not params[key]
+           for key in ('conversationId', 'callId')):
+        return 'Legacy request lacks exact conversation/call identity.'
+    if params.get('reason') is not None and not isinstance(params['reason'], str):
+        return 'Legacy reason must be text or null.'
+    if method == 'execCommandApproval':
+        command = params.get('command')
+        if (not isinstance(command, list) or not command
+                or not all(isinstance(arg, str) for arg in command) or not command[0]
+                or not isinstance(params.get('cwd'), str) or not params['cwd']):
+            return 'Exact command arguments and working directory are required.'
+        if params.get('approvalId') is not None and not isinstance(params['approvalId'], str):
+            return 'Legacy approval identifier must be text or null.'
+        parsed = params.get('parsedCmd')
+        if not isinstance(parsed, list):
+            return 'Legacy parsed-command metadata must be an array.'
+        for item in parsed:
+            if (not isinstance(item, dict) or not isinstance(item.get('cmd'), str)
+                    or item.get('type') not in ('read', 'list_files', 'search', 'unknown')):
+                return 'Malformed legacy parsed-command metadata.'
+            if item['type'] == 'read' and any(
+                    not isinstance(item.get(key), str) for key in ('name', 'path')):
+                return 'Read metadata requires its name and path.'
+            for key in (('path', 'query') if item['type'] == 'search' else
+                        ('path',) if item['type'] == 'list_files' else ()):
+                if item.get(key) is not None and not isinstance(item[key], str):
+                    return 'Malformed optional parsed-command text.'
+        return None
+    changes = params.get('fileChanges')
+    if not isinstance(changes, dict) or not changes:
+        return 'Exact file changes are required; explanation alone is not a patch.'
+    if params.get('grantRoot') is not None and not isinstance(params['grantRoot'], str):
+        return 'Legacy grant root must be text or null.'
+    for path, change in changes.items():
+        if not isinstance(path, str) or not path or not isinstance(change, dict):
+            return 'Malformed file path or change body.'
+        kind = change.get('type')
+        if kind in ('add', 'delete'):
+            if not isinstance(change.get('content'), str):
+                return 'Add/delete changes require their exact content.'
+        elif kind == 'update':
+            if not isinstance(change.get('unified_diff'), str):
+                return 'Update changes require their exact unified diff.'
+            if change.get('move_path') is not None and not isinstance(change['move_path'], str):
+                return 'A move destination must be text or null.'
+        else:
+            return 'Unknown file-change variant.'
+    return None
+
+
+def bounded_decisions(method, params):
+    """Return only decisions whose native scope matches their Pi label."""
+    if method not in TYPED_APPROVAL_METHODS or not isinstance(params, dict):
+        return [], "Unknown native request; no permission can be granted."
+    if method == "item/permissions/requestApproval":
+        return ["deny"], ("This requests a turn/session permission profile, not one action. "
+                          "Only denial is supported here.")
+    modern = method.startswith("item/")
+    if method == "item/commandExecution/requestApproval":
+        offered = params.get("availableDecisions")
+        if offered is not None and (not isinstance(offered, list) or not offered):
+            return [], "Malformed or empty native decision list."
+        available = ({item for item in offered if isinstance(item, str)}
+                     if offered is not None else {"accept", "decline", "cancel"})
+        choices = (["deny"] if "decline" in available else [])
+        if "cancel" in available:
+            choices.append("cancel_campaign")
+        command = params.get("command")
+        if (params.get("kind", "command") != "command"
+                or not isinstance(command, str) or not command):
+            return choices, "Terminal-input or undisclosed command scope cannot be approved here."
+        if "accept" in available:
+            choices.insert(0, "approve_once")
+        return choices, ("One exact command in this managed invocation; no session policy or future grant."
+                         if "approve_once" in choices
+                         else "The provider did not offer a one-action grant.")
+    if params.get("grantRoot") is not None:
+        return ["deny", "cancel_campaign"], ("A grant-root request may persist for the session; "
+                                               "one-action approval is blocked.")
+    if method == "item/fileChange/requestApproval":
+        return ["deny", "cancel_campaign"], ("This callback lacks the exact file changes; "
+                                               "one-action approval remains blocked.")
+    if method in {'execCommandApproval', 'applyPatchApproval'}:
+        invalid = _legacy_action_error(method, params)
+        if invalid:
+            return ['deny', 'cancel_campaign'], invalid + ' One-action approval is blocked.'
+    if modern:
+        return ["approve_once", "deny", "cancel_campaign"], None
+    return ["approve_once", "deny", "cancel_campaign"], None
+
+
 def approval_response(method, choice, params):
     """Return only a documented exact response; never persist broader policy."""
     if method == "item/permissions/requestApproval":
+        if choice == "deny":
+            return {"permissions": {}, "scope": "turn"}
         raise CodexAppServerError("approval", "unsupported_bounded_permission",
                                   "permission profile cannot be granted for one action")
+    choices, _reason = bounded_decisions(method, params)
+    if choice not in choices:
+        raise CodexAppServerError("approval", "unsupported_decision",
+                                  "this exact request does not offer that bounded decision")
     modern = method in {
         "item/commandExecution/requestApproval", "item/fileChange/requestApproval"
     }
@@ -146,7 +253,8 @@ def approval_response(method, choice, params):
 def typed_approval(method, params, *, campaign_id, invocation_id, worker, process_id,
                    active_thread_id=None, active_turn_id=None, approval_binding=None,
                    reviewer_invocation_id=None, protocol_version=PROTOCOL_VERSION):
-    if protocol_version not in {PROTOCOL_VERSION, REVIEWER_PROTOCOL_VERSION}:
+    if protocol_version not in {PROTOCOL_VERSION, REVIEWER_PROTOCOL_VERSION,
+                                MANAGED_PROTOCOL_VERSION}:
         raise CodexAppServerError("qualification", "unsupported_protocol_version", "unsupported protocol")
     if method not in TYPED_APPROVAL_METHODS or not isinstance(params, dict):
         raise CodexAppServerError("approval", "approval_mapping_failure",
@@ -161,14 +269,25 @@ def typed_approval(method, params, *, campaign_id, invocation_id, worker, proces
     if not all(isinstance(v, str) and v for v in (thread_id, turn_id, item_id)):
         raise CodexAppServerError("approval", "approval_mapping_failure",
                                   "typed approval request lacks exact lineage")
-    raw_action = (params.get("command") or params.get("changes") or params.get("fileChanges")
-                  or params.get("permissions") or params.get("reason"))
-    action = (params.get("commandActions") or params.get("parsedCmd") or raw_action)
+    raw_action = (params.get('command') if method == 'execCommandApproval' else
+                  params.get('fileChanges') if method == 'applyPatchApproval' else
+                  (params.get("command") or params.get("changes") or params.get("fileChanges")
+                   or params.get("permissions") or params.get("reason")))
+    action = raw_action
+    choices, unsupported_reason = bounded_decisions(method, params)
     authority = {
         "method": method, "thread_id": thread_id, "turn_id": turn_id,
         "item_id": item_id, "action": action, "cwd": params.get("cwd"),
+        "kind": params.get("kind", "command"),
+        "environment_id": params.get("environmentId"),
+        "additional_permissions": params.get("additionalPermissions"),
+        "network_context": params.get("networkApprovalContext"),
     }
-    action_identity = {"method": method, "action": action, "cwd": params.get("cwd")}
+    action_identity = {"method": method, "action": action, "cwd": params.get("cwd"),
+        "kind": params.get("kind", "command"),
+        "environment_id": params.get("environmentId"),
+        "additional_permissions": params.get("additionalPermissions"),
+        "network_context": params.get("networkApprovalContext")}
     review_binding = _validated_review_approval_binding(
         approval_binding, campaign_id=campaign_id, worker=worker,
         reviewer_invocation_id=reviewer_invocation_id or invocation_id)
@@ -176,6 +295,11 @@ def typed_approval(method, params, *, campaign_id, invocation_id, worker, proces
                 "thread_id": thread_id, "turn_id": turn_id,
                 "item_id": item_id, "blocked_action_sha256": _digest(authority),
                 "approved_action_sha256": _digest(action_identity)}
+    protocol.update({"native_decision_choices": choices,
+                     "approval_id": params.get("approvalId"),
+                     "native_scope_explanation": unsupported_reason or
+                        "One exact action; no policy amendment or future grant.",
+                     "request_sha256": _digest(params)})
     if review_binding is not None:
         protocol.update({
             **review_binding,
@@ -188,7 +312,9 @@ def typed_approval(method, params, *, campaign_id, invocation_id, worker, proces
         "blocked_action": _safe(action),
         "why_required": _safe(params.get("reason") or "Codex requested native approval"),
         "requested_authority": _safe(json.dumps(authority, sort_keys=True)),
-        "resources": [_safe(params.get("cwd"))] if params.get("cwd") else [],
+        "resources": ([_safe(path) for path in raw_action]
+                      if method == 'applyPatchApproval' and isinstance(raw_action, dict)
+                      else [_safe(params.get("cwd"))] if params.get("cwd") else []),
         "reversible": None, "provider_code": method,
         "protocol": protocol,
         "exact_action": action_identity,
@@ -211,7 +337,8 @@ class CodexAppServerTransport:
     def __init__(self, *, codex_binary="codex", timeout_seconds=420,
                  decision_timeout_seconds=3600, popen=subprocess.Popen,
                  protocol_version=PROTOCOL_VERSION):
-        if protocol_version not in {PROTOCOL_VERSION, REVIEWER_PROTOCOL_VERSION}:
+        if protocol_version not in {PROTOCOL_VERSION, REVIEWER_PROTOCOL_VERSION,
+                                    MANAGED_PROTOCOL_VERSION}:
             raise CodexAppServerError("qualification", "unsupported_protocol_version", "unsupported protocol")
         self.protocol_version = protocol_version
         self.codex_binary = str(codex_binary)
@@ -225,13 +352,14 @@ class CodexAppServerTransport:
         # The CLI may emit a harmless PATH-alias warning on stderr in a
         # read-only home.  Only its dedicated stdout version line is identity.
         version = completed.stdout.strip()
-        expected = ("codex-cli 0.153.4" if self.protocol_version == REVIEWER_PROTOCOL_VERSION
+        expected = ("codex-cli 0.153.4" if self.protocol_version in {
+                    REVIEWER_PROTOCOL_VERSION, MANAGED_PROTOCOL_VERSION}
                     else SUPPORTED_CLI_VERSION)
         if completed.returncode or version != expected:
             raise CodexAppServerError("qualification", "unsupported_protocol_version",
                                       f"expected {expected}; received {_safe(version)}")
         schema_evidence = {}
-        if self.protocol_version == REVIEWER_PROTOCOL_VERSION:
+        if self.protocol_version in {REVIEWER_PROTOCOL_VERSION, MANAGED_PROTOCOL_VERSION}:
             schema_evidence = self._qualify_reviewer_schemas(environment)
         return {"protocol_version": self.protocol_version, "cli_version": version,
                 "typed_approval_methods": sorted(TYPED_APPROVAL_METHODS),
@@ -268,7 +396,7 @@ class CodexAppServerTransport:
     def run(self, *, cwd, prompt, output_schema, output_path, sandbox,
             campaign_id, invocation_id, worker, environment, approval_handler=None,
             allow_detached_continuation=True, approval_binding=None,
-            reviewer_invocation_id=None):
+            reviewer_invocation_id=None, progress_handler=None):
         reviewer_invocation_id = reviewer_invocation_id or invocation_id
         if self.protocol_version == REVIEWER_PROTOCOL_VERSION and sandbox != "read-only":
             raise CodexAppServerError("invocation", "reviewer_read_only_required",
@@ -292,7 +420,24 @@ class CodexAppServerTransport:
         thread_id = turn_id = None
         last_agent_text = None
         pending_grant = None
+        native_denied = False
         deadline = time.monotonic() + self.timeout_seconds
+
+        def progress(kind, text, state="running", item_id=None):
+            if progress_handler is None:
+                return
+            event = {"campaign_id": campaign_id, "invocation_id": invocation_id,
+                     "worker": worker, "process_id": process.pid, "kind": kind,
+                     "public_message": _safe(text), "state": state, "item_id": item_id}
+            event["event_id"] = "managed-" + _digest(event)
+            from datetime import datetime, timezone
+            event["created_at"] = datetime.now(timezone.utc).isoformat()
+            try:
+                progress_handler(event)
+            except (OSError, ValueError, PermissionError, RuntimeError):
+                lifecycle.append({"stage": "public_activity_unavailable"})
+
+        progress("starting", "Managed app-server process started.")
 
         def send(value):
             process.stdin.write(json.dumps(value, separators=(",", ":")) + "\n")
@@ -324,6 +469,7 @@ class CodexAppServerTransport:
                                 environment=environment, approval_handler=approval_handler,
                                 approval_binding=approval_binding,
                                 reviewer_invocation_id=reviewer_invocation_id,
+                                progress_handler=progress_handler,
                                 original_approval=pending_grant["approval"],
                                 decision=pending_grant["decision"])
                         time.sleep(0.05)
@@ -357,6 +503,29 @@ class CodexAppServerTransport:
                         lifecycle.append({"stage": "turn_started", "turn_id": turn_id})
                     continue
                 method = message.get("method")
+                if method in {"item/started", "item/completed"}:
+                    public_item = (message.get("params") or {}).get("item") or {}
+                    kind = public_item.get("type")
+                    if (method == "item/completed" and kind == "agentMessage"
+                            and public_item.get("phase") == "commentary"):
+                        progress("progress", public_item.get("text", ""),
+                                 item_id=public_item.get("id"))
+                    elif method == "item/started" and kind in {
+                            "commandExecution", "fileChange", "webSearch"}:
+                        action = ("editing" if kind == "fileChange" else
+                                  "searching" if kind == "webSearch" else "executing")
+                        types = {item.get("type") for item in public_item.get(
+                            "commandActions", []) if isinstance(item, dict)}
+                        if "read" in types:
+                            action = "reading"
+                        if "search" in types:
+                            action = "searching"
+                        command = str(public_item.get("command") or "")
+                        if (kind == "commandExecution"
+                                and re.search(r"\b(pytest|unittest|npm test|node --test)\b", command)):
+                            action = "testing"
+                        progress(action, "Managed Worker is " + action + ".",
+                                 item_id=public_item.get("id"))
                 if method in TYPED_APPROVAL_METHODS and "id" in message:
                     if self.protocol_version == REVIEWER_PROTOCOL_VERSION and method == "item/permissions/requestApproval":
                         raise CodexAppServerError("approval", "unsupported_bounded_permission",
@@ -370,6 +539,9 @@ class CodexAppServerTransport:
                     if approval["protocol"]["thread_id"] != thread_id or approval["protocol"]["turn_id"] != turn_id:
                         raise CodexAppServerError("approval", "lineage_mismatch", "approval request mismatches active turn")
                     decision = {"choice": "deny"}
+                    progress("permission_wait",
+                             "Waiting for Tanner's exact native permission decision.",
+                             "waiting", approval["protocol"]["item_id"])
                     if sandbox == "read-only" and method in WRITE_APPROVAL_METHODS:
                         response = approval_response(method, "deny", message["params"])
                         lifecycle.append({"stage": "reviewer_write_denied", **approval["protocol"]})
@@ -386,7 +558,14 @@ class CodexAppServerTransport:
                         # remaining turn budget after the exact decision returns.
                         deadline = extend_deadline_for_attention(
                             deadline, approval_wait_started, time.monotonic())
+                        if _digest(message['params']) != approval['protocol']['request_sha256']:
+                            raise CodexAppServerError('approval', 'approval_binding_failure',
+                                                      'native action changed during its decision wait')
                         response = approval_response(method, decision["choice"], message["params"])
+                        native_denied = decision["choice"] != "approve_once"
+                        progress("permission_result", "Native decision: " + decision["choice"],
+                                 "running" if decision["choice"] == "approve_once" else "failed",
+                                 approval["protocol"]["item_id"])
                         lifecycle.append({"stage": "approval_decided", "choice": decision["choice"],
                                           **approval["protocol"]})
                     if process.poll() is not None:
@@ -397,6 +576,7 @@ class CodexAppServerTransport:
                                 environment=environment, approval_handler=approval_handler,
                                 approval_binding=approval_binding,
                                 reviewer_invocation_id=reviewer_invocation_id,
+                                progress_handler=progress_handler,
                                 original_approval=approval, decision=decision)
                         raise CodexAppServerError("approval", "stale_app_server_process",
                                                   "approval process is no longer alive")
@@ -404,13 +584,15 @@ class CodexAppServerTransport:
                     if decision.get("choice") == "approve_once" and callable(decision.get("claim")):
                         pending_grant = {"approval": approval, "decision": decision,
                                          "request_id": message["id"]}
-                    if response.get("decision") in {"cancel", "abort"} and decision.get("choice") == "cancel_campaign":
+                    if response.get("decision") in ("cancel", "abort") and decision.get("choice") == "cancel_campaign":
                         raise CodexAppServerError("approval", "campaign_cancelled", "campaign cancelled by Tanner")
                     continue
-                if self.protocol_version == REVIEWER_PROTOCOL_VERSION and "id" in message and method:
+                if self.protocol_version in {REVIEWER_PROTOCOL_VERSION,
+                                              MANAGED_PROTOCOL_VERSION} and "id" in message and method:
                     raise CodexAppServerError("approval", "unsupported_request", "unsupported server request")
                 if method == "serverRequest/resolved" and pending_grant is not None:
-                    if self.protocol_version == REVIEWER_PROTOCOL_VERSION and (
+                    if self.protocol_version in {REVIEWER_PROTOCOL_VERSION,
+                                                  MANAGED_PROTOCOL_VERSION} and (
                             pending_grant.get("claimed")
                             or (message.get("params") or {}).get("threadId") != thread_id
                             or (message.get("params") or {}).get("requestId") != pending_grant["request_id"]):
@@ -421,7 +603,8 @@ class CodexAppServerTransport:
                     continue
                 if method == "turn/completed":
                     params = message.get("params") or {}
-                    if self.protocol_version == REVIEWER_PROTOCOL_VERSION and (
+                    if self.protocol_version in {REVIEWER_PROTOCOL_VERSION,
+                                                  MANAGED_PROTOCOL_VERSION} and (
                             params.get("threadId") != thread_id
                             or (params.get("turn") or {}).get("id") != turn_id):
                         raise CodexAppServerError("turn", "lineage_mismatch", "terminal turn identity mismatch")
@@ -438,9 +621,15 @@ class CodexAppServerTransport:
                     output_path = Path(output_path)
                     output_path.parent.mkdir(parents=True, exist_ok=True)
                     output_path.write_text(last_agent_text, encoding="utf-8")
+                    progress("final_result",
+                        "Managed turn ended after denial; the campaign did not succeed."
+                        if native_denied else
+                        "Managed provider turn completed; canonical result validation remains separate.",
+                        "failed" if native_denied else "completed")
                     break
                 if method == "item/completed":
-                    if self.protocol_version == REVIEWER_PROTOCOL_VERSION and (
+                    if self.protocol_version in {REVIEWER_PROTOCOL_VERSION,
+                                                  MANAGED_PROTOCOL_VERSION} and (
                             (message.get("params") or {}).get("threadId") != thread_id
                             or (message.get("params") or {}).get("turnId") != turn_id):
                         raise CodexAppServerError("turn", "lineage_mismatch", "item identity mismatch")
@@ -466,6 +655,13 @@ class CodexAppServerTransport:
                             status = (message.get("params") or {}).get("status")
                             complete("completed" if status in {None, "completed"} else "failed")
                         pending_grant = None
+        except BaseException as exc:
+            category = exc.category if isinstance(exc, CodexAppServerError) else "unavailable"
+            progress("transport_closed", "Managed connection ended (" + category
+                     + "); no automatic retry.",
+                     "failed" if category in {"campaign_cancelled", "turn_not_completed"}
+                     else "disconnected")
+            raise
         finally:
             if process.poll() is None:
                 process.terminate()
@@ -481,7 +677,7 @@ class CodexAppServerTransport:
     def _continue_detached(self, *, cwd, original_prompt, output_schema, output_path,
                            sandbox, campaign_id, invocation_id, worker, environment,
                            approval_handler, approval_binding, reviewer_invocation_id,
-                           original_approval, decision):
+                           original_approval, decision, progress_handler=None):
         if original_approval["provider_code"] not in {
                 "item/commandExecution/requestApproval", "execCommandApproval"}:
             raise CodexAppServerError("continuation", "action_not_reconstructable",
@@ -521,7 +717,8 @@ class CodexAppServerTransport:
                 campaign_id=campaign_id, invocation_id=continuation_id, worker=worker,
                 environment=environment, approval_handler=continuation_handler,
                 allow_detached_continuation=False, approval_binding=approval_binding,
-                reviewer_invocation_id=reviewer_invocation_id)
+                reviewer_invocation_id=reviewer_invocation_id,
+                progress_handler=progress_handler)
             if not claimed:
                 raise CodexAppServerError("continuation", "approved_action_not_claimed",
                                           "fresh continuation did not claim the exact action")
@@ -538,8 +735,25 @@ class CodexAppServerTransport:
 
 
 def exec_compatible_app_server_runner(*, campaign_id, invocation_id, worker,
-                                      approval_handler, codex_binary="codex"):
+                                      approval_handler, codex_binary="codex",
+                                      progress_handler=None):
     """Adapt the existing adapter's process seam without changing its owner."""
+    context_reader = None
+
+    def bind_attention_context(reader):
+        nonlocal context_reader
+        if context_reader is not None or not callable(reader):
+            raise PermissionError("managed candidate context is missing or already bound")
+        context_reader = reader
+
+    def managed_approval(approval, **kwargs):
+        if context_reader is None or approval_handler is None:
+            raise CodexAppServerError("approval", "managed_candidate_binding_unavailable",
+                "This Worker has no canonical candidate/Attention binding; native permission remains blocked.")
+        context = context_reader()
+        approval = {**approval, "protocol": {**approval["protocol"], **context}}
+        return approval_handler(approval, **kwargs)
+
     def run(command, *, prompt, environment, timeout):
         if "--output-schema" not in command:
             return subprocess.run(command, input=prompt, text=True, capture_output=True,
@@ -552,12 +766,15 @@ def exec_compatible_app_server_runner(*, campaign_id, invocation_id, worker,
         schema_path = Path(value_after("--output-schema"))
         try:
             return CodexAppServerTransport(codex_binary=codex_binary,
-                timeout_seconds=timeout).run(cwd=value_after("--cd"), prompt=prompt,
+                timeout_seconds=timeout,
+                protocol_version=MANAGED_PROTOCOL_VERSION).run(
+                    cwd=value_after("--cd"), prompt=prompt,
                     output_schema=json.loads(schema_path.read_text(encoding="utf-8")),
                     output_path=value_after("--output-last-message"),
                     sandbox=value_after("--sandbox"), campaign_id=campaign_id,
                     invocation_id=invocation_id, worker=worker, environment=environment,
-                    approval_handler=approval_handler)
+                    approval_handler=managed_approval,
+                    progress_handler=progress_handler)
         except CodexAppServerError as exc:
             from src.runtime.component_supervision import ComponentReceiptStore
             component = ("reviewer" if "review" in str(worker.get("role", ""))
@@ -566,4 +783,5 @@ def exec_compatible_app_server_runner(*, campaign_id, invocation_id, worker,
                 category=exc.category, provider_code=exc.provider_code,
                 exception=exc, service_state="needs_tanner", notify=True)
             raise
+    run.bind_attention_context = bind_attention_context
     return run

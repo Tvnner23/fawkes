@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta name="fawkes-build-id" content="__FAWKES_BUILD_ID__">
+  <meta name="fawkes-console-context" content="__FAWKES_CONSOLE_CONTEXT__">
   <title>Fawkes Developer Console</title>
   <link rel="stylesheet" href="/dev-console/console.css">
 </head>
@@ -11,67 +12,195 @@
   <main id="dev-console" data-idle-seconds="60" aria-label="Fawkes developer console">
     <header class="console-header">
       <div class="brand-row">
-        <div>
+        <div class="brand-identity">
           <p class="eyebrow">FAWKES · DEVELOPMENT</p>
           <h1 id="page-title">Activity Summary</h1>
         </div>
-        <span id="connection-state" class="state unavailable" aria-live="polite">UNAVAILABLE</span>
+        <div class="feed-freshness" aria-label="Managed Worker feed status">
+          <span id="connection-state" class="state unavailable" aria-live="polite">◌ Worker unknown</span>
+          <span id="last-sync" class="freshness-time">No verified sync</span>
+        </div>
+        <div id="console-idle-slot" class="idle-slot">
+          <button id="console-idle" type="button" class="idle-button" aria-label="Enter Matrix idle screen">Idle</button>
+        </div>
+      </div>
+      <div class="status-cluster" aria-label="Preview, campaign and Attention status">
+        <span id="preview-context" class="context-badge">CONTEXT UNKNOWN</span>
+        <span id="bridge-state" class="context-badge">PC BRIDGE NOT OBSERVED</span>
+        <span id="campaign-state" class="context-badge">JOB UNKNOWN</span>
+        <span id="attention-state" class="context-badge">ATTENTION UNKNOWN</span>
       </div>
       <nav class="page-nav" aria-label="Console pages">
         <button id="previous-page" type="button" aria-label="Previous page">‹</button>
         <ol id="page-indicators">
-          <li><button type="button" data-page-target="0" aria-label="Activity Summary" aria-current="page">1</button></li>
-          <li><button type="button" data-page-target="1" aria-label="Campaign Status">2</button></li>
-          <li><button type="button" data-page-target="2" aria-label="Repository View">3</button></li>
-          <li><button type="button" data-page-target="3" aria-label="Architecture View">4</button></li>
+          <li><button type="button" data-page-target="0" aria-label="Activity Summary" aria-current="page">Summary</button></li>
+          <li><button type="button" data-page-target="1" aria-label="Campaign Status">Campaign</button></li>
+          <li><button type="button" data-page-target="2" aria-label="Repository View">Repo</button></li>
+          <li><button type="button" data-page-target="3" aria-label="Architecture View">System map</button></li>
         </ol>
         <button id="next-page" type="button" aria-label="Next page">›</button>
       </nav>
     </header>
 
     <section id="page-stack" class="page-stack">
-      <section class="console-page" data-page="0" aria-labelledby="summary-heading">
+      <section class="console-page" data-page="0" aria-label="Activity Summary">
         <div class="page-scroll" tabindex="0">
-          <div class="section-heading">
-            <p class="eyebrow">WHAT FAWKES IS DOING</p>
-            <h2 id="summary-heading">Activity Summary</h2>
+          <div class="page-intro">
+            <p class="eyebrow">YOUR REQUESTED JOB</p>
             <p id="summary-intro">Waiting for an authenticated read-only projection.</p>
           </div>
           <div id="attention-slot"></div>
-          <div id="activity-feed" class="card-list" aria-live="polite"></div>
+          <div id="activity-feed" class="job-list" aria-live="polite"></div>
+          <section class="update-panel" aria-labelledby="update-heading">
+            <div class="panel-heading">
+              <h3 id="update-heading">Completed + working on</h3>
+              <button id="save-console-update" type="button" class="primary-button">Send update to PC</button>
+            </div>
+            <p id="update-result" aria-live="polite">No update prepared in this session.</p>
+            <div id="prepared-updates" class="prepared-updates"></div>
+          </section>
         </div>
       </section>
 
-      <section class="console-page" data-page="1" aria-labelledby="campaign-heading" hidden>
+      <section class="console-page" data-page="1" aria-label="Campaign Status" hidden>
         <div class="page-scroll" tabindex="0">
-          <div class="section-heading">
-            <p class="eyebrow">CANONICAL CAMPAIGNS</p>
-            <h2 id="campaign-heading">Campaign Status</h2>
-            <p>Read-only graph position from canonical campaign projections.</p>
+          <div id="campaign-heading" class="page-intro">
+            <p>Choose an open or historical record. The graph separates its recorded transitions from the reference route.</p>
           </div>
-          <div id="campaign-list" class="card-list"></div>
+          <div class="view-toolbar">
+            <label for="campaign-selector">Campaign</label>
+            <select id="campaign-selector" aria-label="Select current or historical campaign"></select>
+            <span id="campaign-history-state" class="context-badge">NO RECORD SELECTED</span>
+          </div>
+          <div id="campaign-empty" class="empty-state" hidden></div>
+          <div id="campaign-dashboard">
+            <div id="campaign-widgets" class="widget-grid" aria-label="Campaign facts"></div>
+            <div class="campaign-workspace">
+              <section aria-labelledby="execution-graph-heading">
+                <div class="panel-heading">
+                  <h3 id="execution-graph-heading">Execution graph</h3>
+                  <span>Reference route + recorded evidence</span>
+                </div>
+                <div class="graph-legend" aria-label="Execution graph legend">
+                  <span><i class="reference"></i>Reference route</span>
+                  <span><i class="established"></i>Recorded transition</span>
+                  <span><i class="correction"></i>Recorded correction loop</span>
+                </div>
+                <svg id="campaign-graph" class="campaign-graph gesture-surface"
+                     viewBox="0 0 660 238" role="group" aria-label="Selected campaign execution route"></svg>
+              </section>
+              <aside id="campaign-detail" class="drilldown-panel campaign-detail" aria-live="polite"></aside>
+            </div>
+          </div>
         </div>
       </section>
 
-      <section class="console-page" data-page="2" aria-labelledby="repository-heading" hidden>
+      <section class="console-page" data-page="2" aria-label="Repository View" hidden>
         <div class="page-scroll" tabindex="0">
-          <div class="section-heading">
-            <p class="eyebrow">AUTHORIZED WORKSPACE</p>
-            <h2 id="repository-heading">Repository View</h2>
-            <p>Body-free campaign bindings only. Source and diff bodies are not loaded here.</p>
+          <div id="repository-heading" class="page-intro">
+            <p>Files changed by the selected HEAD revision, with a separate summary of current working-tree changes.</p>
           </div>
-          <div id="repository-content" class="card-list"></div>
+          <div id="repository-widgets" class="widget-grid" aria-label="Repository facts"></div>
+          <div id="repository-browser" class="repository-browser">
+            <nav id="repository-tree" class="repository-tree gesture-surface" aria-label="Files in the selected revision"></nav>
+          </div>
+          <section id="repository-detail-view" class="repository-detail-view gesture-surface" aria-live="polite" hidden>
+            <div class="detail-toolbar">
+              <button id="repository-back" type="button" class="secondary-button">← Back to files</button>
+              <span id="repository-comparison" class="context-badge"></span>
+            </div>
+            <h3 id="repository-file-heading"></h3>
+            <p id="repository-file-summary" class="detail-summary"></p>
+            <details id="repository-technical-details" class="metadata-details">
+              <summary>Technical details</summary>
+              <div id="repository-metadata"></div>
+            </details>
+            <pre id="repository-diff" class="code-scroll repository-diff"></pre>
+          </section>
+          <div id="repository-empty" class="empty-state" hidden></div>
         </div>
       </section>
 
-      <section class="console-page" data-page="3" aria-labelledby="architecture-heading" hidden>
+      <section class="console-page" data-page="3" aria-label="Architecture View" hidden>
         <div class="page-scroll" tabindex="0">
-          <div class="section-heading">
-            <p class="eyebrow">REFERENCE · NOT AUTHORITY</p>
-            <h2 id="architecture-heading">Architecture View</h2>
-            <p>This explanatory map is paired with separately labeled live component status.</p>
+          <div id="architecture-heading" class="page-intro architecture-heading-row">
+            <p>Explore what Fawkes is built from and the complete recorded direction, without treating plans as running services.</p>
+            <button id="architecture-reset" type="button" class="secondary-button">Fit / reset</button>
           </div>
-          <div id="architecture-content" class="card-list"></div>
+          <div id="architecture-modes" class="mode-switch" role="group" aria-label="System map mode">
+            <button type="button" data-architecture-mode="current" aria-pressed="true">Current</button>
+            <button type="button" data-architecture-mode="roadmap" aria-pressed="false">Roadmap</button>
+            <button type="button" data-architecture-mode="combined" aria-pressed="false">Combined</button>
+          </div>
+          <div class="architecture-workspace">
+            <div id="architecture-overview" class="architecture-overview">
+              <div class="maturity-legend" aria-label="Implementation maturity legend">
+                <span class="built">Built</span><span class="progressing">In progress</span>
+                <span class="planned">Planned</span><span class="unknown">Unknown</span>
+              </div>
+              <svg id="architecture-map" class="architecture-map gesture-surface"
+                   viewBox="0 0 660 390" role="group" aria-label="Fawkes component and connection diagram">
+                <defs>
+                  <marker id="architecture-arrow" viewBox="0 0 10 10" refX="8" refY="5"
+                          markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                    <path d="M 0 0 L 10 5 L 0 10 z"></path>
+                  </marker>
+                </defs>
+                <g class="architecture-edges" aria-hidden="true">
+                  <path d="M160 66 H205"></path><text x="165" y="57">evidence</text>
+                  <path d="M345 66 H390"></path><text x="350" y="57">learns</text>
+                  <path d="M520 66 H535"></path>
+                  <path d="M90 134 V98"></path><text x="96" y="120">identity</text>
+                  <path d="M160 166 H205"></path><text x="164" y="156">requests</text>
+                  <path d="M345 166 L390 142"></path><text x="350" y="139">guards</text>
+                  <path d="M345 182 C410 220 470 220 535 182"></path><text x="435" y="207">coordinates</text>
+                  <path d="M600 198 L500 260"></path><text x="543" y="238">returns</text>
+                  <path d="M455 174 V260"></path><text x="461" y="246">permits</text>
+                  <path d="M275 198 V292"></path><text x="281" y="253">informs</text>
+                  <path d="M455 98 L325 292"></path><text x="338" y="258">continuity</text>
+                </g>
+                <g class="architecture-node built" data-architecture-node="identity" tabindex="0" role="button" transform="translate(20 34)">
+                  <rect width="140" height="64"></rect><text x="70" y="25">Phoenix identity</text><text class="node-maturity" x="70" y="47">BUILT</text>
+                </g>
+                <g class="architecture-node built" data-architecture-node="archive" tabindex="0" role="button" transform="translate(205 34)">
+                  <rect width="140" height="64"></rect><text x="70" y="25">Archive & evidence</text><text class="node-maturity" x="70" y="47">BUILT</text>
+                </g>
+                <g class="architecture-node built" data-architecture-node="memory" tabindex="0" role="button" transform="translate(390 34)">
+                  <rect width="130" height="64"></rect><text x="65" y="25">Memory</text><text class="node-maturity" x="65" y="47">BUILT</text>
+                </g>
+                <g class="architecture-node built" data-architecture-node="library" tabindex="0" role="button" transform="translate(535 34)">
+                  <rect width="105" height="64"></rect><text x="52" y="25">Library</text><text class="node-maturity" x="52" y="47">BUILT</text>
+                </g>
+                <g class="architecture-node built" data-architecture-node="clients" tabindex="0" role="button" transform="translate(20 134)">
+                  <rect width="140" height="64"></rect><text x="70" y="25">Clients & console</text><text class="node-maturity" x="70" y="47">BUILT</text>
+                </g>
+                <g class="architecture-node progressing" data-architecture-node="development" tabindex="0" role="button" transform="translate(205 134)">
+                  <rect width="140" height="64"></rect><text x="70" y="25">Development</text><text class="node-maturity" x="70" y="47">IN PROGRESS</text>
+                </g>
+                <g class="architecture-node built" data-architecture-node="attention" tabindex="0" role="button" transform="translate(390 110)">
+                  <rect width="130" height="64"></rect><text x="65" y="25">Native Attention</text><text class="node-maturity" x="65" y="47">BUILT</text>
+                </g>
+                <g class="architecture-node progressing" data-architecture-node="workers" tabindex="0" role="button" transform="translate(535 134)">
+                  <rect width="105" height="64"></rect><text x="52" y="25">Workers</text><text class="node-maturity" x="52" y="47">IN PROGRESS</text>
+                </g>
+                <g class="architecture-node built" data-architecture-node="application_git" tabindex="0" role="button" transform="translate(390 260)">
+                  <rect width="130" height="64"></rect><text x="65" y="25">Application & Git</text><text class="node-maturity" x="65" y="47">BUILT</text>
+                </g>
+                <g class="architecture-node planned" data-architecture-node="embodiment" tabindex="0" role="button" transform="translate(205 292)">
+                  <rect width="140" height="64"></rect><text x="70" y="25">Physical embodiment</text><text class="node-maturity" x="70" y="47">PLANNED</text>
+                </g>
+              </svg>
+            </div>
+            <section id="roadmap-inventory" class="roadmap-inventory" hidden>
+              <div class="roadmap-toolbar">
+                <label for="roadmap-filter">Find a capability</label>
+                <input id="roadmap-filter" type="search" autocomplete="off" maxlength="80" placeholder="Optional name or phase">
+              </div>
+              <p id="roadmap-coverage" class="coverage-state"></p>
+              <div id="roadmap-groups" class="roadmap-groups"></div>
+            </section>
+            <section id="architecture-detail" class="drilldown-panel" aria-live="polite"></section>
+          </div>
         </div>
       </section>
     </section>
@@ -81,6 +210,10 @@
       <span>Swipe or ← → · wheel scroll · wheel click expands</span>
     </footer>
   </main>
+  <section id="native-permission" aria-live="polite" hidden></section>
+  <link rel="stylesheet" href="/native-attention.css">
+  <script src="/attention-binding.js"></script>
+  <script src="/native-attention.js"></script>
   <script src="/dev-console/console.js"></script>
 </body>
 </html>

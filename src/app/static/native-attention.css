@@ -1,0 +1,14 @@
+#native-permission{position:fixed;inset:64px 12px 12px;z-index:10000;background:#10221d;color:#f0fff6;border:2px solid #ffd16d;border-radius:14px;padding:18px;overflow:auto;font:17px system-ui;box-shadow:0 12px 45px #000b}
+#native-permission[hidden]{display:none}
+#native-permission h2{font-size:22px;margin:0 0 10px}
+#native-permission p{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.4}
+#native-permission button{min-height:52px;margin:6px;padding:10px 18px;border-radius:8px;background:#d1f5df;color:#092018;border:2px solid #819d90;font:700 17px system-ui}
+#native-permission button:disabled{opacity:.5}
+#native-permission details{font-size:13px}
+#native-permission pre{white-space:pre-wrap;overflow-wrap:anywhere}
+#native-permission input{min-height:46px;max-width:95%;font:18px system-ui}
+#permission-launcher{position:fixed;left:10px;bottom:10px;z-index:200;min-height:44px}
+.managed-worker-feed{border-left:3px solid #73cba6;padding-left:12px}
+#console-login{padding:24px;max-width:680px;margin:auto;font:18px system-ui}
+#console-login form{display:flex;flex-wrap:wrap;gap:12px;align-items:center}
+#console-login input,#console-login button{min-height:48px;font:18px system-ui;max-width:100%}

@@ -7,7 +7,9 @@
   "use strict";
 
   const ENDPOINTS = Object.freeze({
-    projection: "/api/development/dev-console"
+    projection: "/api/development/dev-console",
+    updates: "/api/development/console-updates",
+    csrf: "/api/session/console-csrf"
   });
   const PROJECTION_SCHEMA = "fawkes.dev_console.read_only.v1";
   const PAGE_TITLES = Object.freeze([
@@ -18,10 +20,19 @@
   ]);
   const ATTENTION_ID = /^attention-[a-f0-9]{64}$/;
   const HEX_DIGEST = /^[a-f0-9]{64}$/;
+  const GIT_MODE = /^[0-7]{6}$/;
+  const GIT_OID = /^[a-f0-9]{40,64}$/;
   const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]*$/;
   const TERMINAL_CAMPAIGN_STATES = new Set([
     "succeeded", "failed_safe", "cancelled", "denied", "expired"
   ]);
+  const CONNECTION_LABELS = Object.freeze({
+    live: "◉ Live",
+    sample: "SAMPLE DATA",
+    stale: "◷ Stale",
+    disconnected: "⊘ Disconnected",
+    unavailable: "◌ Worker unknown"
+  });
 
   function isObject(value) {
     return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -44,6 +55,17 @@
   function safeDigest(value) {
     const text = safeText(value, 64).toLowerCase();
     return HEX_DIGEST.test(text) ? text : "";
+  }
+
+  function safeGitOid(value) {
+    const text = safeText(value, 64).toLowerCase();
+    return GIT_OID.test(text) ? text : "";
+  }
+
+  function safeMultilineText(value, maximum) {
+    if (typeof value !== "string") return "";
+    return value.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "")
+      .slice(0, maximum || 2048);
   }
 
   function finiteInteger(value, fallback) {
@@ -72,6 +94,44 @@
     const observed = Number.isFinite(value.observedAtMs) ? value.observedAtMs : now;
     const threshold = Number.isFinite(value.staleAfterMs) ? Math.max(1, value.staleAfterMs) : 30000;
     return now - observed > threshold ? "stale" : "live";
+  }
+
+  function previewContextLabel(build, candidateContext) {
+    const context = safeIdentifier(candidateContext, 100);
+    if (context.startsWith("UNREVIEWED:")) {
+      return "UNREVIEWED · " + context.slice(-12);
+    }
+    if (!build) return "CONTEXT UNKNOWN";
+    if (build.mode === "development_checkout") return "DEVELOPMENT PREVIEW";
+    if (build.mode === "approved_release") return "APPROVED RELEASE";
+    return "CONTEXT UNKNOWN";
+  }
+
+  function isOpenCampaignRecord(campaign) {
+    return Boolean(campaign && !campaign.terminal
+      && campaign.status !== "historical_contract_unavailable"
+      && campaign.status !== "integrity_unavailable");
+  }
+
+  function campaignObservation(campaigns, projectionState) {
+    if (projectionState === "sample") return {kind: "sample", label: "SAMPLE CAMPAIGN DATA"};
+    if (projectionState !== "live") return {kind: "unknown", label: "EXECUTION UNKNOWN"};
+    const values = Array.isArray(campaigns) ? campaigns : [];
+    if (!values.length) return {kind: "unavailable", label: "EXECUTION UNAVAILABLE"};
+    if (values.some(isOpenCampaignRecord)) {
+      return {kind: "unknown", label: "EXECUTION NOT OBSERVED"};
+    }
+    return {kind: "inactive", label: "NO OPEN CAMPAIGN RECORD"};
+  }
+
+  function attentionObservation(attention, projectionState) {
+    if (projectionState === "sample") return {kind: "sample", label: "SAMPLE ATTENTION"};
+    if (projectionState !== "live") return {kind: "unknown", label: "ATTENTION UNKNOWN"};
+    const values = Array.isArray(attention) ? attention : [];
+    if (values.some((item) => item.actionable)) {
+      return {kind: "actionable", label: "ACTION REQUIRED"};
+    }
+    return {kind: "inactive", label: "NO ACTIONABLE REQUEST"};
   }
 
   function isHorizontalSwipe(startX, startY, endX, endY, options) {
@@ -188,11 +248,12 @@
     if (!campaignId || !status) return null;
     const result = {
       campaign_id: campaignId,
-      objective: safeText(value.objective, 360) || "Objective unavailable",
+      objective: safeText(value.objective, 500) || campaignId,
       status,
       current_stage: safeIdentifier(value.current_stage, 120) || status,
       iteration: finiteInteger(value.iteration, 0),
       maximum_iterations: finiteInteger(value.maximum_iterations, 0),
+      satisfied_condition_count: finiteInteger(value.satisfied_condition_count, null),
       cancelled: value.cancelled === true,
       terminal: TERMINAL_CAMPAIGN_STATES.has(status),
       creates_authority: false
@@ -204,6 +265,23 @@
       ? value.recovery_references.map(normalizeReference).filter(Boolean).slice(0, 32) : [];
     result.activity = Array.isArray(value.activity)
       ? value.activity.map(normalizeActivity).filter(Boolean).slice(-80) : [];
+    result.managed = Array.isArray(value.managed_worker_activity) ? value.managed_worker_activity.slice(0,8).map(item=>({
+      invocation_id:safeIdentifier(item.invocation_id,180), worker_id:safeIdentifier(item.worker_id,180),
+      updated_at:safeText(item.updated_at,80),
+      state:['running','waiting','completed','failed','disconnected'].includes(item.state)?item.state:'unknown',
+      events:Array.isArray(item.events)?item.events.slice(-64).map(event=>({event_id:safeIdentifier(event.event_id,180),
+        created_at:safeText(event.created_at,80),kind:safeIdentifier(event.kind,80),
+        state:safeIdentifier(event.state,80),public_message:safeText(event.public_message,2000)})):[]
+    })) : [];
+    const observations = isObject(value.operational_learning_observations)
+      ? value.operational_learning_observations : {};
+    result.observations = {};
+    for (const field of ["builder_invocations", "logical_reviews",
+      "review_transport_attempts", "reviewer_process_invocations", "correction_count",
+      "reviewer_defect_count", "source_section_count"]) {
+      const count = finiteInteger(observations[field], null);
+      if (count !== null) result.observations[field] = count;
+    }
     return result;
   }
 
@@ -294,6 +372,134 @@
     }};
   }
 
+  function normalizeRepositoryResponse(payload) {
+    if (!isObject(payload) || payload.creates_authority !== false
+        || payload.creates_continuing_authority !== false) {
+      return {valid: false, repository: null};
+    }
+    const branch = safeIdentifier(payload.branch, 180);
+    const head = safeGitOid(payload.head);
+    const comparisonBase = payload.comparison_base === "root"
+      ? "root" : safeGitOid(payload.comparison_base);
+    const selectionBasis = safeIdentifier(payload.selection_basis, 80);
+    const counts = isObject(payload.status_summary) ? payload.status_summary : null;
+    if (!branch || !head || !comparisonBase
+        || selectionBasis !== "head_commit_paths" || !counts) {
+      return {valid: false, repository: null};
+    }
+    const statusSummary = {};
+    for (const field of ["dirty_paths", "tracked_changes", "untracked_paths",
+      "staged_paths", "deleted_paths"]) {
+      const count = finiteInteger(counts[field], null);
+      if (count === null) return {valid: false, repository: null};
+      statusSummary[field] = count;
+    }
+    if (!Array.isArray(payload.files) || payload.files.length > 32) {
+      return {valid: false, repository: null};
+    }
+    const files = [];
+    for (const raw of payload.files) {
+      if (!isObject(raw)) return {valid: false, repository: null};
+      const path = safeText(raw.path, 500);
+      const parts = path.split("/");
+      const file = {
+        path,
+        mode: safeText(raw.mode, 6),
+        object_type: safeIdentifier(raw.object_type, 32),
+        object_id: safeGitOid(raw.object_id),
+        head_change: safeIdentifier(raw.head_change, 8),
+        worktree_state: safeIdentifier(raw.worktree_state, 32),
+        revision: safeGitOid(raw.revision),
+        review_status: safeIdentifier(raw.review_status, 64),
+        diff_excerpt: safeMultilineText(raw.diff_excerpt, 2048)
+      };
+      if (!path || path.startsWith("/") || parts.some((part) => !part || part === "." || part === "..")
+          || !GIT_MODE.test(file.mode) || file.object_type !== "blob"
+          || !file.object_id || !file.revision || file.revision !== head
+          || !file.head_change || !file.worktree_state || !file.review_status) {
+        return {valid: false, repository: null};
+      }
+      files.push(file);
+    }
+    return {valid: true, repository: {
+      branch,
+      head,
+      comparison_base: comparisonBase,
+      selection_basis: selectionBasis,
+      status_summary: statusSummary,
+      files,
+      creates_authority: false,
+      creates_continuing_authority: false
+    }};
+  }
+
+  function normalizeJobsResponse(payload) {
+    if (!Array.isArray(payload) || payload.length > 32) return {valid: false, jobs: []};
+    const jobs = [];
+    for (const raw of payload) {
+      if (!isObject(raw) || raw.creates_authority !== false) return {valid: false, jobs: []};
+      const job = {
+        job_id: safeIdentifier(raw.job_id, 180), objective: safeText(raw.objective, 500),
+        state: safeIdentifier(raw.state, 32), recorded_status: safeIdentifier(raw.recorded_status, 100),
+        current_step: safeText(raw.current_step, 180), last_activity_at: safeText(raw.last_activity_at, 80),
+        accomplished: safeText(raw.accomplished, 500), gained: safeText(raw.gained, 500),
+        next: safeText(raw.next, 500), worker: normalizeWorker(raw.worker),
+        successful: raw.successful, historical: raw.historical, creates_authority: false
+      };
+      if (!job.job_id || !job.objective || !["working", "done", "needs_you"].includes(job.state)
+          || !job.recorded_status || typeof job.successful !== "boolean"
+          || typeof job.historical !== "boolean"
+          || (job.last_activity_at && !Number.isFinite(Date.parse(job.last_activity_at)))) {
+        return {valid: false, jobs: []};
+      }
+      jobs.push(job);
+    }
+    return {valid: true, jobs};
+  }
+
+  function normalizeRoadmapResponse(payload) {
+    if (!isObject(payload) || payload.creates_authority !== false
+        || payload.creates_continuing_authority !== false
+        || payload.schema_version !== "fawkes.console.roadmap.v1"
+        || !Array.isArray(payload.phases) || !Array.isArray(payload.tracks)) {
+      return {valid: false, roadmap: null};
+    }
+    const normalizeItem = (raw, kind) => {
+      if (!isObject(raw)) return null;
+      const item = {id: safeIdentifier(raw.id, 100), kind, name: safeText(raw.name, 240),
+        summary: safeText(raw.summary, 600), maturity: safeIdentifier(raw.maturity, 40),
+        source: safeText(raw.source, 500), source_status: safeIdentifier(raw.source_status, 60),
+        source_sha256: safeDigest(raw.source_sha256), source_revision: safeGitOid(raw.source_revision),
+        source_bytes: finiteInteger(raw.source_bytes, null),
+        source_excerpt: typeof raw.source_excerpt === "string" && raw.source_excerpt.length <= 16384
+          ? raw.source_excerpt : "",
+        group: safeText(raw.group, 160), mapped_component: safeIdentifier(raw.mapped_component, 80),
+        runtime_state: safeIdentifier(raw.runtime_state, 40),
+        prerequisites: Array.isArray(raw.prerequisites)
+          ? raw.prerequisites.map((item) => safeIdentifier(item, 100)).filter(Boolean).slice(0, 40) : []};
+      if (!item.id || !item.name || !item.summary || !item.maturity || !item.source
+          || !item.source_status || !item.source_sha256 || !item.source_revision
+          || item.source_bytes === null || item.source_bytes < 1
+          || !item.group || item.summary.split(/\s+/).length < 5) return null;
+      if (kind === "phase") item.number = finiteInteger(raw.number, null);
+      return item;
+    };
+    const phases = payload.phases.map((raw) => normalizeItem(raw, "phase"));
+    const tracks = payload.tracks.map((raw) => normalizeItem(raw, "track"));
+    const expected = Array.from({length: 40}, (_, number) => "phase-" + number);
+    if (phases.some((item) => !item || item.number === null) || tracks.some((item) => !item)
+        || phases.map((item) => item.id).join("|") !== expected.join("|")
+        || !Array.isArray(payload.expected_phase_ids)
+        || payload.expected_phase_ids.join("|") !== expected.join("|")
+        || payload.coverage_complete !== true) return {valid: false, roadmap: null};
+    const sourceSha = safeDigest(payload.source_sha256);
+    const sourceRevision = safeGitOid(payload.source_revision);
+    if (!sourceSha || !sourceRevision) return {valid: false, roadmap: null};
+    return {valid: true, roadmap: {phases, tracks, source_path: safeText(payload.source_path, 500),
+      source_sha256: sourceSha, source_revision: sourceRevision, coverage_complete: true,
+      creates_authority: false, creates_continuing_authority: false}};
+  }
+
   function normalizePayloads(payload, options) {
     const values = payload || {};
     const opts = options || {};
@@ -307,11 +513,15 @@
     const campaigns = normalizeCampaignResponse(values.campaigns, opts);
     const attention = normalizeAttentionResponse(values.attention, opts);
     const runtime = normalizeRuntimeResponse(values.components);
+    const repository = normalizeRepositoryResponse(values.repository);
+    const jobs = normalizeJobsResponse(values.jobs);
+    const roadmap = normalizeRoadmapResponse(values.roadmap);
     const expected = safeIdentifier(opts.expectedBuildId, 180);
     const buildMismatch = Boolean(expected && expected !== "__FAWKES_BUILD_ID__"
       && status.build && status.build.release_id !== expected);
     const malformed = !(schemaValid && authorityClosed && observationValid
-      && status.valid && campaigns.valid && attention.valid && runtime.valid);
+      && status.valid && campaigns.valid && attention.valid && runtime.valid
+      && repository.valid && jobs.valid && roadmap.valid);
     return {
       ok: !malformed && !buildMismatch,
       malformed,
@@ -322,6 +532,9 @@
       campaigns: campaigns.campaigns,
       attention: attention.attention,
       components: runtime.components,
+      repository: repository.repository,
+      jobs: jobs.jobs,
+      roadmap: roadmap.roadmap,
       creates_authority: false,
       creates_continuing_authority: false
     };
@@ -379,6 +592,17 @@
     return node;
   }
 
+  function svgElement(documentRef, tag, attributes, text) {
+    const node = typeof documentRef.createElementNS === "function"
+      ? documentRef.createElementNS("http://www.w3.org/2000/svg", tag)
+      : documentRef.createElement(tag);
+    for (const [name, value] of Object.entries(attributes || {})) {
+      node.setAttribute(name, String(value));
+    }
+    if (text !== undefined) node.textContent = safeText(text, 240);
+    return node;
+  }
+
   function detailList(documentRef, entries) {
     const list = element(documentRef, "ul");
     for (const entry of entries) {
@@ -410,15 +634,44 @@
 
   function activityExplanation(event) {
     const labels = {
-      provider_action_reserved: "A bounded provider action was reserved by the canonical campaign.",
-      builder_return_retained: "The canonical campaign retained a Worker return record.",
-      independent_review_retained: "The canonical campaign retained an independent review record.",
-      reviewed_application_completed: "The canonical application owner recorded its terminal result.",
-      reviewed_git_completed: "The canonical Git owner recorded its terminal result.",
-      rider_cancelled_campaign: "Tanner cancelled the campaign through the canonical owner.",
-      provider_completion_ambiguous: "Provider completion was ambiguous; the campaign stopped fail-safe."
+      provider_action_reserved: "Fawkes set aside the bounded allowance for one provider action.",
+      builder_return_retained: "Fawkes saved the Worker result.",
+      independent_review_retained: "Fawkes saved an independent review.",
+      reviewed_application_completed: "The reviewed changes finished applying.",
+      reviewed_git_completed: "The reviewed local Git update finished.",
+      rider_cancelled_campaign: "Tanner ended the campaign.",
+      provider_completion_ambiguous: "The provider result was uncertain, so Fawkes stopped safely."
     };
-    return labels[event.kind] || "The canonical campaign recorded this body-free transition.";
+    return labels[event.kind] || "Fawkes recorded this campaign step without including private bodies.";
+  }
+
+  function activityHeading(kind) {
+    const labels = {
+      provider_action_reserved: "Provider work reserved",
+      builder_return_retained: "Worker result saved",
+      independent_review_retained: "Independent review recorded",
+      reviewed_application_completed: "Reviewed changes applied",
+      reviewed_git_completed: "Local Git update completed",
+      rider_cancelled_campaign: "Campaign ended by Tanner",
+      provider_completion_ambiguous: "Provider result uncertain"
+    };
+    return labels[kind] || safeText(kind, 140).replace(/_/g, " ");
+  }
+
+  function campaignStatusLabel(status) {
+    const labels = {
+      ready: "Ready",
+      awaiting_independent_review: "Waiting for independent review",
+      review_accepted_application_pending: "Accepted changes waiting to apply",
+      reviewed_application_completed: "Reviewed changes applied",
+      succeeded: "Completed",
+      failed_safe: "Stopped safely",
+      cancelled: "Cancelled",
+      tanner_escalation: "Needs Tanner",
+      historical_contract_unavailable: "Historical record",
+      integrity_unavailable: "Record unavailable"
+    };
+    return labels[status] || safeText(status, 100).replace(/_/g, " ");
   }
 
   function renderAttention(documentRef, target, attention) {
@@ -442,125 +695,484 @@
     target.appendChild(card);
   }
 
-  function renderActivity(documentRef, target, campaigns) {
+  function renderJobs(documentRef, target, jobs, projectionState) {
     target.replaceChildren();
-    const events = [];
-    for (const campaign of campaigns) {
-      for (const event of campaign.activity) events.push({campaign, event});
-    }
-    events.sort((left, right) => Date.parse(right.event.created_at) - Date.parse(left.event.created_at));
-    if (!events.length) {
-      target.appendChild(element(documentRef, "p", "empty", "No body-free campaign activity is currently projected."));
+    const priority = {needs_you: 0, working: 1, done: 2};
+    const values = Array.isArray(jobs) ? jobs.slice().sort((left, right) =>
+      (priority[left.state] ?? 9) - (priority[right.state] ?? 9)
+        || Date.parse(right.last_activity_at || 0) - Date.parse(left.last_activity_at || 0)) : [];
+    if (!values.length) {
+      target.appendChild(element(documentRef, "p", "empty",
+        "No job records are available to this preview. This does not mean Fawkes has no history or that every job is idle."));
       return;
     }
-    for (const item of events.slice(0, 60)) {
-      const summary = item.event.summary || {};
-      const details = [
-        ["Campaign", item.campaign.campaign_id],
-        ["Recorded", item.event.created_at],
-        ["Canonical event", item.event.kind],
-        ["Worker / Reviewer", workerLabel(item.event.worker)],
-        ["Report reference", summary.return_report_id || summary.review_report_id || "Unavailable"],
-        ["Code / diff explanation", "Unavailable in this body-free projection; source and diff bodies are never fetched by this console."]
-      ];
-      const card = createCard(documentRef, item.event.kind.replace(/_/g, " "),
-        activityExplanation(item.event), details, "",
-        "activity:" + item.campaign.campaign_id + ":" + item.event.event_id);
-      card.dataset.eventId = item.event.event_id;
-      const link = element(documentRef, "a", "evidence-link", "View campaign binding");
+    for (const job of values) {
+      const card = element(documentRef, "article", "job-card " + job.state
+        + (job.state === "done" && !job.successful ? " unsuccessful" : ""));
+      card.dataset.consoleKey = "job:" + job.job_id;
+      const heading = element(documentRef, "div", "job-title-row");
+      heading.append(element(documentRef, "span", "job-state",
+        (projectionState === "live" || projectionState === "sample" ? "" : "Last known ")
+          + (job.state === "done" && !job.successful ? "done · unsuccessful" : job.state.replace("_", " "))),
+        element(documentRef, "span", "meta", workerLabel(job.worker)));
+      card.append(heading, element(documentRef, "h3", "job-objective", job.objective),
+        element(documentRef, "p", "job-step", (job.state === "needs_you" ? "Needs Tanner · " : "Current step · ")
+          + (job.current_step || "Unknown")),
+        element(documentRef, "p", "job-time", "Last activity · " + (job.last_activity_at || "Unknown")));
+      if (job.state === "done") {
+        const recap = element(documentRef, "div", "job-recap");
+        recap.append(element(documentRef, "p", "", "Accomplished · " + (job.accomplished || "Recorded outcome retained.")),
+          element(documentRef, "p", "", "Gained · " + (job.gained || "No deployed gain is claimed by this record.")),
+          element(documentRef, "p", "", "Next · " + (job.next || "No next job has been started.")));
+        card.appendChild(recap);
+      } else if (job.state === "needs_you") {
+        card.appendChild(element(documentRef, "p", "warning", "Supported action · "
+          + (job.next || "Open the exact canonical Attention request shown above.")));
+      }
+      const details = element(documentRef, "details", "metadata-details console-card");
+      details.dataset.consoleKey = "job:" + job.job_id + ":details";
+      details.append(element(documentRef, "summary", "", "Details"), detailList(documentRef, [
+        ["Job identity", job.job_id], ["Recorded campaign status", job.recorded_status],
+        ["Observation", projectionTruthLabel(projectionState)],
+        ["Scope", "Fawkes-managed jobs only; a separately opened standalone CLI is not attached"]
+      ]));
+      card.appendChild(details);
+      const link = element(documentRef, "a", "evidence-link", "Open campaign evidence");
       link.href = "#campaign-heading";
       link.dataset.pageLink = "1";
-      card.querySelector(".detail").appendChild(link);
+      card.appendChild(link);
       target.appendChild(card);
     }
   }
 
-  function renderCampaigns(documentRef, target, campaigns) {
-    target.replaceChildren();
-    if (!campaigns.length) {
-      target.appendChild(element(documentRef, "p", "empty", "No canonical campaign projection is available."));
-      return;
+  function campaignGraphModel(campaign) {
+    const stages = [
+      {id: "created", label: "Created", state: "completed", recorded: true},
+      {id: "worker", label: "Worker", state: "unknown", recorded: false},
+      {id: "review", label: "Review", state: "unknown", recorded: false},
+      {id: "application", label: "Apply", state: "unknown", recorded: false},
+      {id: "git", label: "Git", state: "unknown", recorded: false},
+      {id: "terminal", label: "Outcome", state: "unknown", recorded: false}
+    ];
+    const byId = new Map(stages.map((stage) => [stage.id, stage]));
+    const kinds = new Set((campaign.activity || []).map((event) => event.kind));
+    if (kinds.has("provider_action_reserved") || kinds.has("builder_return_retained")) {
+      byId.get("worker").state = kinds.has("builder_return_retained") ? "completed" : "current";
+      byId.get("worker").recorded = true;
     }
-    for (const campaign of campaigns) {
-      const details = [
+    if (kinds.has("builder_failed_safe")) {
+      byId.get("worker").state = "failed";
+      byId.get("worker").recorded = true;
+    }
+    if (kinds.has("independent_review_retained")) {
+      byId.get("review").state = "completed";
+      byId.get("review").recorded = true;
+    }
+    if (kinds.has("reviewed_application_completed")) {
+      byId.get("application").state = "completed";
+      byId.get("application").recorded = true;
+    }
+    if (kinds.has("reviewed_git_completed")) {
+      byId.get("git").state = "completed";
+      byId.get("git").recorded = true;
+    }
+    const currentByStatus = {
+      ready: "worker",
+      awaiting_independent_review: "review",
+      review_accepted_application_pending: "application",
+      reviewed_application_completed: "git"
+    };
+    const current = currentByStatus[campaign.status];
+    if (current && byId.get(current).state !== "completed") {
+      byId.get(current).state = campaign.needs_tanner ? "waiting" : "current";
+      byId.get(current).recorded = true;
+    }
+    if (campaign.status === "succeeded") {
+      stages.forEach((stage) => {
+        stage.state = "completed";
+        stage.recorded = true;
+      });
+    } else if (campaign.terminal) {
+      byId.get("terminal").state = campaign.status === "failed_safe"
+        ? "failed" : campaign.status === "cancelled" ? "blocked" : "completed";
+      byId.get("terminal").recorded = true;
+    } else if (campaign.needs_tanner) {
+      const unresolved = stages.find((stage) => stage.state === "current"
+        || stage.state === "waiting" || stage.state === "unknown");
+      if (unresolved) unresolved.state = "waiting";
+    }
+    const edges = stages.slice(0, -1).map((stage, index) => ({
+      from: stage.id,
+      to: stages[index + 1].id,
+      established: stage.recorded && stages[index + 1].recorded
+    }));
+    const correctionCount = finiteInteger(campaign.observations.correction_count, 0);
+    return {
+      stages,
+      edges,
+      correction_loop: correctionCount > 0 && byId.get("review").recorded
+        ? {from: "review", to: "worker", count: correctionCount} : null
+    };
+  }
+
+  function campaignGraphStages(campaign) {
+    return campaignGraphModel(campaign).stages;
+  }
+
+  function selectCampaign(campaigns, selectedId) {
+    const values = Array.isArray(campaigns) ? campaigns : [];
+    return values.find((campaign) => campaign.campaign_id === selectedId)
+      || values.find((campaign) => !campaign.terminal
+        && campaign.status !== "historical_contract_unavailable"
+        && campaign.status !== "integrity_unavailable")
+      || values[0] || null;
+  }
+
+  function factWidget(documentRef, label, value) {
+    const widget = element(documentRef, "div", "fact-widget");
+    widget.append(element(documentRef, "span", "", label),
+      element(documentRef, "strong", "", value));
+    return widget;
+  }
+
+  function renderCampaignDashboard(documentRef, elements, campaigns, selectedId, selectedStageId) {
+    const campaign = selectCampaign(campaigns, selectedId);
+    elements.selector.replaceChildren();
+    for (const candidate of campaigns) {
+      const option = element(documentRef, "option", "",
+        (candidate.terminal ? "History · " : "Open record · ")
+          + campaignStatusLabel(candidate.status) + " · " + candidate.campaign_id.slice(-12));
+      option.value = candidate.campaign_id;
+      option.selected = Boolean(campaign && campaign.campaign_id === candidate.campaign_id);
+      elements.selector.appendChild(option);
+    }
+    elements.empty.hidden = Boolean(campaign);
+    elements.dashboard.hidden = !campaign;
+    if (!campaign) {
+      elements.history.textContent = "NO ACTIVE CAMPAIGN";
+      elements.empty.textContent = "No campaign records are available to this preview. This is not an all-history or idle claim.";
+      return {campaign_id: "", stage_id: ""};
+    }
+    elements.history.textContent = campaign.terminal
+      ? "HISTORICAL RECORD" : "OPEN RECORD · EXECUTION NOT PROVEN";
+    elements.widgets.replaceChildren(
+      factWidget(documentRef, "Recorded outcome", campaignStatusLabel(campaign.status)),
+      factWidget(documentRef, "Recorded stage", campaignStatusLabel(campaign.current_stage)),
+      factWidget(documentRef, "Iteration limit", campaign.iteration + " / " + campaign.maximum_iterations),
+      factWidget(documentRef, "Provider turns", campaign.observations.builder_invocations === undefined
+        ? "Not projected" : String(campaign.observations.builder_invocations))
+    );
+    const model = campaignGraphModel(campaign);
+    const stages = model.stages;
+    const selectedStage = stages.find((stage) => stage.id === selectedStageId)
+      || stages.find((stage) => ["current", "waiting", "blocked", "failed"].includes(stage.state))
+      || stages[0];
+    elements.graph.replaceChildren();
+    const definitions = svgElement(documentRef, "defs");
+    const marker = svgElement(documentRef, "marker", {
+      id: "campaign-arrow", viewBox: "0 0 10 10", refX: "8", refY: "5",
+      markerWidth: "6", markerHeight: "6", orient: "auto-start-reverse"
+    });
+    marker.appendChild(svgElement(documentRef, "path", {d: "M 0 0 L 10 5 L 0 10 z"}));
+    definitions.appendChild(marker);
+    elements.graph.appendChild(definitions);
+    const positions = new Map(stages.map((stage, index) => [stage.id, {
+      x: 8 + (index * 108), y: 84
+    }]));
+    for (const edge of model.edges) {
+      const start = positions.get(edge.from);
+      const end = positions.get(edge.to);
+      elements.graph.appendChild(svgElement(documentRef, "path", {
+        d: `M${start.x + 88} ${start.y + 29} H${end.x}`,
+        class: "graph-edge reference-edge", "marker-end": "url(#campaign-arrow)"
+      }));
+      if (edge.established) {
+        elements.graph.appendChild(svgElement(documentRef, "path", {
+          d: `M${start.x + 88} ${start.y + 29} H${end.x}`,
+          class: "graph-edge established-edge", "marker-end": "url(#campaign-arrow)"
+        }));
+      }
+    }
+    if (model.correction_loop) {
+      const review = positions.get("review");
+      const worker = positions.get("worker");
+      elements.graph.appendChild(svgElement(documentRef, "path", {
+        d: `M${review.x + 44} ${review.y} C${review.x + 44} 20 ${worker.x + 44} 20 ${worker.x + 44} ${worker.y}`,
+        class: "graph-edge correction-edge", "marker-end": "url(#campaign-arrow)"
+      }));
+      elements.graph.appendChild(svgElement(documentRef, "text", {
+        x: (review.x + worker.x + 88) / 2, y: 18, class: "graph-edge-label"
+      }, `Recorded correction loop ×${model.correction_loop.count}`));
+    }
+    for (const stage of stages) {
+      const position = positions.get(stage.id);
+      const node = svgElement(documentRef, "g", {
+        class: "graph-step " + stage.state + (stage.id === selectedStage.id ? " selected" : ""),
+        transform: `translate(${position.x} ${position.y})`, tabindex: "0", role: "button",
+        "aria-label": `${stage.label}: ${stage.state}`
+      });
+      node.dataset.campaignStage = stage.id;
+      node.append(svgElement(documentRef, "rect", {width: "88", height: "58", rx: "9"}),
+        svgElement(documentRef, "text", {x: "44", y: "24", class: "graph-node-title"}, stage.label),
+        svgElement(documentRef, "text", {x: "44", y: "43", class: "graph-node-state"}, stage.state));
+      elements.graph.appendChild(node);
+    }
+    elements.detail.replaceChildren(
+      element(documentRef, "p", "eyebrow", "SELECTED STEP"),
+      element(documentRef, "h3", "", selectedStage.label),
+      detailList(documentRef, [
+        ["Recorded step state", selectedStage.state],
+        ["Evidence", selectedStage.recorded ? "Supported by this campaign record" : "Reference workflow only"],
         ["Campaign identity", campaign.campaign_id],
-        ["Stage", campaign.current_stage],
-        ["Iteration", campaign.iteration + " / " + campaign.maximum_iterations],
+        ["Recorded status", campaign.status],
         ["Worker", workerLabel(campaign.builder)],
         ["Reviewer", workerLabel(campaign.reviewer)],
-        ["Provider reservations / remaining limits", "Unavailable in the current body-free projection"]
-      ];
-      if (campaign.needs_tanner) details.push(["Needs Tanner", campaign.needs_tanner.reason || campaign.needs_tanner.decision_needed]);
-      target.appendChild(createCard(documentRef, campaign.status.replace(/_/g, " "), campaign.objective, details,
-        campaign.terminal ? "terminal" : "", "campaign:" + campaign.campaign_id));
-    }
+        ["Satisfied acceptance conditions", campaign.satisfied_condition_count === null
+          ? "Not projected" : String(campaign.satisfied_condition_count)],
+        ["Budget remaining", "Not projected; no percentage is inferred"]
+      ])
+    );
+    return {campaign_id: campaign.campaign_id, stage_id: selectedStage.id};
   }
 
   function projectionTruthLabel(state) {
-    if (state === "live") return "CURRENT AUTHENTICATED PROJECTION";
+    if (state === "live") return "CONNECTED · CURRENT READ-ONLY DATA";
     if (state === "sample") return "SAMPLE FIXTURE · NOT CURRENT";
     if (state === "stale") return "STALE LAST-VERIFIED PROJECTION";
     if (state === "disconnected") return "DISCONNECTED · NO CURRENT PROJECTION";
     return "UNAVAILABLE · NO CURRENT PROJECTION";
   }
 
-  function renderRepository(documentRef, target, projection, state) {
-    target.replaceChildren();
-    const build = projection.build;
-    target.appendChild(createCard(documentRef, "Authenticated build binding",
-      build && state === "live"
-        ? "The authenticated compact projection identifies this current development build."
-        : "This view is not current and cannot establish repository state.", [
-        ["Projection status", projectionTruthLabel(state)],
-        ["Build", build ? build.release_id : "Unavailable"],
-        ["Mode", build ? build.mode : "Unavailable"],
-        ["Branch / HEAD", "Unavailable: not exposed by the existing canonical read-only projection"],
-        ["Source and diff bodies", "Not loaded"]
-      ], "", "repository:build"));
-    for (const campaign of projection.campaigns) {
-      const references = campaign.recovery_references.length
-        ? campaign.recovery_references.map((item) => item.reference_type + ":" + item.reference_id).join(", ")
-        : "Unavailable";
-      target.appendChild(createCard(documentRef, campaign.campaign_id,
-        state === "live"
-          ? "Current body-free repository binding from the canonical campaign projection."
-          : "Non-current body-free campaign information retained only for display.", [
-          ["Projection status", projectionTruthLabel(state)],
-          ["Status", campaign.status],
-          ["Recovery references", references],
-          ["Reviewed file list", "Unavailable in this projection"],
-          ["Repository browsing", "Restricted to identities already projected by the authorized development workspace"]
-        ], "", "repository:" + campaign.campaign_id));
+  function renderRepositoryDashboard(documentRef, elements, repository, state, selectedPath, detailOpen) {
+    const retainedTreeScroll = Number(elements.tree.scrollTop) || 0;
+    elements.widgets.replaceChildren();
+    elements.tree.replaceChildren();
+    elements.metadata.replaceChildren();
+    if (!repository) {
+      elements.browser.hidden = true;
+      elements.detailView.hidden = true;
+      elements.empty.hidden = false;
+      elements.empty.textContent = "The bounded repository projection is unavailable.";
+      return {path: "", detail_open: false};
     }
+    elements.empty.hidden = true;
+    const summary = repository.status_summary;
+    elements.widgets.replaceChildren(
+      factWidget(documentRef, "Branch", repository.branch),
+      factWidget(documentRef, "HEAD revision", repository.head.slice(0, 12)),
+      factWidget(documentRef, "HEAD files shown", String(repository.files.length)),
+      factWidget(documentRef, "Working-tree paths", String(summary.dirty_paths)),
+      factWidget(documentRef, "Staged", String(summary.staged_paths))
+    );
+    const selected = repository.files.find((file) => file.path === selectedPath)
+      || repository.files[0] || null;
+    let priorGroup = "";
+    for (const file of repository.files) {
+      const group = file.path.includes("/") ? file.path.split("/")[0] : "root";
+      if (group !== priorGroup) {
+        elements.tree.appendChild(element(documentRef, "p", "tree-group", group));
+        priorGroup = group;
+      }
+      const button = element(documentRef, "button", "tree-file"
+        + (selected && selected.path === file.path ? " selected" : ""), file.path);
+      button.type = "button";
+      button.dataset.repositoryPath = file.path;
+      button.appendChild(element(documentRef, "span", "badge", file.head_change));
+      elements.tree.appendChild(button);
+    }
+    elements.tree.scrollTop = retainedTreeScroll;
+    if (!selected) {
+      elements.browser.hidden = false;
+      elements.detailView.hidden = true;
+      elements.empty.hidden = repository.files.length !== 0;
+      if (!repository.files.length) elements.empty.textContent =
+        "No files are included in the bounded HEAD revision selection.";
+      return {path: "", detail_open: false};
+    }
+    elements.browser.hidden = Boolean(detailOpen);
+    elements.detailView.hidden = !detailOpen;
+    elements.comparison.textContent = repository.comparison_base === "root"
+      ? "ROOT COMMIT → HEAD " + repository.head.slice(0, 12)
+      : repository.comparison_base.slice(0, 12) + " → HEAD " + repository.head.slice(0, 12);
+    elements.heading.textContent = selected.path;
+    elements.summary.textContent = "Committed " + selected.head_change
+      + " in this HEAD revision · working tree: " + selected.worktree_state;
+    const facts = detailList(documentRef, [
+      ["Projection status", projectionTruthLabel(state)],
+      ["Exact revision", selected.revision],
+      ["Blob", selected.object_id],
+      ["Mode", selected.mode],
+      ["HEAD change", selected.head_change],
+      ["Working-tree state", selected.worktree_state],
+      ["Review status", selected.review_status]
+    ]);
+    elements.metadata.appendChild(facts);
+    elements.diff.textContent = selected.diff_excerpt || "No bounded diff excerpt is available.";
+    return {path: selected.path, detail_open: Boolean(detailOpen)};
   }
 
-  function renderArchitecture(documentRef, target, components, state) {
-    target.replaceChildren();
-    const contracts = [
-      ["LangGraph runner", "Graph position, bounded scheduling, checkpoints, and presentation only."],
-      ["Canonical campaign", "Owns provider reservations, budgets, review routing, cancellation, and terminal state."],
-      ["Independent Reviewer + Attention", "Reviewer evidence remains advisory until canonical validation; protected decisions stay on the existing Attention page."],
-      ["Reviewed application", "Owns exact one-shot application and retained terminal evidence."],
-      ["Git transaction", "Owns drift validation, protected ref advancement, and observation-only reconciliation."]
-    ];
-    for (const contract of contracts) {
-      target.appendChild(createCard(documentRef, contract[0], contract[1], [
-        ["Classification", "REFERENCE · explanatory map · not authority"],
-        ["Runtime projection", projectionTruthLabel(state)]
-      ], "", "architecture:contract:" + contract[0]));
+  const ARCHITECTURE_COMPONENTS = Object.freeze({
+    identity: {title: "Phoenix identity", maturity: "Built",
+      owner: "Defines identity, continuity, privacy, and authority boundaries.",
+      relationships: "Constrains every record owner and protected transition.",
+      evidence: "docs/phoenix/FOUNDATION.md", observation: "unavailable"},
+    archive: {title: "Archive and evidence", maturity: "Built",
+      owner: "Retains body-free provenance, receipts, and durable operational evidence.",
+      relationships: "Supports Memory, development review, and later reconciliation.",
+      evidence: "docs/phoenix/APP_ARCHITECTURE.md", observation: "unavailable"},
+    memory: {title: "Memory", maturity: "Built",
+      owner: "Maintains governed continuity records without granting execution authority.",
+      relationships: "Consumes bounded evidence and supports the Library.",
+      evidence: "docs/phoenix/CANONICAL_ROADMAP.md", observation: "unavailable"},
+    library: {title: "Library", maturity: "Built",
+      owner: "Provides retained knowledge through governed retrieval paths.",
+      relationships: "Draws from Memory and serves permitted clients.",
+      evidence: "docs/phoenix/APP_ARCHITECTURE.md", observation: "unavailable"},
+    clients: {title: "Clients and console", maturity: "Built",
+      owner: "Presents authenticated projections and routes exact Attention links.",
+      relationships: "Requests work from canonical services; it does not own their authority.",
+      evidence: "src/app/server.py", observation: "app_server",
+      observedName: "Canonical app server (not this localhost candidate preview)"},
+    development: {title: "Development campaign", maturity: "In progress",
+      owner: "Owns stepwise campaign state, reservations, review, application, and Git sequencing.",
+      relationships: "Coordinates Workers and uses Native Attention for protected actions.",
+      evidence: "src/runtime/codex_development_campaign.py", observation: "development_coordinator",
+      observedName: "Canonical development coordinator"},
+    attention: {title: "Native Attention", maturity: "Built",
+      owner: "Records Tanner's exact, expiring, single-use protected-action decision.",
+      relationships: "Guards protected development actions without transferring authority to this console.",
+      evidence: "src/runtime/development_attention.py", observation: "app_server",
+      observedName: "Attention projection on the canonical app server"},
+    workers: {title: "Workers and Reviewers", maturity: "In progress",
+      owner: "Perform bounded candidate work and independent evidence review.",
+      relationships: "Return evidence to the campaign; they cannot directly apply or commit.",
+      evidence: "docs/phoenix/CANONICAL_ROADMAP.md", observation: "reviewer_launcher",
+      observedName: "Reviewer launcher"},
+    application_git: {title: "Application and Git", maturity: "Built",
+      owner: "Applies accepted postimages once and advances the exact reviewed commit.",
+      relationships: "Consumes campaign-owned eligibility; restart reconciliation is observation-only.",
+      evidence: "src/runtime/git_commit_transaction.py", observation: "unavailable"},
+    embodiment: {title: "Physical embodiment", maturity: "Planned",
+      owner: "Progressive portable-console and later physical-body direction.",
+      relationships: "Informed by the development system; no movement or sensing is implemented here.",
+      evidence: "docs/phoenix/ROADMAP_AMENDMENT_2026_09_08_EXECUTION.md", observation: "unavailable"}
+  });
+
+  function architectureObservation(components, nodeId, state) {
+    const contract = ARCHITECTURE_COMPONENTS[nodeId];
+    if (!contract || state !== "live") return "unknown";
+    if (contract.observation === "unavailable") return "unavailable";
+    const observed = components.find((item) => item.name === contract.observation);
+    if (!observed || observed.state === "unobserved_configured") return "unavailable";
+    return observed.state;
+  }
+
+  function renderArchitectureDashboard(documentRef, map, detail, components, state, selectedId) {
+    const selected = ARCHITECTURE_COMPONENTS[selectedId] ? selectedId : "development";
+    for (const button of Array.from(map.querySelectorAll("[data-architecture-node]"))) {
+      const nodeId = button.dataset.architectureNode;
+      const observation = architectureObservation(components, nodeId, state);
+      button.classList.toggle("selected", nodeId === selected);
+      button.classList.remove("observed", "unavailable");
+      button.classList.add(observation === "unknown" || observation === "unavailable"
+        ? "unavailable" : "observed");
+      button.title = "Observed state: " + observation;
     }
-    if (!components.length) {
-      target.appendChild(element(documentRef, "p", "empty", "Live component status is unavailable."));
-    } else {
-      for (const component of components) {
-        target.appendChild(createCard(documentRef, component.name,
-          state === "live" ? "Current authenticated component projection" : "Non-current component projection", [
-          ["Projection status", projectionTruthLabel(state)],
-          ["Projected state", component.state],
-          ["Authority", "None created by this view"]
-        ], "", "architecture:component:" + component.name));
+    const contract = ARCHITECTURE_COMPONENTS[selected];
+    const observation = architectureObservation(components, selected, state);
+    detail.replaceChildren(
+      element(documentRef, "p", "eyebrow", "REFERENCE SYSTEM COMPONENT"),
+      element(documentRef, "h3", "", contract.title),
+      detailList(documentRef, [
+        ["Implementation maturity", contract.maturity],
+        ["Purpose", contract.owner],
+        ["Relationships", contract.relationships],
+        ["Observed service / instance", contract.observedName || "No runtime source projected"],
+        ["Observed runtime state", observation],
+        ["Observation freshness", projectionTruthLabel(state)],
+        ["Evidence", contract.evidence],
+        ["Interpretation", "Reference maturity is not runtime health; connection freshness proves neither"]
+      ])
+    );
+    return selected;
+  }
+
+  function renderRoadmapInventory(documentRef, elements, roadmap, options) {
+    const value = options || {};
+    const mode = ["current", "roadmap", "combined"].includes(value.mode) ? value.mode : "current";
+    elements.overview.hidden = mode === "roadmap";
+    elements.inventory.hidden = mode === "current";
+    for (const button of elements.modes) {
+      button.setAttribute("aria-pressed", String(button.dataset.architectureMode === mode));
+    }
+    if (!roadmap || mode === "current") return {mode, selected_id: value.selectedId || ""};
+    const openGroups = new Set(Array.from(elements.groups.querySelectorAll("details.roadmap-group"))
+      .filter((group) => group.open).map((group) => group.dataset.roadmapGroup));
+    const filter = safeText(value.filter, 80).toLowerCase();
+    const items = [...roadmap.phases, ...roadmap.tracks];
+    const visible = items.filter((item) => !filter
+      || (item.name + " " + item.summary + " " + item.id).toLowerCase().includes(filter));
+    const grouped = new Map();
+    for (const item of visible) {
+      if (!grouped.has(item.group)) grouped.set(item.group, []);
+      grouped.get(item.group).push(item);
+    }
+    elements.coverage.textContent = roadmap.coverage_complete
+      ? `40 canonical phases plus ${roadmap.tracks.length} sourced tracks · source ${roadmap.source_revision.slice(0, 12)}`
+      : "Coverage mismatch — the roadmap source and displayed inventory differ.";
+    elements.groups.replaceChildren();
+    for (const [name, groupItems] of grouped) {
+      const group = element(documentRef, "details", "roadmap-group");
+      group.dataset.roadmapGroup = name;
+      group.open = openGroups.has(name) || (!openGroups.size && grouped.size === 1);
+      group.appendChild(element(documentRef, "summary", "", `${name} · ${groupItems.length}`));
+      const body = element(documentRef, "div", "roadmap-items");
+      for (const item of groupItems) {
+        const button = element(documentRef, "button", "roadmap-item"
+          + (item.id === value.selectedId ? " selected" : ""));
+        button.type = "button";
+        button.dataset.roadmapId = item.id;
+        button.append(element(documentRef, "strong", "", item.kind === "phase"
+          ? `Phase ${item.number} · ${item.name}` : item.name),
+          element(documentRef, "span", "", item.summary),
+          element(documentRef, "span", "roadmap-item-status",
+            `${item.maturity} · ${item.source_status}`));
+        body.appendChild(button);
+      }
+      group.appendChild(body);
+      elements.groups.appendChild(group);
+    }
+    let selected = items.find((item) => item.id === value.selectedId)
+      || visible[0] || items[0] || null;
+    if (selected) {
+      const partial = selected.maturity === "partial"
+        ? "Foundation implemented; substantial expansions remain planned." : selected.maturity;
+      elements.detail.replaceChildren(
+        element(documentRef, "p", "eyebrow", selected.kind === "phase" ? "ROADMAP CAPABILITY" : "RECORDED TRACK"),
+        element(documentRef, "h3", "", selected.name),
+        element(documentRef, "p", "detail-summary", selected.summary),
+        detailList(documentRef, [
+          ["What exists / remains", partial],
+          ["Milestone", selected.kind === "phase" ? `Phase ${selected.number}` : "Cross-cutting track"],
+          ["Documented prerequisites", selected.prerequisites.length
+            ? selected.prerequisites.join(", ") : "Not mapped yet"],
+          ["Associated component", selected.mapped_component || "Not mapped yet"],
+          ["Planning status", selected.source_status],
+          ["Runtime observation", "Unknown — planned inventory is not a running-service claim"],
+          ["Source", selected.source],
+          ["Source revision", selected.source_revision],
+          ["Source digest", selected.source_sha256],
+          ["Source bytes", String(selected.source_bytes)]
+        ])
+      );
+      if (selected.source_excerpt) {
+        const sourceDetails = element(documentRef, "details", "roadmap-source-details");
+        sourceDetails.append(element(documentRef, "summary", "", "Read retained source excerpts"),
+          element(documentRef, "pre", "detail-summary", selected.source_excerpt));
+        elements.detail.append(sourceDetails);
       }
     }
+    return {mode, selected_id: selected ? selected.id : ""};
   }
 
   async function fetchJson(fetchImpl, path, timeoutMs) {
@@ -585,6 +1197,41 @@
     }
   }
 
+  async function postJson(fetchImpl, path, body, options) {
+    const value = options || {};
+    const response = await fetchImpl(path, {method: "POST", credentials: "same-origin",
+      headers: {Accept: "application/json", "Content-Type": "application/json",
+        ...(value.csrf ? {"X-Fawkes-CSRF-Token": value.csrf} : {})},
+      body: JSON.stringify(body || {})});
+    const payload = await response.json();
+    if (!response.ok) {
+      const error = new Error(safeText(payload && payload.error && payload.error.message, 500)
+        || "console update request failed");
+      error.status = response.status;
+      throw error;
+    }
+    return payload;
+  }
+
+  function managedFeedObservation(projection, projectionState, nowMs) {
+    if (projectionState === "sample") return {state: "sample", label: "SAMPLE Worker"};
+    if (projectionState === "disconnected") return {state: "disconnected", label: "⊘ Disconnected"};
+    if (projectionState !== "live") return {state: "stale", label: "◷ Stale"};
+    const managed = (projection && projection.campaigns || []).flatMap((campaign) => campaign.managed || []);
+    if (!managed.length) return {state: "unavailable", label: "◌ Worker not attached"};
+    managed.sort((left, right) => Date.parse(right.updated_at || 0) - Date.parse(left.updated_at || 0));
+    const latest = managed[0];
+    if (latest.state === "disconnected") return {state: "disconnected", label: "⊘ Disconnected", updated_at: latest.updated_at};
+    if (["completed", "failed"].includes(latest.state)) {
+      return {state: "unavailable", label: "◌ Worker not attached", updated_at: latest.updated_at};
+    }
+    const age = Number(nowMs) - Date.parse(latest.updated_at);
+    if (!Number.isFinite(age) || age > 45_000) {
+      return {state: "stale", label: "◷ Stale", updated_at: latest.updated_at};
+    }
+    return {state: "live", label: "◉ Live", updated_at: latest.updated_at};
+  }
+
   function boot(options) {
     const value = options || {};
     const documentRef = value.document || root.document;
@@ -596,14 +1243,54 @@
     const indicators = Array.from(documentRef.querySelectorAll("[data-page-target]"));
     const title = documentRef.getElementById("page-title");
     const connection = documentRef.getElementById("connection-state");
+    const lastSync = documentRef.getElementById("last-sync");
+    const bridgeState = documentRef.getElementById("bridge-state");
+    const previewContext = documentRef.getElementById("preview-context");
+    const campaignState = documentRef.getElementById("campaign-state");
+    const attentionState = documentRef.getElementById("attention-state");
     const updated = documentRef.getElementById("last-updated");
     const activityFeed = documentRef.getElementById("activity-feed");
     const attentionSlot = documentRef.getElementById("attention-slot");
-    const campaignList = documentRef.getElementById("campaign-list");
-    const repository = documentRef.getElementById("repository-content");
-    const architecture = documentRef.getElementById("architecture-content");
+    const saveUpdate = documentRef.getElementById("save-console-update");
+    const updateResult = documentRef.getElementById("update-result");
+    const preparedUpdates = documentRef.getElementById("prepared-updates");
+    const campaignElements = {
+      selector: documentRef.getElementById("campaign-selector"),
+      history: documentRef.getElementById("campaign-history-state"),
+      empty: documentRef.getElementById("campaign-empty"),
+      dashboard: documentRef.getElementById("campaign-dashboard"),
+      widgets: documentRef.getElementById("campaign-widgets"),
+      graph: documentRef.getElementById("campaign-graph"),
+      detail: documentRef.getElementById("campaign-detail")
+    };
+    const repositoryElements = {
+      widgets: documentRef.getElementById("repository-widgets"),
+      browser: documentRef.getElementById("repository-browser"),
+      tree: documentRef.getElementById("repository-tree"),
+      detailView: documentRef.getElementById("repository-detail-view"),
+      back: documentRef.getElementById("repository-back"),
+      comparison: documentRef.getElementById("repository-comparison"),
+      heading: documentRef.getElementById("repository-file-heading"),
+      summary: documentRef.getElementById("repository-file-summary"),
+      metadata: documentRef.getElementById("repository-metadata"),
+      diff: documentRef.getElementById("repository-diff"),
+      empty: documentRef.getElementById("repository-empty")
+    };
+    const architectureMap = documentRef.getElementById("architecture-map");
+    const architectureDetail = documentRef.getElementById("architecture-detail");
+    const architectureElements = {
+      map: architectureMap, detail: architectureDetail,
+      overview: documentRef.getElementById("architecture-overview"),
+      inventory: documentRef.getElementById("roadmap-inventory"),
+      groups: documentRef.getElementById("roadmap-groups"),
+      coverage: documentRef.getElementById("roadmap-coverage"),
+      filter: documentRef.getElementById("roadmap-filter"),
+      modes: Array.from(documentRef.querySelectorAll("[data-architecture-mode]"))
+    };
     const buildMeta = documentRef.querySelector('meta[name="fawkes-build-id"]');
+    const contextMeta = documentRef.querySelector('meta[name="fawkes-console-context"]');
     const expectedBuildId = buildMeta ? buildMeta.content : "";
+    const candidateContext = contextMeta ? contextMeta.content : "";
     const urlIdle = value.idleSeconds !== undefined ? value.idleSeconds
       : (root.location ? new URL(root.location.href).searchParams.get("idle") : null);
     const idleSeconds = parseIdleSeconds(urlIdle, shell.dataset.idleSeconds || 60);
@@ -611,18 +1298,30 @@
     let pointerStart = null;
     let lastGood = null;
     let lastSuccessMs = null;
+    let displayedProjection = null;
     let stopped = false;
     let pollTimer = null;
     let staleTimer = null;
     let expiryTimer = null;
     let refreshSequence = 0;
     let latestAppliedSequence = 0;
+    let selectedCampaignId = "";
+    let selectedCampaignStageId = "";
+    let selectedRepositoryPath = "";
+    let repositoryDetailOpen = false;
+    let selectedArchitectureId = "development";
+    let architectureMode = "current";
+    let selectedRoadmapId = "";
+    let roadmapFilter = "";
+    let pendingUpdateKey = "";
     const clock = typeof value.now === "function" ? value.now : Date.now;
     const projectionScheduler = value.projectionScheduler || {
       setTimeout: root.setTimeout.bind(root), clearTimeout: root.clearTimeout.bind(root)
     };
 
-    const refreshTargets = [activityFeed, campaignList, repository, architecture];
+    const refreshTargets = [activityFeed];
+    const discoveredScrollTargets = Array.from(documentRef.querySelectorAll(".page-scroll"));
+    const scrollTargets = discoveredScrollTargets.length ? discoveredScrollTargets : refreshTargets;
 
     function cardsIn(target) {
       return target && typeof target.querySelectorAll === "function"
@@ -637,7 +1336,7 @@
       const focused = documentRef.activeElement && documentRef.activeElement.closest
         ? documentRef.activeElement.closest("details.console-card") : null;
       return {
-        scrollTops: refreshTargets.map((target) => Number(target.scrollTop) || 0),
+        scrollTops: scrollTargets.map((target) => Number(target.scrollTop) || 0),
         openKeys: new Set(refreshTargets.flatMap(cardsIn).filter((card) => card.open)
           .map(cardKey).filter(Boolean)),
         selectedKey: cardKey(selectedCard),
@@ -654,7 +1353,7 @@
       }
       selectedCard = byKey.get(retained.selectedKey) || null;
       if (selectedCard) selectedCard.classList.add("selected");
-      refreshTargets.forEach((target, index) => { target.scrollTop = retained.scrollTops[index] || 0; });
+      scrollTargets.forEach((target, index) => { target.scrollTop = retained.scrollTops[index] || 0; });
       const focused = byKey.get(retained.focusedKey);
       const summary = focused && focused.querySelector && focused.querySelector("summary");
       if (summary && typeof summary.focus === "function") summary.focus({preventScroll: true});
@@ -686,9 +1385,21 @@
     });
     showPage(0);
 
-    function setState(state, observedAt) {
-      connection.className = "state " + state;
-      connection.textContent = state.toUpperCase();
+    function setState(state, observedAt, projection) {
+      const feed = managedFeedObservation(projection, state, clock());
+      connection.className = "state " + feed.state;
+      connection.textContent = feed.label;
+      lastSync.textContent = observedAt ? "Last sync " + new Date(observedAt).toLocaleTimeString()
+        : "No verified sync";
+      bridgeState.textContent = observedAt && state === "live"
+        ? "PC SERVICE REACHABLE" : "PC SERVICE NOT CURRENT";
+      previewContext.textContent = previewContextLabel(projection && projection.build, candidateContext);
+      const observedCampaign = campaignObservation(projection && projection.campaigns, state);
+      campaignState.textContent = observedCampaign.label;
+      campaignState.dataset.campaignObservation = observedCampaign.kind;
+      const observedAttention = attentionObservation(projection && projection.attention, state);
+      attentionState.textContent = observedAttention.label;
+      attentionState.dataset.attentionObservation = observedAttention.kind;
       shell.dataset.projectionState = state;
       updated.textContent = observedAt
         ? ((state === "stale" ? "Last verified " : "Updated ") + new Date(observedAt).toLocaleString())
@@ -706,20 +1417,92 @@
 
     function render(projection, state, observedAt, nowMs) {
       const retained = captureRefreshState();
-      setState(state, observedAt);
+      displayedProjection = projection;
+      setState(state, observedAt, projection);
       documentRef.getElementById("summary-intro").textContent = state === "live"
-        ? "Authenticated, body-free canonical activity. Select a heading for available detail."
+        ? "At-a-glance status from available managed-job records. Detailed Worker playback remains in canonical evidence, not this screen."
         : state === "sample"
           ? "Sample fixture data — never current canonical state."
           : "Projection is " + state + "; it must not be treated as current authority.";
       const visibleAttention = visibleAttentionAt(projection, state,
         Number.isFinite(nowMs) ? nowMs : clock());
       renderAttention(documentRef, attentionSlot, visibleAttention);
-      renderActivity(documentRef, activityFeed, projection.campaigns || []);
-      renderCampaigns(documentRef, campaignList, projection.campaigns || []);
-      renderRepository(documentRef, repository, projection, state);
-      renderArchitecture(documentRef, architecture, projection.components || [], state);
+      renderJobs(documentRef, activityFeed, projection.jobs || [], state);
+      const campaignSelection = renderCampaignDashboard(documentRef, campaignElements,
+        projection.campaigns || [], selectedCampaignId, selectedCampaignStageId);
+      selectedCampaignId = campaignSelection.campaign_id;
+      selectedCampaignStageId = campaignSelection.stage_id;
+      const repositorySelection = renderRepositoryDashboard(documentRef, repositoryElements,
+        projection.repository, state, selectedRepositoryPath, repositoryDetailOpen);
+      selectedRepositoryPath = repositorySelection.path;
+      repositoryDetailOpen = repositorySelection.detail_open;
+      selectedArchitectureId = renderArchitectureDashboard(documentRef, architectureMap,
+        architectureDetail, projection.components || [], state, selectedArchitectureId);
+      const roadmapSelection = renderRoadmapInventory(documentRef, architectureElements,
+        projection.roadmap, {mode: architectureMode, selectedId: selectedRoadmapId,
+          filter: roadmapFilter});
+      architectureMode = roadmapSelection.mode;
+      selectedRoadmapId = roadmapSelection.selected_id;
       restoreRefreshState(retained);
+    }
+
+    function renderPreparedUpdates(payload) {
+      preparedUpdates.replaceChildren();
+      const updates = payload && Array.isArray(payload.updates) ? payload.updates : [];
+      if (!updates.length) {
+        preparedUpdates.appendChild(element(documentRef, "p", "meta",
+          "No durable update has been prepared yet."));
+        return;
+      }
+      for (const update of updates) {
+        const snapshotId = safeIdentifier(update.snapshot_id, 90);
+        if (!/^console-update-[a-f0-9]{64}$/.test(snapshotId)) continue;
+        const card = element(documentRef, "article", "prepared-update");
+        card.appendChild(element(documentRef, "p", "", `${update.created_at || "Unknown time"} · ${snapshotId}`));
+        const actions = element(documentRef, "div", "prepared-update-actions");
+        const copy = element(documentRef, "button", "", "Copy completed + working on");
+        copy.type = "button"; copy.dataset.copyUpdateId = snapshotId;
+        const download = element(documentRef, "a", "", "Download .txt");
+        download.href = `${ENDPOINTS.updates}/${snapshotId}.txt`;
+        download.download = `${snapshotId}.txt`;
+        actions.append(copy, download);
+        card.appendChild(actions);
+        preparedUpdates.appendChild(card);
+      }
+    }
+
+    async function refreshPreparedUpdates() {
+      if (!fetchImpl || value.samplePayload) return;
+      try {
+        renderPreparedUpdates(await fetchJson(fetchImpl, ENDPOINTS.updates, 10000));
+      } catch (_error) {
+        if (!preparedUpdates.children.length) preparedUpdates.appendChild(element(documentRef,
+          "p", "warning", "Prepared updates are unavailable; any previous durable snapshot was not overwritten."));
+      }
+    }
+
+    async function savePreparedUpdate() {
+      if (!fetchImpl) return;
+      saveUpdate.disabled = true;
+      updateResult.textContent = "Saving one exact update…";
+      try {
+        const csrf = await postJson(fetchImpl, ENDPOINTS.csrf, {});
+        if (!pendingUpdateKey) {
+          const suffix = root.crypto && typeof root.crypto.randomUUID === "function"
+            ? root.crypto.randomUUID() : `${clock()}-${Math.random().toString(16).slice(2)}`;
+          pendingUpdateKey = "console-browser-" + suffix;
+        }
+        const update = await postJson(fetchImpl, ENDPOINTS.updates,
+          {idempotency_key: pendingUpdateKey}, {csrf: csrf.csrf_token});
+        updateResult.textContent = `Update saved · ${update.snapshot_id} · Open Fawkes on your PC to copy or download it.`;
+        pendingUpdateKey = "";
+        await refreshPreparedUpdates();
+      } catch (error) {
+        updateResult.textContent = "Update not saved · " + safeText(error && error.message, 300)
+          + " · the previous good snapshot remains available.";
+      } finally {
+        saveUpdate.disabled = false;
+      }
     }
 
     function clearProjectionTimers() {
@@ -775,7 +1558,7 @@
         return;
       }
       if (!fetchImpl) {
-        setState(lastGood ? "stale" : "disconnected", lastSuccessMs);
+        setState(lastGood ? "stale" : "disconnected", lastSuccessMs, lastGood);
         return;
       }
       try {
@@ -801,7 +1584,12 @@
         }
         render(projection.ok || !lastGood ? projection : lastGood, state,
           projection.ok ? projection.observed_at_ms : lastSuccessMs, now);
+        if (root.dispatchEvent && typeof root.CustomEvent === 'function') {
+          root.dispatchEvent(new root.CustomEvent(projection.ok && state === 'live'
+            ? 'fawkes:console-observation' : 'fawkes:console-disconnected', {detail:raw}));
+        }
       } catch (error) {
+        if (root.dispatchEvent && typeof root.CustomEvent === 'function') root.dispatchEvent(new root.CustomEvent('fawkes:console-disconnected'));
         if (sequence !== refreshSequence || sequence < latestAppliedSequence || stopped) return;
         latestAppliedSequence = sequence;
         const disconnected = !error || error.kind === "authentication" || !error.kind || error.name === "AbortError";
@@ -810,7 +1598,7 @@
         });
         if (lastGood) render(lastGood, state, lastSuccessMs, clock());
         else {
-          setState(state, null);
+          setState(state, null, null);
           documentRef.getElementById("summary-intro").textContent = "Authenticated read-only projections are unavailable.";
         }
       }
@@ -819,6 +1607,146 @@
     documentRef.getElementById("previous-page").addEventListener("click", () => navigation.previous());
     documentRef.getElementById("next-page").addEventListener("click", () => navigation.next());
     indicators.forEach((item) => item.addEventListener("click", () => navigation.go(Number(item.dataset.pageTarget), "indicator")));
+    campaignElements.selector.addEventListener("change", () => {
+      selectedCampaignId = safeIdentifier(campaignElements.selector.value, 180);
+      selectedCampaignStageId = "";
+      if (displayedProjection) {
+        const selected = renderCampaignDashboard(documentRef, campaignElements,
+          displayedProjection.campaigns || [], selectedCampaignId, selectedCampaignStageId);
+        selectedCampaignId = selected.campaign_id;
+        selectedCampaignStageId = selected.stage_id;
+      }
+      navigation.activity();
+    });
+    campaignElements.graph.addEventListener("click", (event) => {
+      const selected = event.target.closest && event.target.closest("[data-campaign-stage]");
+      if (!selected || !displayedProjection) return;
+      selectedCampaignStageId = safeIdentifier(selected.dataset.campaignStage, 40);
+      const result = renderCampaignDashboard(documentRef, campaignElements,
+        displayedProjection.campaigns || [], selectedCampaignId, selectedCampaignStageId);
+      selectedCampaignId = result.campaign_id;
+      selectedCampaignStageId = result.stage_id;
+      navigation.activity();
+    });
+    campaignElements.graph.addEventListener("keydown", (event) => {
+      if (!['Enter', ' '].includes(event.key)) return;
+      const selected = event.target.closest && event.target.closest("[data-campaign-stage]");
+      if (!selected) return;
+      event.preventDefault();
+      campaignElements.graph.emit ? campaignElements.graph.emit("click", {target: selected})
+        : selected.dispatchEvent(new MouseEvent("click", {bubbles: true}));
+    });
+    repositoryElements.tree.addEventListener("click", (event) => {
+      const selected = event.target.closest && event.target.closest("[data-repository-path]");
+      if (!selected || !displayedProjection) return;
+      selectedRepositoryPath = safeText(selected.dataset.repositoryPath, 500);
+      repositoryDetailOpen = true;
+      const result = renderRepositoryDashboard(documentRef, repositoryElements,
+        displayedProjection.repository, shell.dataset.projectionState || "unavailable",
+        selectedRepositoryPath, repositoryDetailOpen);
+      selectedRepositoryPath = result.path;
+      repositoryDetailOpen = result.detail_open;
+      navigation.activity();
+    });
+    repositoryElements.back.addEventListener("click", () => {
+      if (!displayedProjection) return;
+      repositoryDetailOpen = false;
+      const result = renderRepositoryDashboard(documentRef, repositoryElements,
+        displayedProjection.repository, shell.dataset.projectionState || "unavailable",
+        selectedRepositoryPath, repositoryDetailOpen);
+      selectedRepositoryPath = result.path;
+      repositoryDetailOpen = result.detail_open;
+      navigation.activity();
+    });
+    architectureElements.modes.forEach((button) => button.addEventListener("click", () => {
+      architectureMode = safeIdentifier(button.dataset.architectureMode, 20) || "current";
+      if (displayedProjection) {
+        const result = renderRoadmapInventory(documentRef, architectureElements,
+          displayedProjection.roadmap, {mode: architectureMode, selectedId: selectedRoadmapId,
+            filter: roadmapFilter});
+        architectureMode = result.mode; selectedRoadmapId = result.selected_id;
+      }
+      navigation.activity();
+    }));
+    architectureElements.filter.addEventListener("input", () => {
+      roadmapFilter = safeText(architectureElements.filter.value, 80);
+      if (displayedProjection) {
+        const result = renderRoadmapInventory(documentRef, architectureElements,
+          displayedProjection.roadmap, {mode: architectureMode, selectedId: selectedRoadmapId,
+            filter: roadmapFilter});
+        selectedRoadmapId = result.selected_id;
+      }
+      navigation.activity();
+    });
+    architectureElements.groups.addEventListener("click", (event) => {
+      const selected = event.target.closest && event.target.closest("[data-roadmap-id]");
+      if (!selected || !displayedProjection) return;
+      selectedRoadmapId = safeIdentifier(selected.dataset.roadmapId, 100);
+      const result = renderRoadmapInventory(documentRef, architectureElements,
+        displayedProjection.roadmap, {mode: architectureMode, selectedId: selectedRoadmapId,
+          filter: roadmapFilter});
+      selectedRoadmapId = result.selected_id;
+      navigation.activity();
+    });
+    architectureMap.addEventListener("click", (event) => {
+      const selected = event.target.closest && event.target.closest("[data-architecture-node]");
+      if (!selected) return;
+      selectedArchitectureId = safeIdentifier(selected.dataset.architectureNode, 40);
+      selectedArchitectureId = renderArchitectureDashboard(documentRef, architectureMap,
+        architectureDetail, displayedProjection ? displayedProjection.components : [],
+        shell.dataset.projectionState || "unavailable", selectedArchitectureId);
+      navigation.activity();
+    });
+    architectureMap.addEventListener("keydown", (event) => {
+      if (!['Enter', ' '].includes(event.key)) return;
+      const selected = event.target.closest && event.target.closest("[data-architecture-node]");
+      if (!selected) return;
+      event.preventDefault();
+      selectedArchitectureId = safeIdentifier(selected.dataset.architectureNode, 40);
+      selectedArchitectureId = renderArchitectureDashboard(documentRef, architectureMap,
+        architectureDetail, displayedProjection ? displayedProjection.components : [],
+        shell.dataset.projectionState || "unavailable", selectedArchitectureId);
+      navigation.activity();
+    });
+    documentRef.getElementById("architecture-reset").addEventListener("click", () => {
+      selectedArchitectureId = "development";
+      selectedRoadmapId = "";
+      roadmapFilter = "";
+      architectureElements.filter.value = "";
+      renderArchitectureDashboard(documentRef, architectureMap, architectureDetail,
+        displayedProjection ? displayedProjection.components : [], shell.dataset.projectionState || "unavailable",
+        selectedArchitectureId);
+      if (displayedProjection) {
+        const result = renderRoadmapInventory(documentRef, architectureElements,
+          displayedProjection.roadmap, {mode: architectureMode, selectedId: "", filter: ""});
+        selectedRoadmapId = result.selected_id;
+      }
+      navigation.activity();
+    });
+    saveUpdate.addEventListener("click", () => { navigation.activity(); savePreparedUpdate(); });
+    preparedUpdates.addEventListener("click", async (event) => {
+      const button = event.target.closest && event.target.closest("[data-copy-update-id]");
+      if (!button || !fetchImpl) return;
+      navigation.activity();
+      const snapshotId = safeIdentifier(button.dataset.copyUpdateId, 90);
+      try {
+        const update = await fetchJson(fetchImpl, `${ENDPOINTS.updates}/${snapshotId}`, 10000);
+        const content = typeof update.content === "string" ? update.content : "";
+        if (!content) throw new Error("The saved update content is unavailable.");
+        const clipboard = value.clipboard || (root.navigator && root.navigator.clipboard);
+        if (!clipboard || typeof clipboard.writeText !== "function") throw new Error("Clipboard access is unavailable.");
+        await clipboard.writeText(content);
+        updateResult.textContent = `Copied · ${snapshotId}`;
+      } catch (error) {
+        updateResult.textContent = "Copy unavailable; use Download .txt or the selectable text below.";
+        try {
+          const update = await fetchJson(fetchImpl, `${ENDPOINTS.updates}/${snapshotId}`, 10000);
+          const fallback = element(documentRef, "pre", "code-scroll selectable-update",
+            safeMultilineText(update.content, 96000));
+          button.closest(".prepared-update").appendChild(fallback);
+        } catch (_ignored) { /* Download remains the exact server-owned fallback. */ }
+      }
+    });
     shell.addEventListener("click", (event) => {
       navigation.activity();
       const pageLink = event.target.closest && event.target.closest("[data-page-link]");
@@ -844,14 +1772,16 @@
     });
     shell.addEventListener("keydown", (event) => {
       navigation.activity();
-      if (event.target.closest && event.target.closest(".code-scroll")) return;
+      if (event.target.closest && event.target.closest(
+        ".code-scroll, input, select, button, .gesture-surface")) return;
       if (event.key === "ArrowLeft") { event.preventDefault(); navigation.previous(); }
       if (event.key === "ArrowRight") { event.preventDefault(); navigation.next(); }
     });
     const stack = documentRef.getElementById("page-stack");
     stack.addEventListener("pointerdown", (event) => {
       pointerStart = {x: event.clientX, y: event.clientY,
-        codeScroll: Boolean(event.target.closest && event.target.closest(".code-scroll"))};
+        codeScroll: Boolean(event.target.closest
+          && event.target.closest(".code-scroll, .gesture-surface"))};
       navigation.activity();
     });
     stack.addEventListener("pointerup", (event) => {
@@ -863,11 +1793,13 @@
     stack.addEventListener("pointercancel", () => { pointerStart = null; });
 
     refresh();
+    if (value.disableUpdateRefresh !== true) refreshPreparedUpdates();
     pollTimer = value.pollIntervalMs === 0 || !root.setInterval
       ? null : root.setInterval(refresh, Number.isFinite(value.pollIntervalMs) ? value.pollIntervalMs : 10000);
     return {
       navigation,
       refresh,
+      refreshPreparedUpdates,
       stop: function () {
         stopped = true;
         navigation.destroy();
@@ -883,6 +1815,10 @@
     PAGE_TITLES,
     parseIdleSeconds,
     classifyProjectionState,
+    previewContextLabel,
+    campaignObservation,
+    activityHeading,
+    campaignStatusLabel,
     isHorizontalSwipe,
     safeAttentionHref,
     normalizeCampaignProjection,
@@ -890,7 +1826,16 @@
     normalizeAttentionResponse,
     normalizeRuntimeResponse,
     normalizeStatusResponse,
+    normalizeRepositoryResponse,
+    normalizeJobsResponse,
+    normalizeRoadmapResponse,
     normalizePayloads,
+    campaignGraphStages,
+    campaignGraphModel,
+    selectCampaign,
+    architectureObservation,
+    managedFeedObservation,
+    renderRoadmapInventory,
     ConsoleNavigation,
     boot,
     startConsole: boot

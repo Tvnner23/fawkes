@@ -116,7 +116,7 @@ def run_codex_development_handoff(*, instance_id, payload, authenticated_rider,
                                   now=None, approval_handler=None,
                                   worker_timeout_seconds=180,
                                   runtime_state_root=None,
-                                  provider_reservation_owner=None):
+                                  provider_reservation_owner=None, progress_handler=None):
     """Prepare, send, retain, and present one explicitly selected Codex task."""
     if authenticated_rider is not True:
         raise PermissionError("authenticated rider authority is required")
@@ -149,7 +149,7 @@ def run_codex_development_handoff(*, instance_id, payload, authenticated_rider,
     if adapter is None:
         runner = exec_compatible_app_server_runner(campaign_id=payload.get("campaign_id") or task_scope_id,
             invocation_id=invocation_id, worker=target["worker"],
-            approval_handler=approval_handler)
+            approval_handler=approval_handler, progress_handler=progress_handler)
         adapter_arguments = {"workspace": workspace, "run_process": runner,
             "timeout_seconds": worker_timeout_seconds,
             "runtime_state_root": runtime_state_root}

@@ -422,7 +422,67 @@ class CodexDevelopmentCampaign:
             approval_handler=self._handle_typed_approval,
             worker_timeout_seconds=self.worker_timeout_seconds,
             runtime_state_root=self.runtime_state_root,
-            provider_reservation_owner=self if payload.get("stepwise_v01") else None)
+            provider_reservation_owner=self if payload.get("stepwise_v01") else None,
+            progress_handler=self.record_managed_worker_activity)
+
+    def record_managed_worker_activity(self, event):
+        """Bounded observational sidecar, never campaign state or authority.
+
+        Do not bump the campaign revision while its synchronous builder is
+        executing. The campaign lock still orders publication with cancellation.
+        """
+        from src.runtime.development_attention import _linux_process_identity
+        campaign_id = require_id(event.get("campaign_id"), "campaign_id")
+        invocation_id = require_id(event.get("invocation_id"), "invocation_id")
+        with self.store.protected(campaign_id):
+            campaign = self.store.load(campaign_id)
+            scope = campaign.get("active_builder_task_scope_id")
+            if not scope or invocation_id != scope + "-appserver":
+                raise PermissionError("activity is not bound to the active managed Worker")
+            if event.get("state") not in {"running", "waiting", "completed", "failed", "disconnected"}:
+                raise ValueError("unknown managed Worker observation")
+            path = self.store.root / ".managed-activity" / (invocation_id + ".json")
+            old = json.loads(path.read_text()) if path.exists() else {}
+            if old and old.get("record_sha256") != _digest({k:v for k,v in old.items() if k != "record_sha256"}):
+                raise ValueError("managed activity record integrity mismatch")
+            events = old.get("events", [])
+            if any(item["event_id"] == event["event_id"] for item in events): return
+            from src.runtime.codex_app_server import _safe
+            public = {key: event[key] for key in ("event_id", "created_at", "kind", "state")}
+            message = _safe(event.get("public_message"))
+            encoded = message.encode("utf-8")
+            public["public_message"] = (encoded[:1900].decode("utf-8", errors="ignore") + " [truncated]"
+                                        if len(encoded) > 1900 else message)
+            value = {"campaign_id": campaign_id, "invocation_id": invocation_id,
+                "worker_id": event["worker"]["worker_id"], "process_id": event["process_id"],
+                "process_identity": _linux_process_identity(event["process_id"]),
+                "events": [*events, public][-64:], "state": event["state"],
+                "updated_at": event["created_at"], "creates_authority": False,
+                "creates_continuing_authority": False}
+            value["record_sha256"] = _digest(value)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = path.with_suffix('.tmp')
+            with temporary.open('w', encoding='utf-8') as stream:
+                json.dump(value, stream); stream.flush(); os.fsync(stream.fileno())
+            temporary.replace(path)
+
+    def managed_worker_activity_projection(self, campaign_id):
+        from src.runtime.development_attention import _linux_process_identity
+        values = []
+        root = self.store.root / ".managed-activity"
+        if not root.exists(): return []
+        for path in root.glob('*.json'):
+            value = json.loads(path.read_text())
+            if value.get("campaign_id") != campaign_id: continue
+            if value.get("record_sha256") != _digest({k:v for k,v in value.items() if k != "record_sha256"}):
+                raise ValueError("managed activity record integrity mismatch")
+            state = value["state"]
+            if state in {"running", "waiting"} and (not value.get("process_identity") or
+                    _linux_process_identity(value["process_id"]) != value["process_identity"]):
+                state = "disconnected"
+            values.append({k:value[k] for k in ("invocation_id", "worker_id", "events", "updated_at")}
+                          | {"state": state, "creates_authority": False})
+        return sorted(values, key=lambda x:x["updated_at"], reverse=True)[:8]
 
     @staticmethod
     def _budget_from_payload(payload, created):
@@ -844,6 +904,15 @@ class CodexDevelopmentCampaign:
             raise
         decision = result["decision"]
         if (decision.get("choice") == "approve_once"
+                and approval["protocol"].get("managed_material_record_sha256")):
+            with self.store.protected(approval["campaign_id"]):
+                current = self.store.load(approval["campaign_id"])
+                retained = self.attention_store.lifecycle(attention_id).get("decision") or {}
+                if (current.get("status") != "ready_for_bounded_continuation"
+                        or (retained.get("campaign_publication") or {}).get("state") != "published"
+                        or retained.get("decision_id") != decision.get("decision_id")):
+                    raise PermissionError("managed Worker decision publication is incomplete")
+        if (decision.get("choice") == "approve_once"
                 and approval["protocol"].get(
                     "approval_binding_kind") == "independent_review_provider"):
             # DevelopmentAttentionStore.decide wakes its waiter after the exact
@@ -1218,6 +1287,13 @@ class CodexDevelopmentCampaign:
         if record["cancelled"] or record["status"] in {"succeeded", "cancelled"}:
             raise RuntimeError("terminal campaign cannot request new authority")
         binding = dict(protocol_binding or {})
+        if binding.get("managed_material_record_sha256"):
+            budget = record.get("execution_budget_v01") or {}
+            if budget:
+                remaining = (datetime.fromisoformat(budget["expires_at"]) - datetime.now(timezone.utc)).total_seconds()
+                if remaining < 1:
+                    raise PermissionError("managed campaign duration has expired")
+                expires_in_seconds = min(int(remaining), int(expires_in_seconds or remaining))
         binding.setdefault("rider_id", "tanner")
         if binding.get("approval_binding_kind") == "independent_review_provider":
             self._validated_review_attention_binding(
@@ -1293,8 +1369,7 @@ class CodexDevelopmentCampaign:
                 "creates_authority": False,
                 "creates_continuing_authority": False,
             } if review_action else None)
-            review_bound = ((result.get("event", {}).get("protocol_binding") or {}).get(
-                "approval_binding_kind") == "independent_review_provider")
+            review_bound = self.attention_store.requires_campaign_publication(result.get("event", {}))
             try:
                 updated = self._update(record, event_kind=f"tanner_attention_{choice}",
                     event_detail={"attention_id": attention_id,
@@ -2272,6 +2347,7 @@ class CodexDevelopmentCampaign:
             },
             "operational_learning_observations": observations,
             "live_activity": campaign_activity_projection(record),
+            "managed_worker_activity": self.managed_worker_activity_projection(campaign_id),
             "automatic_promotion": False, "derived_from_campaign_record": True,
             "exact_worker_evidence_remains_in_exchange": True, "creates_authority": False}
 

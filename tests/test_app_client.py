@@ -80,13 +80,16 @@ class FawkesAppClientTests(unittest.TestCase):
 
     def test_failed_decision_response_is_bound_to_exact_lifecycle(self):
         source = (ROOT / "src/app/static/app.js").read_text()
+        source += (ROOT / "src/app/static/attention-binding.js").read_text()
         server = (ROOT / "src/app/server.py").read_text()
         self.assertIn("error.payload = data", source)
         self.assertIn("Decision submission failed", source)
         self.assertIn("Refreshing expired request", source)
         self.assertIn("canonicalAttentionIdentity(attention)", source)
         self.assertIn("const attentionSubmissions = new Map()", source)
-        self.assertIn("JSON.stringify(binding) === JSON.stringify(expected)", source)
+        self.assertIn("exactIdentityFields(binding, expected)", source)
+        self.assertIn("Object.keys(actual).length === keys.length", source)
+        self.assertIn("actual[key] === expected[key]", source)
         self.assertIn("decision.authority_binding_sha256 !== expectedAuthorityBindingSha256", source)
         self.assertIn("function canonicalFailureDecisionResult", source)
         self.assertIn("const failureLifecycle=canonicalFailureDecisionResult", source)
@@ -112,6 +115,7 @@ class FawkesAppClientTests(unittest.TestCase):
 
     def test_attention_decision_submission_is_immutable_tuple_bound(self):
         source = (ROOT / "src/app/static/app.js").read_text()
+        source += (ROOT / "src/app/static/attention-binding.js").read_text()
         self.assertIn("const immutableIdentity=canonicalAttentionIdentity(attention)", source)
         self.assertIn("function canonicalAttentionIdentity(attention)", source)
         self.assertIn("identity:immutableIdentity", source)

@@ -2,6 +2,10 @@
 
 import os
 from pathlib import Path
+import re
+import shutil
+import signal
+import subprocess
 import threading
 import time
 import uuid
@@ -47,12 +51,395 @@ from src.capabilities.library import LIBRARY_RETAIN_DEFINITION, LIBRARY_EXTRACT_
 from src.library.artifacts import require_id
 
 
+class ConsoleAttentionService:
+    """Provider-free facade over explicitly supplied canonical campaign owners.
+
+    Supplying this facade never creates a campaign, provider, or approval.
+    The managed Worker must be launched separately by the existing campaign
+    entrypoint with these same durable roots and its own bounded authority.
+    """
+    def __init__(self, campaign, *, repository):
+        self.campaign = campaign
+        self.instance_id = campaign.instance_id
+        self.repository = Path(repository)
+
+    def list_codex_development_campaigns(self):
+        return {"campaigns": self.campaign.list_presentations()}
+
+    def development_console_repository_projection(self):
+        return build_development_console_repository_projection(self.repository)
+
+    def development_attention_projection(self, *, pending_only=False):
+        return {"attention": self.campaign.attention_store.projection(pending_only=pending_only),
+                "creates_authority": False, "creates_continuing_authority": False}
+
+    def development_attention_event(self, attention_id):
+        value = self.campaign.attention_store.lifecycle(attention_id)
+        return {"attention": value["event"], "decision": value["decision"],
+                "creates_authority": False, "creates_continuing_authority": False}
+
+    def decide_development_attention(self, campaign_id, attention_id, choice,
+                                     *, authenticated_rider=False, expected_identity=None):
+        value = self.campaign.decide_attention(campaign_id, attention_id, choice,
+            authenticated_rider=authenticated_rider, expected_identity=expected_identity)
+        return {"campaign": self.campaign.presentation(campaign_id),
+                "attention": value["event"], "decision": value["decision"]}
+
+    def production_component_status(self):
+        # This isolated console does not inspect/initialize production stores.
+        # Connection freshness is not a measurement of those components.
+        return {"components": {"app_server": {"state": "unknown"},
+                               "stack": {"state": "unknown"},
+                               "discord_bridge": {"state": "unknown"}},
+                "creates_authority": False}
+
+
 class ChatServiceError(RuntimeError):
     """A safe, user-facing failure at the chat application boundary."""
 
     def __init__(self, message, *, code="chat_unavailable"):
         super().__init__(message)
         self.code = code
+
+
+DEVELOPMENT_CONSOLE_REPOSITORY_MAX_FILES = 32
+DEVELOPMENT_CONSOLE_DIFF_MAX_BYTES = 2_048
+DEVELOPMENT_CONSOLE_GIT_MAX_STDOUT_BYTES = 128 * 1_024
+DEVELOPMENT_CONSOLE_GIT_MAX_STDERR_BYTES = 16 * 1_024
+DEVELOPMENT_CONSOLE_GIT_MAX_CONFIG_BYTES = 64 * 1_024
+DEVELOPMENT_CONSOLE_GIT_TIMEOUT_SECONDS = 5
+_CONSOLE_SECRET_LABEL = re.compile(r'''(?ix)
+    (?:authorization|credential|token|api[_\s-]?key|webhook|password|secret)
+    \s*[:=]\s*(?:(?:bearer|basic|token)\s+)?
+    (?:"(?:\\.|[^"])*"|'(?:\\.|[^'])*'|[^,\s;}\]]+)
+''')
+_CONSOLE_SECRET_TOKEN = re.compile(
+    r'''(?ix)(?:\bsk-[A-Za-z0-9_-]{20,}\b|\bgh[pousr]_[A-Za-z0-9]{20,}\b|
+    https://(?:canary\.|ptb\.)?discord(?:app)?\.com/api/webhooks/\d+/[A-Za-z0-9_-]{20,})''')
+_CONSOLE_PRIVATE_KEY_BEGIN = re.compile(
+    r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----", re.IGNORECASE)
+_CONSOLE_PRIVATE_KEY_END = re.compile(
+    r"-----END (?:RSA |EC |OPENSSH )?PRIVATE KEY-----", re.IGNORECASE)
+
+
+def _console_git_reader(stream, limit, destination, overflow):
+    chunks = []
+    retained = 0
+    try:
+        while True:
+            chunk = stream.read(min(16_384, limit + 1 - retained))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            retained += len(chunk)
+            if retained > limit:
+                overflow.set()
+                break
+        destination.append(b"".join(chunks))
+    except BaseException as exc:
+        destination.append(exc)
+
+
+def _stop_console_git(process):
+    try:
+        if os.name == "posix":
+            os.killpg(process.pid, signal.SIGKILL)
+        else:
+            process.kill()
+    except (OSError, ProcessLookupError):
+        pass
+
+
+def _console_git_environment():
+    return {
+        "PATH": os.defpath,
+        "GIT_OPTIONAL_LOCKS": "0",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_LITERAL_PATHSPECS": "1",
+        "LC_ALL": "C",
+        "LANG": "C",
+    }
+
+
+def _console_git_directory(repository):
+    root = Path(repository).resolve(strict=True)
+    git_directory = root / ".git"
+    config = git_directory / "config"
+    if (git_directory.is_symlink() or not git_directory.is_dir()
+            or config.is_symlink() or not config.is_file()
+            or config.stat().st_size > DEVELOPMENT_CONSOLE_GIT_MAX_CONFIG_BYTES):
+        raise ChatServiceError(
+            "The bounded repository projection is unavailable.",
+            code="repository_projection_unavailable",
+        )
+    return root, git_directory.resolve(strict=True), config
+
+
+def _console_git_local_config_is_passive(executable, config):
+    try:
+        completed = subprocess.run(
+            [executable, "config", "list", "--file", str(config),
+             "--no-includes", "--name-only", "--null"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env=_console_git_environment(), timeout=1, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        completed = None
+    if (completed is None or completed.returncode != 0
+            or len(completed.stdout) > DEVELOPMENT_CONSOLE_GIT_MAX_CONFIG_BYTES
+            or len(completed.stderr) > DEVELOPMENT_CONSOLE_GIT_MAX_STDERR_BYTES):
+        raise ChatServiceError(
+            "The bounded repository projection is unavailable.",
+            code="repository_projection_unavailable",
+        )
+    names = [name.decode("utf-8", errors="surrogateescape").lower()
+             for name in completed.stdout.split(b"\0") if name]
+    unsafe = any(
+        name in {"core.worktree", "core.fsmonitor", "core.hookspath",
+                 "core.attributesfile", "diff.external"}
+        or name.startswith("include.") or name.startswith("includeif.")
+        or name.startswith("filter.")
+        or (name.startswith("diff.") and name.rsplit(".", 1)[-1] in {
+            "command", "textconv",
+        })
+        for name in names
+    )
+    if unsafe:
+        raise ChatServiceError(
+            "The bounded repository projection is unavailable.",
+            code="repository_projection_unavailable",
+        )
+
+
+def _console_git(repository, *arguments):
+    executable = shutil.which("git", path=os.defpath)
+    if not executable:
+        raise ChatServiceError(
+            "The bounded repository projection is unavailable.",
+            code="repository_projection_unavailable",
+        )
+    root, git_directory, config = _console_git_directory(repository)
+    _console_git_local_config_is_passive(executable, config)
+    process = subprocess.Popen(
+        [executable, "--git-dir=" + str(git_directory), "--work-tree=" + str(root),
+         "-c", "core.worktree=" + str(root),
+         "-c", "core.pager=cat", "-c", "credential.helper=",
+         "-c", "core.attributesFile=/dev/null", "-c", "core.hooksPath=/dev/null",
+         "-c", "core.fsmonitor=false", "-c", "diff.external=", *arguments],
+        cwd=root, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, env=_console_git_environment(),
+        start_new_session=(os.name == "posix"),
+    )
+    stdout = []
+    stderr = []
+    overflow = threading.Event()
+    readers = (
+        threading.Thread(target=_console_git_reader, args=(
+            process.stdout, DEVELOPMENT_CONSOLE_GIT_MAX_STDOUT_BYTES, stdout, overflow),
+            daemon=True),
+        threading.Thread(target=_console_git_reader, args=(
+            process.stderr, DEVELOPMENT_CONSOLE_GIT_MAX_STDERR_BYTES, stderr, overflow),
+            daemon=True),
+    )
+    for reader in readers:
+        reader.start()
+    deadline = time.monotonic() + DEVELOPMENT_CONSOLE_GIT_TIMEOUT_SECONDS
+    while process.poll() is None and not overflow.wait(0.01):
+        if time.monotonic() >= deadline:
+            overflow.set()
+            break
+    if overflow.is_set() and process.poll() is None:
+        _stop_console_git(process)
+    try:
+        process.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        _stop_console_git(process)
+        process.wait(timeout=1)
+    for reader in readers:
+        reader.join(timeout=1)
+    readers_alive = any(reader.is_alive() for reader in readers)
+    for stream in (process.stdout, process.stderr):
+        stream.close()
+    failed_reader = any(not values or isinstance(values[0], BaseException)
+                        for values in (stdout, stderr))
+    if (overflow.is_set() or failed_reader or readers_alive
+            or process.returncode != 0):
+        raise ChatServiceError(
+            "The bounded repository projection is unavailable.",
+            code="repository_projection_unavailable",
+        )
+    return stdout[0]
+
+
+def _console_git_reject_active_filters(repository):
+    tracked = [path for path in _console_git(repository, "ls-files", "-z").split(b"\0")
+               if path]
+    chunks = []
+    current = []
+    current_bytes = 0
+    for path in tracked:
+        path_bytes = len(path) + 1
+        if current and (len(current) >= 128 or current_bytes + path_bytes > 16_384):
+            chunks.append(current)
+            current = []
+            current_bytes = 0
+        current.append(os.fsdecode(path))
+        current_bytes += path_bytes
+    if current:
+        chunks.append(current)
+    for chunk in chunks:
+        values = _console_git(
+            repository, "check-attr", "-z", "filter", "--", *chunk,
+        ).split(b"\0")
+        if values and not values[-1]:
+            values.pop()
+        if len(values) % 3 or any(
+                values[index] not in {b"unspecified", b"unset"}
+                for index in range(2, len(values), 3)):
+            raise ChatServiceError(
+                "The bounded repository projection is unavailable.",
+                code="repository_projection_unavailable",
+            )
+
+
+def sanitize_development_console_diff(text):
+    """Remove configured high-confidence secret lines from one readable diff."""
+    if not isinstance(text, str):
+        raise TypeError("development console diff must be text")
+    redacted = []
+    private_key = False
+    for line in text.splitlines(keepends=True):
+        body = line.rstrip("\r\n")
+        ending = line[len(body):]
+        begin = bool(_CONSOLE_PRIVATE_KEY_BEGIN.search(body))
+        end = bool(_CONSOLE_PRIVATE_KEY_END.search(body))
+        sensitive = (private_key or begin or _CONSOLE_SECRET_LABEL.search(body)
+                     or _CONSOLE_SECRET_TOKEN.search(body))
+        if sensitive:
+            marker = body[:1] if body[:1] in {"+", "-", " "} else ""
+            redacted.append(marker + "<redacted-sensitive-line>" + ending)
+        else:
+            redacted.append(line)
+        if begin:
+            private_key = True
+        if end:
+            private_key = False
+    return "".join(redacted)
+
+
+def _bounded_console_diff(value):
+    text = sanitize_development_console_diff(value.decode("utf-8", errors="replace"))
+    clipped = text.encode("utf-8")[:DEVELOPMENT_CONSOLE_DIFF_MAX_BYTES]
+    return clipped.decode("utf-8", errors="ignore")
+
+
+def build_development_console_repository_projection(repository):
+    """Return one HEAD-bound Git projection without exposing a filesystem browser."""
+    root = Path(repository).resolve(strict=True)
+    _console_git_reject_active_filters(root)
+    head = _console_git(root, "rev-parse", "--verify", "HEAD").decode().strip()
+    parent_line = _console_git(root, "rev-list", "--parents", "-n", "1", head).decode().split()
+    comparison_base = parent_line[1] if len(parent_line) > 1 else "root"
+    branch = _console_git(root, "branch", "--show-current").decode().strip() or "detached"
+    status_records = _console_git(
+        root, "status", "--porcelain=v2", "--untracked-files=all", "-z",
+    ).split(b"\0")
+    summary = {
+        "dirty_paths": 0,
+        "tracked_changes": 0,
+        "untracked_paths": 0,
+        "staged_paths": 0,
+        "deleted_paths": 0,
+    }
+    states = {}
+    for raw in status_records:
+        if not raw:
+            continue
+        kind = raw[:1]
+        if kind not in {b"1", b"2", b"u", b"?"}:
+            continue
+        summary["dirty_paths"] += 1
+        if kind == b"?":
+            path = raw[2:].decode("utf-8", errors="replace")
+            summary["untracked_paths"] += 1
+            states[path] = "untracked"
+            continue
+        summary["tracked_changes"] += 1
+        fields = raw.split(b" ", 9 if kind == b"2" else 8)
+        if len(fields) < 2:
+            raise ChatServiceError(
+                "The bounded repository projection is malformed.",
+                code="repository_projection_unavailable",
+            )
+        xy = fields[1].decode("ascii", errors="replace")
+        path = fields[-1].decode("utf-8", errors="replace")
+        if xy[:1] not in {".", " "}:
+            summary["staged_paths"] += 1
+        if "D" in xy:
+            summary["deleted_paths"] += 1
+            states[path] = "deleted"
+        elif "T" in xy:
+            states[path] = "type_changed"
+        elif xy[:1] not in {".", " "}:
+            states[path] = "staged"
+        else:
+            states[path] = "modified"
+
+    changed = _console_git(
+        root, "diff-tree", "--root", "--no-commit-id", "--name-status",
+        "--no-renames", "-r", "-z", head,
+    ).split(b"\0")
+    head_paths = []
+    for index in range(0, len(changed) - 1, 2):
+        change = changed[index].decode("ascii", errors="replace")
+        path = changed[index + 1].decode("utf-8", errors="replace")
+        if change and path:
+            head_paths.append((path, change))
+    head_paths = sorted(head_paths)[:DEVELOPMENT_CONSOLE_REPOSITORY_MAX_FILES]
+
+    files = []
+    for path, change in head_paths:
+        tree = _console_git(root, "ls-tree", "-z", head, "--", path)
+        if not tree:
+            continue
+        metadata, retained_path = tree.rstrip(b"\0").split(b"\t", 1)
+        mode, object_type, object_id = metadata.decode("ascii").split()
+        exact_path = retained_path.decode("utf-8", errors="replace")
+        if exact_path != path:
+            raise ChatServiceError(
+                "The bounded repository projection changed path identity.",
+                code="repository_projection_unavailable",
+            )
+        diff_arguments = (
+            ("show", "--format=", "--no-ext-diff", "--no-textconv", "--unified=2", head)
+            if comparison_base == "root" else
+            ("diff", "--no-ext-diff", "--no-textconv", "--unified=2", comparison_base, head)
+        )
+        diff = _bounded_console_diff(_console_git(
+            root, *diff_arguments, "--", path,
+        ))
+        files.append({
+            "path": path,
+            "mode": mode,
+            "object_type": object_type,
+            "object_id": object_id,
+            "head_change": change,
+            "worktree_state": states.get(path, "clean"),
+            "revision": head,
+            "review_status": "not_projected",
+            "diff_excerpt": diff,
+        })
+    return {
+        "branch": branch,
+        "head": head,
+        "comparison_base": comparison_base,
+        "selection_basis": "head_commit_paths",
+        "status_summary": summary,
+        "files": files,
+        "creates_authority": False,
+        "creates_continuing_authority": False,
+    }
 
 
 class FawkesChatService:
@@ -1205,6 +1592,14 @@ class FawkesChatService:
     def list_codex_development_campaigns(self):
         campaign = CodexDevelopmentCampaign(self.instance_id)
         return {"campaigns": campaign.list_presentations()}
+
+    def development_console_repository_projection(self):
+        return build_development_console_repository_projection(
+            Path(os.getenv(
+                "FAWKES_DEVELOPMENT_ROOT",
+                str(Path(__file__).resolve().parents[2]),
+            ))
+        )
 
     def cancel_codex_development_campaign(self, campaign_id, *, authenticated_rider=False):
         campaign = CodexDevelopmentCampaign(self.instance_id)

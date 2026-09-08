@@ -787,6 +787,32 @@ class CodexWriteBuilderAdapter(CodexExecWorkerAdapter):
             "--ignore-user-config", "--strict-config", "--sandbox", "workspace-write",
             "--cd", str(candidate_root), "--output-schema", str(schema_path),
             "--output-last-message", str(output_path), "-"]
+        bind_native = getattr(self.run_process, "bind_attention_context", None)
+        if callable(bind_native):
+            def native_context():
+                current = _workspace_snapshot(candidate_root)
+                changes = _diff(before, current)
+                if any(not _in_scope(item["path"], scope_contract) for item in changes):
+                    raise PermissionError("managed candidate drift exceeds the authorized scope")
+                frozen = candidate_manifest(candidate_root)
+                if current != _workspace_snapshot(candidate_root):
+                    raise PermissionError("managed candidate changed during permission binding")
+                evidence = {"record_type": "managed_native_request_material", "candidate": frozen,
+                    "changes": changes, "scope": scopes, "request_sha256": request["record_sha256"],
+                    "invocation_id": invocation_id, "package_id": package_id,
+                    "creates_authority": False, "creates_continuing_authority": False}
+                evidence["record_sha256"] = _digest(evidence)
+                retained = directory / "native-request-material" / (evidence["record_sha256"] + ".json")
+                retained.parent.mkdir(exist_ok=True)
+                if not retained.exists():
+                    with retained.open('x', encoding='utf-8') as stream:
+                        json.dump(evidence, stream); stream.flush(); os.fsync(stream.fileno())
+                return {"candidate_snapshot_id": frozen["candidate_snapshot_id"],
+                    "candidate_record_sha256": _digest(frozen),
+                    "mutation_digest_sha256": _digest(changes),
+                    "authorized_scope_sha256": scope_sha,
+                    "managed_scope": scopes, "managed_material_record_sha256": evidence["record_sha256"]}
+            bind_native(native_context)
         try:
             environment = self._subprocess_environment(PYTHONDONTWRITEBYTECODE="1")
             # Memory's private processing database is runtime state, not source.

@@ -27,18 +27,42 @@ const consoleApi = moduleBox.exports;
 const {
   parseIdleSeconds,
   classifyProjectionState,
+  previewContextLabel,
+  campaignObservation,
+  activityHeading,
+  campaignStatusLabel,
   isHorizontalSwipe,
   safeAttentionHref,
   normalizePayloads,
+  normalizeRepositoryResponse,
+  campaignGraphModel,
+  campaignGraphStages,
+  selectCampaign,
+  architectureObservation,
+  normalizeJobsResponse,
+  normalizeRoadmapResponse,
+  managedFeedObservation,
   ConsoleNavigation,
 } = consoleApi;
 
 for (const [name, value] of Object.entries({
   parseIdleSeconds,
   classifyProjectionState,
+  previewContextLabel,
+  campaignObservation,
+  activityHeading,
+  campaignStatusLabel,
   isHorizontalSwipe,
   safeAttentionHref,
   normalizePayloads,
+  normalizeRepositoryResponse,
+  campaignGraphModel,
+  campaignGraphStages,
+  selectCampaign,
+  architectureObservation,
+  normalizeJobsResponse,
+  normalizeRoadmapResponse,
+  managedFeedObservation,
   ConsoleNavigation,
 })) {
   assert.ok(value, `missing testable export ${name}`);
@@ -76,6 +100,19 @@ assert.strictEqual(classifyProjectionState({
   currentSuccess: true, previousSuccess: false, malformed: true,
   nowMs: observed, observedAtMs: observed,
 }), 'unavailable');
+assert.strictEqual(previewContextLabel({mode: 'development_checkout'}), 'DEVELOPMENT PREVIEW');
+assert.strictEqual(
+  previewContextLabel({mode: 'development_checkout'}, `UNREVIEWED:${'a'.repeat(64)}`),
+  `UNREVIEWED · ${'a'.repeat(12)}`,
+);
+assert.strictEqual(previewContextLabel({mode: 'approved_release'}), 'APPROVED RELEASE');
+assert.strictEqual(campaignObservation([], 'live').label, 'EXECUTION UNAVAILABLE');
+assert.strictEqual(campaignObservation([{status: 'succeeded', terminal: true}], 'live').label, 'NO OPEN CAMPAIGN RECORD');
+assert.strictEqual(campaignObservation([{status: 'ready', terminal: false}], 'live').label, 'EXECUTION NOT OBSERVED');
+assert.strictEqual(campaignObservation([{status: 'tanner_escalation', terminal: false}], 'live').label, 'EXECUTION NOT OBSERVED');
+assert.strictEqual(campaignObservation([], 'stale').label, 'EXECUTION UNKNOWN');
+assert.strictEqual(activityHeading('independent_review_retained'), 'Independent review recorded');
+assert.strictEqual(campaignStatusLabel('failed_safe'), 'Stopped safely');
 
 // Horizontal page gestures are distinct from vertical and code scrolling.
 assert.strictEqual(isHorizontalSwipe(200, 100, 100, 106), true);
@@ -136,6 +173,10 @@ const rawProjection = {
           reason: 'Exact protected action needs Tanner.',
           detail_url: attentionHref,
         },
+        managed_worker_activity: [{
+          invocation_id: 'managed-fixture', worker_id: 'worker-safe',
+          updated_at: new Date(fixtureNow).toISOString(), state: 'running', events: [],
+        }],
         creates_authority: false,
   }],
   attention: [{
@@ -156,6 +197,55 @@ const rawProjection = {
     {name: 'app_server', state: 'READY', credential: 'hidden'},
     {name: 'reviewer_launcher', state: 'IDLE', prompt: 'hidden'},
   ],
+  jobs: [{
+    job_id: 'campaign-safe', objective: 'Finish the Pi console', state: 'needs_you',
+    recorded_status: 'needs_tanner', current_step: 'review',
+    last_activity_at: '2026-09-07T12:00:00+00:00', accomplished: null,
+    gained: null, next: 'Answer the exact pending request',
+    successful: false, historical: false,
+    worker: {worker_id: 'worker-safe'}, creates_authority: false,
+  }],
+  roadmap: {
+    schema_version: 'fawkes.console.roadmap.v1',
+    source_path: 'docs/phoenix/CANONICAL_ROADMAP.md', source_sha256: '4'.repeat(64),
+    source_revision: '1'.repeat(40), coverage_complete: true,
+    expected_phase_ids: Array.from({length: 40}, (_, number) => `phase-${number}`),
+    phases: Array.from({length: 40}, (_, number) => ({
+      id: `phase-${number}`, number, name: `Capability ${number}`,
+      summary: `Lets Fawkes provide sourced capability number ${number} without claiming deployment.`,
+      maturity: number === 9 ? 'implemented' : 'planned', source_status: 'canonical',
+      source: 'docs/phoenix/CANONICAL_ROADMAP.md', group: number < 10 ? 'Foundations' : 'Roadmap',
+      source_sha256: '4'.repeat(64), source_revision: '1'.repeat(40), source_bytes: 150000,
+      source_excerpt: '',
+      prerequisites: number === 1 ? ['phase-0'] : [], runtime_state: 'unknown',
+    })),
+    tracks: [{id: 'track-home', name: 'Dedicated home infrastructure',
+      summary: 'Keeps Fawkes available when Tanner’s personal computer is shut down.',
+      maturity: 'planned', source_status: 'recorded_requirement',
+      source: 'Tanner console-completion roadmap addendum', group: 'Cross-cutting and product tracks',
+      source_sha256: '5'.repeat(64), source_revision: '1'.repeat(40), source_bytes: 45,
+      source_excerpt: 'Synthetic retained source: dedicated home availability.',
+      mapped_component: 'infrastructure', prerequisites: [], runtime_state: 'unknown'}],
+    creates_authority: false, creates_continuing_authority: false,
+  },
+  repository: {
+    branch: 'fixture/console',
+    head: '1'.repeat(40),
+    comparison_base: '3'.repeat(40),
+    selection_basis: 'head_commit_paths',
+    status_summary: {
+      dirty_paths: 2, tracked_changes: 1, untracked_paths: 1,
+      staged_paths: 0, deleted_paths: 0,
+    },
+    files: [{
+      path: 'src/app/server.py', mode: '100644', object_type: 'blob',
+      object_id: '2'.repeat(40), head_change: 'M', worktree_state: 'modified',
+      revision: '1'.repeat(40), review_status: 'not_projected',
+      diff_excerpt: '@@ -1 +1 @@\n-old\n+new\n', private_body: 'hidden',
+    }],
+    creates_authority: false,
+    creates_continuing_authority: false,
+  },
   creates_authority: false,
   creates_continuing_authority: false,
 };
@@ -172,6 +262,17 @@ assert.strictEqual(normalized.campaigns.length, 1);
 assert.strictEqual(normalized.campaigns[0].campaign_id, 'campaign-safe');
 assert.strictEqual(normalized.attention.length, 1);
 assert.strictEqual(normalized.components.length, 2);
+assert.strictEqual(normalized.repository.files.length, 1);
+assert.strictEqual(normalized.repository.files[0].path, 'src/app/server.py');
+assert.strictEqual(normalized.jobs.length, 1);
+assert.strictEqual(normalized.roadmap.phases.length, 40);
+assert.strictEqual(normalizeJobsResponse(rawProjection.jobs).valid, true);
+assert.strictEqual(normalizeRoadmapResponse(rawProjection.roadmap).valid, true);
+assert.strictEqual(normalized.roadmap.tracks[0].source_sha256, '5'.repeat(64));
+assert.strictEqual(normalizeRoadmapResponse({...rawProjection.roadmap,
+  tracks: [{...rawProjection.roadmap.tracks[0], source_sha256: undefined}]}).valid, false);
+assert.strictEqual(normalizeRoadmapResponse({...rawProjection.roadmap,
+  expected_phase_ids: rawProjection.roadmap.expected_phase_ids.slice(1)}).valid, false);
 
 const normalizedText = JSON.stringify(normalized);
 for (const forbidden of [
@@ -181,6 +282,27 @@ for (const forbidden of [
   assert.ok(!normalizedText.includes(forbidden), `unsafe value survived: ${forbidden}`);
 }
 assert.ok(normalizedText.includes(attentionHref), 'exact canonical Attention URL was lost');
+assert.ok(!normalizedText.includes('private_body'), 'repository private field survived');
+
+const graphCampaign = normalized.campaigns[0];
+assert.strictEqual(selectCampaign([graphCampaign], '').campaign_id, 'campaign-safe');
+const graphStages = campaignGraphStages(graphCampaign);
+assert.strictEqual(graphStages.length, 6);
+assert.strictEqual(graphStages.find(stage => stage.id === 'review').state, 'completed');
+const graphModel = campaignGraphModel(graphCampaign);
+assert.strictEqual(graphModel.edges.filter(edge => edge.established).length, 0);
+assert.strictEqual(architectureObservation(normalized.components, 'clients', 'live'), 'READY');
+assert.strictEqual(architectureObservation(normalized.components, 'workers', 'live'), 'IDLE');
+assert.strictEqual(architectureObservation(normalized.components, 'application_git', 'live'), 'unavailable');
+
+for (const repositoryMutation of [
+  {...rawProjection.repository, creates_authority: true},
+  {...rawProjection.repository, files: [{...rawProjection.repository.files[0], path: '../secret'}]},
+  {...rawProjection.repository, files: [{...rawProjection.repository.files[0], revision: '3'.repeat(40)}]},
+  {...rawProjection.repository, files: [{...rawProjection.repository.files[0], object_id: ''}]},
+]) {
+  assert.strictEqual(normalizeRepositoryResponse(repositoryMutation).valid, false);
+}
 
 const expiredProjection = normalizePayloads({
   ...rawProjection,
@@ -282,6 +404,11 @@ class FakeClassList {
     this.node._className = [...this.values].join(' ');
   }
   contains(value) { return this.values.has(value); }
+  toggle(value, force) {
+    const selected = force === undefined ? !this.values.has(value) : Boolean(force);
+    if (selected) this.add(value); else this.remove(value);
+    return selected;
+  }
 }
 
 class FakeElement {
@@ -333,11 +460,19 @@ class FakeElement {
     for (const callback of this.listeners.get(name) || []) await callback(value);
     return value;
   }
-  setAttribute(name, value) { this.attributes[name] = String(value); }
+  setAttribute(name, value) {
+    this.attributes[name] = String(value);
+    if (name === 'class') this.className = value;
+  }
   removeAttribute(name) { delete this.attributes[name]; }
   matches(selector) {
+    if (selector.includes(',')) return selector.split(',').some((part) => this.matches(part.trim()));
     if (selector === '.detail') return this.classList.contains('detail');
     if (selector === '.code-scroll') return this.classList.contains('code-scroll');
+    if (selector === '.gesture-surface') return this.classList.contains('gesture-surface');
+    if (selector === 'input' || selector === 'select' || selector === 'button') {
+      return this.tagName === selector;
+    }
     if (selector === '.console-page') return this.classList.contains('console-page');
     if (selector === 'details.console-card') {
       return this.tagName === 'details' && this.classList.contains('console-card');
@@ -345,6 +480,14 @@ class FakeElement {
     if (selector === '[hidden]') return this.hidden;
     if (selector === '[data-page-link]') return this.dataset.pageLink !== undefined;
     if (selector === '[data-page-target]') return this.dataset.pageTarget !== undefined;
+    if (selector === '[data-repository-path]') return this.dataset.repositoryPath !== undefined;
+    if (selector === '[data-campaign-stage]') return this.dataset.campaignStage !== undefined;
+    if (selector === '[data-architecture-node]') return this.dataset.architectureNode !== undefined;
+    if (selector === '[data-architecture-mode]') return this.dataset.architectureMode !== undefined;
+    if (selector === '[data-roadmap-id]') return this.dataset.roadmapId !== undefined;
+    if (selector === '[data-copy-update-id]') return this.dataset.copyUpdateId !== undefined;
+    if (selector === 'details.roadmap-group') return this.tagName === 'details' && this.classList.contains('roadmap-group');
+    if (selector === '.prepared-update') return this.classList.contains('prepared-update');
     return false;
   }
   closest(selector) {
@@ -386,6 +529,11 @@ function fakeDocument() {
   shell.dataset.idleSeconds = '60';
   const title = make('h1', 'page-title');
   const connection = make('span', 'connection-state');
+  const lastSync = make('span', 'last-sync');
+  const bridgeState = make('span', 'bridge-state');
+  const previewContext = make('span', 'preview-context');
+  const campaignState = make('span', 'campaign-state');
+  const attentionState = make('span', 'attention-state');
   const updated = make('span', 'last-updated');
   const previous = make('button', 'previous-page');
   const next = make('button', 'next-page');
@@ -393,9 +541,50 @@ function fakeDocument() {
   const summaryIntro = make('p', 'summary-intro');
   const attentionSlot = make('div', 'attention-slot');
   const activityFeed = make('div', 'activity-feed');
-  const campaignList = make('div', 'campaign-list');
-  const repository = make('div', 'repository-content');
-  const architecture = make('div', 'architecture-content');
+  const saveUpdate = make('button', 'save-console-update');
+  const updateResult = make('p', 'update-result');
+  const preparedUpdates = make('div', 'prepared-updates');
+  const campaignSelector = make('select', 'campaign-selector');
+  const campaignHistory = make('span', 'campaign-history-state');
+  const campaignEmpty = make('div', 'campaign-empty');
+  const campaignDashboard = make('div', 'campaign-dashboard');
+  const campaignWidgets = make('div', 'campaign-widgets');
+  const campaignGraph = make('svg', 'campaign-graph');
+  const campaignDetail = make('section', 'campaign-detail');
+  campaignDashboard.append(campaignWidgets, campaignGraph, campaignDetail);
+  const repositoryWidgets = make('div', 'repository-widgets');
+  const repositoryBrowser = make('div', 'repository-browser');
+  const repositoryTree = make('nav', 'repository-tree');
+  repositoryBrowser.append(repositoryTree);
+  const repositoryDetailView = make('section', 'repository-detail-view');
+  const repositoryBack = make('button', 'repository-back');
+  const repositoryComparison = make('span', 'repository-comparison');
+  const repositoryHeading = make('h3', 'repository-file-heading');
+  const repositorySummary = make('p', 'repository-file-summary');
+  const repositoryTechnical = make('details', 'repository-technical-details');
+  const repositoryMetadata = make('div', 'repository-metadata');
+  repositoryTechnical.append(repositoryMetadata);
+  const repositoryDiff = make('pre', 'repository-diff');
+  const repositoryEmpty = make('div', 'repository-empty');
+  repositoryDetailView.append(repositoryBack, repositoryComparison, repositoryHeading,
+    repositorySummary, repositoryTechnical, repositoryDiff);
+  const architectureMap = make('svg', 'architecture-map');
+  for (const nodeId of ['identity', 'archive', 'memory', 'library', 'clients', 'development',
+    'attention', 'workers', 'application_git', 'embodiment']) {
+    const node = make('g'); node.dataset.architectureNode = nodeId; architectureMap.append(node);
+  }
+  const architectureDetail = make('section', 'architecture-detail');
+  const architectureReset = make('button', 'architecture-reset');
+  const architectureOverview = make('div', 'architecture-overview');
+  architectureOverview.append(architectureMap);
+  const roadmapInventory = make('section', 'roadmap-inventory');
+  const roadmapFilter = make('input', 'roadmap-filter');
+  const roadmapCoverage = make('p', 'roadmap-coverage');
+  const roadmapGroups = make('div', 'roadmap-groups');
+  roadmapInventory.append(roadmapFilter, roadmapCoverage, roadmapGroups);
+  const architectureModes = ['current', 'roadmap', 'combined'].map((mode) => {
+    const button = make('button'); button.dataset.architectureMode = mode; return button;
+  });
   const pages = Array.from({length: 4}, (_, index) => {
     const page = make('section');
     page.className = 'console-page';
@@ -403,19 +592,23 @@ function fakeDocument() {
     page.hidden = index !== 0;
     return page;
   });
-  pages[0].append(summaryIntro, attentionSlot, activityFeed);
-  pages[1].append(campaignList);
-  pages[2].append(repository);
-  pages[3].append(architecture);
+  pages[0].append(summaryIntro, attentionSlot, activityFeed, saveUpdate, updateResult, preparedUpdates);
+  pages[1].append(campaignSelector, campaignHistory, campaignEmpty, campaignDashboard);
+  pages[2].append(repositoryWidgets, repositoryBrowser, repositoryDetailView, repositoryEmpty);
+  pages[3].append(architectureReset, ...architectureModes, architectureOverview,
+    roadmapInventory, architectureDetail);
   stack.append(...pages);
   const indicators = Array.from({length: 4}, (_, index) => {
     const button = make('button');
     button.dataset.pageTarget = String(index);
     return button;
   });
-  shell.append(title, connection, previous, ...indicators, next, stack, updated);
+  shell.append(title, previewContext, connection, lastSync, bridgeState, campaignState, attentionState,
+    previous, ...indicators, next, stack, updated);
   const buildMeta = make('meta');
   buildMeta.content = 'development-fixture';
+  const contextMeta = make('meta');
+  contextMeta.content = `UNREVIEWED:${'c'.repeat(64)}`;
   return {
     shell,
     pages,
@@ -427,12 +620,16 @@ function fakeDocument() {
       querySelectorAll(selector) {
         if (selector === '.console-page') return pages;
         if (selector === '[data-page-target]') return indicators;
+        if (selector === '[data-architecture-mode]') return architectureModes;
         return [];
       },
       querySelector(selector) {
-        return selector === 'meta[name="fawkes-build-id"]' ? buildMeta : null;
+        if (selector === 'meta[name="fawkes-build-id"]') return buildMeta;
+        if (selector === 'meta[name="fawkes-console-context"]') return contextMeta;
+        return null;
       },
       createElement: (tag) => make(tag),
+      createElementNS: (_namespace, tag) => make(tag),
       createTextNode(value) {
         const node = make('#text');
         node.textContent = String(value);
@@ -487,18 +684,22 @@ async function runDomFixture() {
     idleSeconds: 60,
     baseUrl: 'https://localhost:8791/',
     samplePayload: rawProjection,
+    disableUpdateRefresh: true,
     pollIntervalMs: 0,
   });
   await settle();
   assert.strictEqual(fetchCount, 0);
   assert.strictEqual(fixture.shell.dataset.projectionState, 'sample');
-  assert.strictEqual(fixture.byId.get('connection-state').textContent, 'SAMPLE');
+  assert.strictEqual(fixture.byId.get('connection-state').textContent, 'SAMPLE Worker');
+  assert.strictEqual(fixture.byId.get('preview-context').textContent, `UNREVIEWED · ${'c'.repeat(12)}`);
+  assert.strictEqual(fixture.byId.get('campaign-state').textContent, 'SAMPLE CAMPAIGN DATA');
+  assert.strictEqual(fixture.byId.get('attention-state').textContent, 'SAMPLE ATTENTION');
   const activityCards = descendantsOf(fixture.byId.get('activity-feed'))
     .filter((node) => node.matches('details.console-card'));
   assert.strictEqual(activityCards.length, 1);
   const rendered = textOf(fixture.shell);
-  assert.ok(rendered.includes('independent review retained'));
-  assert.ok(rendered.includes('Code / diff explanation'));
+  assert.ok(rendered.includes('Finish the Pi console'));
+  assert.ok(rendered.includes('needs you'));
   assert.ok(!rendered.includes('wrapper source'));
   assert.ok(!rendered.includes('private response'));
   // Sample data is labeled and never offers a live decision deep link.
@@ -567,9 +768,13 @@ async function runDomFixture() {
     now: () => liveNow,
     baseUrl: 'https://localhost:8791/',
     pollIntervalMs: 0,
+    disableUpdateRefresh: true,
   });
   await settle();
   assert.strictEqual(liveFixture.shell.dataset.projectionState, 'live');
+  assert.strictEqual(liveFixture.byId.get('connection-state').textContent, '◉ Live');
+  assert.strictEqual(liveFixture.byId.get('campaign-state').textContent, 'EXECUTION NOT OBSERVED');
+  assert.strictEqual(liveFixture.byId.get('attention-state').textContent, 'ACTION REQUIRED');
   assert.deepStrictEqual(
     [...new Set(readCalls.map((call) => call.path))].sort(),
     ['/api/development/dev-console'],
@@ -581,8 +786,43 @@ async function runDomFixture() {
     .filter((node) => node.tagName === 'a');
   assert.strictEqual(links.length, 1);
   assert.strictEqual(links[0].href, attentionHref);
-  assert.ok(textOf(liveFixture.byId.get('repository-content')).includes('CURRENT AUTHENTICATED PROJECTION'));
-  assert.ok(textOf(liveFixture.byId.get('architecture-content')).includes('Current authenticated component projection'));
+  assert.ok(textOf(liveFixture.byId.get('campaign-graph')).includes('Review'));
+  assert.ok(descendantsOf(liveFixture.byId.get('campaign-graph'))
+    .some(node => node.attributes.class === 'graph-edge reference-edge'));
+  assert.ok(textOf(liveFixture.byId.get('architecture-detail')).includes('REFERENCE SYSTEM COMPONENT'));
+  assert.ok(textOf(liveFixture.byId.get('architecture-detail')).includes('Reference maturity is not runtime health'));
+  const gitStep = descendantsOf(liveFixture.byId.get('campaign-graph'))
+    .find(node => node.dataset.campaignStage === 'git');
+  await liveFixture.byId.get('campaign-graph').emit('click', {target: gitStep});
+  assert.ok(textOf(liveFixture.byId.get('campaign-detail')).includes('Git'));
+  const repositoryFile = descendantsOf(liveFixture.byId.get('repository-tree'))
+    .find(node => node.dataset.repositoryPath === 'src/app/server.py');
+  liveFixture.byId.get('repository-tree').scrollTop = 33;
+  await liveFixture.byId.get('repository-tree').emit('click', {target: repositoryFile});
+  assert.strictEqual(liveFixture.byId.get('repository-browser').hidden, true);
+  assert.strictEqual(liveFixture.byId.get('repository-detail-view').hidden, false);
+  assert.ok(textOf(liveFixture.byId.get('repository-detail-view')).includes('src/app/server.py'));
+  assert.ok(textOf(liveFixture.byId.get('repository-detail-view')).includes('CONNECTED · CURRENT READ-ONLY DATA'));
+  await liveFixture.byId.get('repository-back').emit('click');
+  assert.strictEqual(liveFixture.byId.get('repository-browser').hidden, false);
+  assert.strictEqual(liveFixture.byId.get('repository-tree').scrollTop, 33);
+  const workersNode = descendantsOf(liveFixture.byId.get('architecture-map'))
+    .find(node => node.dataset.architectureNode === 'workers');
+  await liveFixture.byId.get('architecture-map').emit('click', {target: workersNode});
+  assert.ok(textOf(liveFixture.byId.get('architecture-detail')).includes('Workers and Reviewers'));
+  const roadmapMode = fixture => descendantsOf(fixture.shell)
+    .find(node => node.dataset.architectureMode === 'roadmap');
+  await roadmapMode(liveFixture).emit('click');
+  assert.strictEqual(liveFixture.byId.get('architecture-overview').hidden, true);
+  assert.strictEqual(liveFixture.byId.get('roadmap-inventory').hidden, false);
+  assert.ok(textOf(liveFixture.byId.get('roadmap-coverage')).includes('40 canonical phases'));
+  const homeTrack = descendantsOf(liveFixture.byId.get('roadmap-groups'))
+    .find(node => node.dataset.roadmapId === 'track-home');
+  await liveFixture.byId.get('roadmap-groups').emit('click', {target: homeTrack});
+  assert.ok(textOf(liveFixture.byId.get('architecture-detail')).includes('personal computer is shut down'));
+  assert.ok(textOf(liveFixture.byId.get('architecture-detail')).includes('5'.repeat(64)));
+  assert.ok(!textOf(liveFixture.byId.get('architecture-detail')).includes('4'.repeat(64)));
+  assert.ok(textOf(liveFixture.byId.get('architecture-detail')).includes('Synthetic retained source'));
 
   // A polling refresh rebuilds cards but preserves the stable selection,
   // expansion, and vertical position. It never leaves wheel click bound to a
@@ -593,6 +833,7 @@ async function runDomFixture() {
   liveFixture.byId.get('activity-feed').scrollTop = 47;
   await liveFixture.shell.emit('click', {target: oldLiveCard});
   await liveController.refresh();
+  assert.ok(textOf(liveFixture.byId.get('architecture-detail')).includes('5'.repeat(64)));
   const refreshedLiveCard = descendantsOf(liveFixture.byId.get('activity-feed'))
     .find((node) => node.matches('details.console-card'));
   assert.notStrictEqual(refreshedLiveCard, oldLiveCard);
@@ -604,8 +845,10 @@ async function runDomFixture() {
   });
   assert.strictEqual(refreshedWheel.defaultPrevented, true);
   assert.strictEqual(refreshedLiveCard.open, false);
-  projectionPayload = {...rawProjection, campaigns: []};
+  projectionPayload = {...rawProjection, campaigns: [], jobs: []};
   await liveController.refresh();
+  assert.strictEqual(liveFixture.byId.get('campaign-state').textContent, 'EXECUTION UNAVAILABLE');
+  assert.ok(textOf(liveFixture.byId.get('activity-feed')).includes('does not mean Fawkes has no history'));
   const removedWheel = await liveFixture.shell.emit('auxclick', {
     target: liveFixture.shell, button: 1,
   });
@@ -623,7 +866,7 @@ async function runDomFixture() {
   assert.strictEqual(liveFixture.shell.dataset.projectionState, 'stale');
   assert.strictEqual(descendantsOf(liveFixture.byId.get('attention-slot'))
     .filter((node) => node.tagName === 'a').length, 0);
-  assert.ok(textOf(liveFixture.byId.get('repository-content')).includes('STALE LAST-VERIFIED PROJECTION'));
+  assert.strictEqual(liveFixture.byId.get('attention-state').textContent, 'ATTENTION UNKNOWN');
   liveController.stop();
 
   const disconnectedFixture = fakeDocument();
@@ -633,9 +876,12 @@ async function runDomFixture() {
     scheduler: new Scheduler(),
     baseUrl: 'https://localhost:8791/',
     pollIntervalMs: 0,
+    disableUpdateRefresh: true,
   });
   await settle();
   assert.strictEqual(disconnectedFixture.shell.dataset.projectionState, 'disconnected');
+  assert.strictEqual(disconnectedFixture.byId.get('connection-state').textContent, '⊘ Disconnected');
+  assert.strictEqual(disconnectedFixture.byId.get('campaign-state').textContent, 'EXECUTION UNKNOWN');
   disconnectedController.stop();
 
   const malformedFixture = fakeDocument();
@@ -646,6 +892,7 @@ async function runDomFixture() {
     scheduler: new Scheduler(),
     baseUrl: 'https://localhost:8791/',
     pollIntervalMs: 0,
+    disableUpdateRefresh: true,
   });
   await settle();
   assert.strictEqual(malformedFixture.shell.dataset.projectionState, 'unavailable');
@@ -666,6 +913,7 @@ async function runDomFixture() {
     now: () => { overlapClockSamples += 1; return overlapNow; },
     baseUrl: 'https://localhost:8791/',
     pollIntervalMs: 0,
+    disableUpdateRefresh: true,
   });
   await settle();
   assert.strictEqual(pending.length, 1);
@@ -676,19 +924,19 @@ async function runDomFixture() {
   assert.strictEqual(overlapClockSamples, 0, 'overlapping fetch sampled freshness too early');
   const newer = JSON.parse(JSON.stringify(rawProjection));
   newer.observed_at = new Date(fixtureNow + 2_000).toISOString();
-  newer.components[0].state = 'NEWER';
+  newer.components.push({name: 'development_coordinator', state: 'NEWER'});
   overlapNow = fixtureNow + 2_000;
   pending[1]({ok: true, status: 200, json: async () => newer});
   await newerRefresh;
-  assert.ok(textOf(overlapFixture.byId.get('architecture-content')).includes('NEWER'));
+  assert.ok(textOf(overlapFixture.byId.get('architecture-detail')).includes('NEWER'));
   const older = JSON.parse(JSON.stringify(rawProjection));
   older.observed_at = new Date(fixtureNow + 1_000).toISOString();
-  older.components[0].state = 'OLDER';
+  older.components.push({name: 'development_coordinator', state: 'OLDER'});
   overlapNow = fixtureNow + 3_000;
   pending[0]({ok: true, status: 200, json: async () => older});
   await settle();
-  assert.ok(textOf(overlapFixture.byId.get('architecture-content')).includes('NEWER'));
-  assert.ok(!textOf(overlapFixture.byId.get('architecture-content')).includes('OLDER'));
+  assert.ok(textOf(overlapFixture.byId.get('architecture-detail')).includes('NEWER'));
+  assert.ok(!textOf(overlapFixture.byId.get('architecture-detail')).includes('OLDER'));
   overlapController.stop();
 }
 

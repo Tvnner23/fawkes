@@ -677,6 +677,9 @@ class DevelopmentAttentionStore:
                 raise PermissionError("decision identity tuple is required and incomplete")
             if expected_identity != canonical:
                 raise PermissionError("decision identity tuple does not match the canonical pending request")
+            offered = (event.get("protocol_binding") or {}).get("native_decision_choices")
+            if offered is not None and (not isinstance(offered, list) or choice not in offered):
+                raise PermissionError("this exact native request does not support that decision")
             if event["state"] != "needs_tanner":
                 raise RuntimeError("attention event is no longer awaiting Tanner")
             if event.get("expires_at") and datetime.fromisoformat(event["expires_at"]) <= datetime.now(timezone.utc):
@@ -692,8 +695,7 @@ class DevelopmentAttentionStore:
             decided_at = _now()
             claim_expires_at = (datetime.fromisoformat(decided_at)
                 + timedelta(seconds=APPROVE_ONCE_CLAIM_SECONDS)).isoformat()
-            review_bound = (canonical.get("approval_binding_kind") ==
-                            "independent_review_provider")
+            review_bound = self.requires_campaign_publication(event)
             decision = {"schema_version": 1, "record_type": "development_attention_decision",
             "decision_id": f"attention-decision-{uuid.uuid4()}", "attention_id": attention_id,
             "campaign_id": event["campaign_id"], "invocation_id": event["invocation_id"],
@@ -731,6 +733,12 @@ class DevelopmentAttentionStore:
             _DECISION_CONDITION.notify_all()
         return {"event": event, "decision": decision}
 
+    @staticmethod
+    def requires_campaign_publication(event):
+        binding = event.get("protocol_binding") or {}
+        return (binding.get("approval_binding_kind") == "independent_review_provider"
+                or bool(binding.get("managed_material_record_sha256")))
+
     def publish_review_decision(self, decision_id, *, attention_id, campaign_id,
                                 campaign_record_sha256, campaign_state_revision):
         """Bind a review decision to its exact durable campaign projection."""
@@ -754,8 +762,7 @@ class DevelopmentAttentionStore:
                     or decision.get("attention_id") != attention_id
                     or decision.get("campaign_id") != campaign_id
                     or event.get("campaign_id") != campaign_id
-                    or (event.get("protocol_binding") or {}).get(
-                        "approval_binding_kind") != "independent_review_provider"
+                    or not self.requires_campaign_publication(event)
                     or not isinstance(campaign_record_sha256, str)
                     or len(campaign_record_sha256) != 64
                     or type(campaign_state_revision) is not int
@@ -781,8 +788,7 @@ class DevelopmentAttentionStore:
                     or decision.get("attention_id") != attention_id
                     or decision.get("campaign_id") != campaign_id
                     or event.get("campaign_id") != campaign_id
-                    or (event.get("protocol_binding") or {}).get(
-                        "approval_binding_kind") != "independent_review_provider"):
+                    or not self.requires_campaign_publication(event)):
                 raise PermissionError("unpublished review decision lineage is mismatched")
             if publication.get("state") == "published":
                 raise PermissionError("published review decision cannot be revoked as unpublished")
@@ -919,8 +925,7 @@ class DevelopmentAttentionStore:
             claim_expired = bool(claim_expires_at and
                 datetime.fromisoformat(claim_expires_at) <= datetime.now(timezone.utc))
             review_publication = decision.get("campaign_publication")
-            review_unpublished = (canonical.get("approval_binding_kind") ==
-                "independent_review_provider" and (not isinstance(review_publication, dict)
+            review_unpublished = (self.requires_campaign_publication(event) and (not isinstance(review_publication, dict)
                 or review_publication.get("state") != "published"
                 or review_publication.get("campaign_id") != event.get("campaign_id")))
             if (claim_expired and decision.get("choice") == "approve_once"
@@ -979,8 +984,7 @@ class DevelopmentAttentionStore:
             claim_expired = bool(claim_expires_at and
                 datetime.fromisoformat(claim_expires_at) <= datetime.now(timezone.utc))
             review_publication = decision.get("campaign_publication")
-            review_unpublished = (canonical.get("approval_binding_kind") ==
-                "independent_review_provider" and (not isinstance(review_publication, dict)
+            review_unpublished = (self.requires_campaign_publication(event) and (not isinstance(review_publication, dict)
                 or review_publication.get("state") != "published"
                 or review_publication.get("campaign_id") != event.get("campaign_id")))
             if (claim_expired and decision.get("choice") == "approve_once"

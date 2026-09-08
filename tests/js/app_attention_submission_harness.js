@@ -141,7 +141,8 @@ function exactDecision(submitted) {
     invocation_id:pending.invocation_id,choice:submitted.choice,
     decision_id:`decision-${scenario}`,lifecycle_state:'recorded_pending_consumption',
     protocol_binding_sha256:pending.protocol_binding_sha256,
-    authority_binding:exactAuthorityBinding(),
+    // Real canonical HTTP encoding sorts keys independently of the UI's order.
+    authority_binding:Object.fromEntries(Object.entries(exactAuthorityBinding()).reverse()),
     authority_binding_sha256:pending.authority_binding_sha256,
     creates_continuing_authority:false,record_sha256:`decision-record-${scenario}`};
   if(['decision-substitution','failure-decision-substitution'].includes(scenario))decision.authority_binding.candidate_snapshot_id='snapshot-neighbor';
@@ -192,6 +193,8 @@ global.fetch = async (path, options = {}) => {
   return {status,ok:status<400,json:async()=>data};
 };
 
+  require('../../src/app/static/attention-binding.js');
+  window.FawkesAttentionBinding = globalThis.FawkesAttentionBinding;
 vm.runInThisContext(fs.readFileSync('src/app/static/app.js','utf8'), {filename:'app.js'});
 
 function textAndButtons() {

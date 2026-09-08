@@ -1,0 +1,17 @@
+Tanner's console architecture and roadmap addendum — retained source excerpts
+
+Source: Tanner's sent "FAWKES CONSOLE COMPLETION — ARCHITECTURE AND FULL ROADMAP ADDENDUM" in the existing console-completion Worker conversation, retained September 10, 2026.
+Status: recorded user requirement; not an amendment to canonical roadmap truth and not implementation/deployment authority. This document is a verbatim excerpt selection, not the complete original instruction. Its digest identifies these exact retained bytes, not the canonical roadmap or the complete conversation.
+
+Public/social planning:
+"The public experience and separately scoped social/messaging integrations where recorded."
+
+Dedicated home availability:
+"Dedicated home infrastructure so Fawkes can remain available when Tanner's personal desktop is off. Timing/hardware remain unassigned where not selected; hidden processes on the same PC do not count as this capability."
+
+Console controls, audio, cooling and enclosure:
+"The Pi console's own recorded follow-ups, including the physical power/idle button, scroll wheel/clicker, volume slider, input bridge, speakers, cooling and enclosure work. Group these under console/physical controls instead of cluttering the main architecture with every part. Mark selection, ownership, software support and physical installation separately where known; do not invent missing part choices or completion."
+
+Planning authority and attribution:
+"Only include items that have a real retained source. If an expected requirement is available only in this addendum, attribute it to Tanner's recorded requirement here. If a relevant source is unavailable or conflicting, expose the exact coverage gap; do not invent the plan or claim everything is covered. Source references in the UI must resolve to the material actually used."
+"Adding an item to this display does not authorize implementing that future capability."
