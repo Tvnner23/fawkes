@@ -1040,17 +1040,21 @@ class CodexWriteBuilderAdapter(CodexExecWorkerAdapter):
             receipt.get("delivery_receipt_id"), "review_delivery_receipt_id"))
         verification = self.exchange._load("verification_receipts", require_id(
             receipt.get("verification_receipt_id"), "review_verification_receipt_id"))
-        retention_sections = [item for item in review_package.get("included_sections", [])
-                              if item.get("section_id") == "candidate-retention-receipt"]
-        change_sections = [item for item in review_package.get("included_sections", [])
-                           if item.get("section_id") == "exact-change-evidence"]
-        if len(retention_sections) != 1 or len(change_sections) != 1:
-            raise PermissionError("bound review transaction evidence is unavailable")
-        try:
-            retention_receipt = json.loads(retention_sections[0]["content"])
-            package_changes = json.loads(change_sections[0]["content"])
-        except (KeyError, TypeError, json.JSONDecodeError) as exc:
-            raise PermissionError("bound review transaction evidence is malformed") from exc
+        candidate_root = (directory / "candidate").resolve()
+        # The accepted Reviewer admits exactly one of the legacy inline form or
+        # the strict same-candidate file-reference form. Reuse that common
+        # validation boundary so application consumes precisely what review did.
+        from src.runtime.windows_codex_reviewer import _review_exact_change_evidence
+        package_changes, retention_receipt = _review_exact_change_evidence(
+            review_package,
+            candidate_snapshot_root=candidate_root,
+            transport_authority={
+                "candidate_retention_receipt_sha256": receipt.get(
+                    "candidate_retention_receipt_sha256"),
+                "exact_change_evidence_sha256": receipt.get(
+                    "exact_change_evidence_sha256"),
+            },
+        )
         package_preimages = [{"path": item.get("path"),
                               "before_node_binding": item.get("before_node_binding")}
                              for item in package_changes]
@@ -1096,7 +1100,6 @@ class CodexWriteBuilderAdapter(CodexExecWorkerAdapter):
                 or retention_receipt.get("allowed_scope_sha256") != receipt.get(
                     "allowed_scope_sha256")):
             raise PermissionError("candidate-retention lineage mismatch")
-        candidate_root = (directory / "candidate").resolve()
         baseline_root = (directory / "frozen-baseline").resolve()
         final_manifest = candidate_manifest(candidate_root)
         final_candidate = {"candidate_snapshot_id": final_manifest["candidate_snapshot_id"],
@@ -1137,6 +1140,26 @@ class CodexWriteBuilderAdapter(CodexExecWorkerAdapter):
                 "preimage_body": None if frozen is None else frozen.get("content"),
                 "postimage_body": None if change.get("after") is None else
                     (candidate_root / change["path"]).read_bytes()})
+        # The builder-time hash excludes the authorized scope, which may be a
+        # directory. Check that original boundary first. The durable executor
+        # applies exact changed paths, so bind its race check to the exact path
+        # set after the builder-time comparison succeeds.
+        if unrelated_workspace_sha256(
+                self.workspace, request["allowed_scope"]
+        ) != request["expected_unrelated_workspace_sha256"]:
+            raise PermissionError("unrelated workspace changed before reviewed apply")
+        exact_application_scope = [item["path"] for item in path_records]
+        exact_application_workspace_sha256 = unrelated_workspace_sha256(
+            self.workspace, exact_application_scope)
+        # Close the interval between the broad builder-time check and the
+        # exact-path capture. A persistent neighboring edit after the first
+        # scan is rejected here; any later edit is rejected by the durable
+        # executor against the exact digest captured above.
+        if unrelated_workspace_sha256(
+                self.workspace, request["allowed_scope"]
+        ) != request["expected_unrelated_workspace_sha256"]:
+            raise PermissionError(
+                "unrelated workspace changed during reviewed apply binding")
         operation_id = "reviewed-application-" + _digest({"package_id": package_id,
             "campaign_id": campaign_id, "review_receipt": receipt["record_sha256"]})
         binding = {"campaign_id": campaign_id, "task_scope_id": builder_package["task_scope_id"],
@@ -1151,8 +1174,8 @@ class CodexWriteBuilderAdapter(CodexExecWorkerAdapter):
             "review_invocation_id": receipt["review_invocation_id"],
             "authorized_scope_sha256": receipt["allowed_scope_sha256"],
             "expected_repository_head": request["expected_repository_head"],
-            "expected_repository_status_sha256": request[
-                "expected_unrelated_workspace_sha256"]}
+            "expected_repository_status_sha256":
+                exact_application_workspace_sha256}
         transaction = DurableReviewedApplication(self.workspace,
             directory / "application-transaction", replace=self.apply_replace,
             crash_hook=(lambda point, path=None: self.before_apply_replace(
