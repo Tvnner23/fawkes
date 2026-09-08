@@ -8,6 +8,7 @@ import socket
 import hashlib
 import secrets
 import time
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
@@ -20,6 +21,222 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 MAX_BODY_BYTES = 22 * 1024 * 1024
 SESSION_COOKIE = "fawkes_app_session"
 SESSION_MAX_AGE_SECONDS = 30 * 24 * 60 * 60
+DEV_CONSOLE_MAX_CAMPAIGNS = 32
+DEV_CONSOLE_MAX_ACTIVITY_ITEMS = 64
+DEV_CONSOLE_MAX_ATTENTION_ITEMS = 16
+DEV_CONSOLE_MAX_TEXT_BYTES = 2_048
+DEV_CONSOLE_MAX_RESPONSE_BYTES = 256_000
+DEV_CONSOLE_COMPONENTS = (
+    "app_server", "development_coordinator", "discord_bridge", "reviewer_launcher",
+    "stack", "worker_launcher",
+)
+DEV_CONSOLE_CONFIGURED_ONLY_COMPONENTS = {
+    "development_coordinator", "reviewer_launcher", "worker_launcher",
+}
+
+
+def _console_text(value, field, *, optional=False):
+    if value is None and optional:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"developer console {field} must be text")
+    if len(value.encode("utf-8")) > DEV_CONSOLE_MAX_TEXT_BYTES:
+        raise ValueError(f"developer console {field} exceeds its byte limit")
+    return value
+
+
+def _console_worker(value):
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("developer console worker projection is malformed")
+    projected = {}
+    for field in ("worker_id", "role", "functional_role", "environment_id"):
+        if field in value:
+            projected[field] = _console_text(value[field], field, optional=True)
+    return projected
+
+
+def _console_needs_tanner(value):
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("developer console Tanner projection is malformed")
+    projected = {}
+    for field in ("attention_id", "reason", "decision_needed", "expires_at"):
+        if field in value:
+            projected[field] = _console_text(value[field], field, optional=True)
+    return projected
+
+
+def _console_recovery_references(value):
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError("developer console recovery references are malformed")
+    projected = []
+    for reference in value[:16]:
+        if not isinstance(reference, dict):
+            raise ValueError("developer console recovery reference is malformed")
+        item = {}
+        for field in ("reference_type", "reference_id", "record_sha256"):
+            if field in reference:
+                item[field] = _console_text(reference[field], field, optional=True)
+        projected.append(item)
+    return projected
+
+
+def _console_activity_summary(value):
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("developer console activity summary is malformed")
+    projected = {}
+    for field in ("status", "task_scope_id", "return_report_id", "review_report_id",
+                  "verification_status"):
+        if field in value:
+            projected[field] = _console_text(value[field], field, optional=True)
+    failure = value.get("failure")
+    if failure is not None:
+        if not isinstance(failure, dict):
+            raise ValueError("developer console failure summary is malformed")
+        if "code" in failure:
+            projected["failure_code"] = _console_text(
+                failure["code"], "failure_code", optional=True)
+    for source, target in (
+        ("validation_evidence", "validation_evidence_count"),
+        ("acceptance_condition_ids_satisfied", "satisfied_condition_count"),
+        ("violated_acceptance_condition_ids", "violated_condition_count"),
+        ("defects", "defect_count"),
+    ):
+        if source in value:
+            if not isinstance(value[source], list):
+                raise ValueError(f"developer console {source} must be a list")
+            projected[target] = len(value[source])
+    return projected
+
+
+def _console_activity(value):
+    if not isinstance(value, list):
+        raise ValueError("developer console activity is malformed")
+    projected = []
+    for event in value[-DEV_CONSOLE_MAX_ACTIVITY_ITEMS:]:
+        if not isinstance(event, dict):
+            raise ValueError("developer console activity item is malformed")
+        item = {
+            "event_id": _console_text(event.get("event_id"), "event_id"),
+            "kind": _console_text(event.get("kind"), "kind"),
+            "created_at": _console_text(event.get("created_at"), "created_at"),
+        }
+        detail = event.get("detail")
+        if detail is not None:
+            if not isinstance(detail, dict):
+                raise ValueError("developer console activity detail is malformed")
+            iteration = detail.get("iteration")
+            if iteration is not None:
+                if not isinstance(iteration, int) or isinstance(iteration, bool):
+                    raise ValueError("developer console activity iteration is malformed")
+                item["iteration"] = iteration
+        if "worker" in event:
+            item["worker"] = _console_worker(event["worker"])
+        if "summary" in event:
+            item["summary"] = _console_activity_summary(event["summary"])
+        projected.append(item)
+    return projected
+
+
+def _console_campaigns(payload):
+    if not isinstance(payload, dict) or not isinstance(payload.get("campaigns"), list):
+        raise ValueError("developer console campaign source is malformed")
+    result = []
+    for wrapper in payload["campaigns"][:DEV_CONSOLE_MAX_CAMPAIGNS]:
+        if not isinstance(wrapper, dict) or not isinstance(wrapper.get("live_activity"), dict):
+            raise ValueError("developer console campaign activity is malformed")
+        activity = wrapper["live_activity"]
+        iteration = activity.get("iteration")
+        maximum = activity.get("maximum_iterations")
+        if (not isinstance(iteration, int) or isinstance(iteration, bool)
+                or not isinstance(maximum, int) or isinstance(maximum, bool)):
+            raise ValueError("developer console campaign iteration is malformed")
+        cancelled = activity.get("cancelled")
+        if not isinstance(cancelled, bool):
+            raise ValueError("developer console campaign cancellation state is malformed")
+        result.append({
+            "campaign_id": _console_text(activity.get("campaign_id"), "campaign_id"),
+            "status": _console_text(activity.get("status"), "status"),
+            "current_stage": _console_text(activity.get("current_stage"), "current_stage"),
+            "iteration": iteration,
+            "maximum_iterations": maximum,
+            "cancelled": cancelled,
+            "builder": _console_worker(activity.get("builder")),
+            "reviewer": _console_worker(activity.get("reviewer")),
+            "needs_tanner": _console_needs_tanner(activity.get("needs_tanner")),
+            "recovery_references": _console_recovery_references(
+                activity.get("recovery_references")),
+            "activity": _console_activity(activity.get("activity", [])),
+        })
+    return result
+
+
+def _console_attention(payload):
+    if not isinstance(payload, dict) or not isinstance(payload.get("attention"), list):
+        raise ValueError("developer console Attention source is malformed")
+    result = []
+    fields = ("attention_id", "campaign_id", "invocation_id", "state", "blocked_action",
+              "why_required", "expires_at", "consumer_state", "detail_url")
+    for event in payload["attention"][:DEV_CONSOLE_MAX_ATTENTION_ITEMS]:
+        if not isinstance(event, dict):
+            raise ValueError("developer console Attention item is malformed")
+        item = {field: _console_text(event.get(field), field,
+                                     optional=field in {"expires_at", "detail_url"})
+                for field in fields}
+        if not isinstance(event.get("actionable"), bool):
+            raise ValueError("developer console Attention actionability is malformed")
+        item["actionable"] = event["actionable"]
+        result.append(item)
+    return result
+
+
+def _console_components(payload):
+    if not isinstance(payload, dict) or not isinstance(payload.get("components"), dict):
+        raise ValueError("developer console component source is malformed")
+    result = []
+    for name in DEV_CONSOLE_COMPONENTS:
+        if name not in payload["components"]:
+            continue
+        source = payload["components"][name]
+        if not isinstance(source, dict):
+            raise ValueError("developer console component state is malformed")
+        state = _console_text(source.get("state"), "component state")
+        # These entries are configured placeholders in the existing source;
+        # they are not measured liveness and must not masquerade as it.
+        if name in DEV_CONSOLE_CONFIGURED_ONLY_COMPONENTS:
+            state = "unobserved_configured"
+        result.append({"name": name, "state": state})
+    return result
+
+
+def developer_console_projection(chat_service):
+    """Build one bounded, body-free and non-authorizing console projection."""
+    campaigns = chat_service.list_codex_development_campaigns()
+    attention = chat_service.development_attention_projection(pending_only=True)
+    components = chat_service.production_component_status()
+    build = build_identity()
+    projection = {
+        "schema_version": "fawkes.dev_console.read_only.v1",
+        "observed_at": datetime.now(timezone.utc).isoformat(),
+        "build": {field: build.get(field)
+                  for field in ("mode", "release_id", "manifest_sha256")},
+        "campaigns": _console_campaigns(campaigns),
+        "attention": _console_attention(attention),
+        "components": _console_components(components),
+        "creates_authority": False,
+        "creates_continuing_authority": False,
+    }
+    if len(json.dumps(projection, ensure_ascii=False).encode("utf-8")) > \
+            DEV_CONSOLE_MAX_RESPONSE_BYTES:
+        raise ValueError("developer console projection exceeds its byte limit")
+    return projection
 
 
 class BrowserSessionStore:
@@ -90,7 +307,10 @@ def build_identity():
         value = json.loads(release.read_text(encoding="utf-8"))
         return {"mode": "approved_release", "release_id": value.get("release_id"),
                 "manifest_sha256": value.get("manifest_sha256")}
-    files = [Path(__file__), STATIC_DIR / "index.html", STATIC_DIR / "app.js", STATIC_DIR / "app.css"]
+    files = [Path(__file__), STATIC_DIR / "index.html", STATIC_DIR / "app.js",
+             STATIC_DIR / "app.css", STATIC_DIR / "dev-console" / "index.html",
+             STATIC_DIR / "dev-console" / "console.js",
+             STATIC_DIR / "dev-console" / "console.css"]
     digest = hashlib.sha256()
     for item in files: digest.update(item.read_bytes())
     return {"mode": "development_checkout", "release_id": "development-" + digest.hexdigest(),
@@ -185,10 +405,10 @@ class FawkesAppHandler(BaseHTTPRequestHandler):
             pass
         self._json(status, payload)
 
-    def _require_auth(self):
+    def _require_auth(self, *, record_rider_activity=True):
         if self._authorized():
             instance_id = getattr(self.server.chat_service, "instance_id", None)
-            if instance_id:
+            if record_rider_activity and instance_id:
                 RiderActivityStore(
                     instance_id,
                     root=Path(__file__).resolve().parents[2] / "database" / "rider_activity",
@@ -303,6 +523,15 @@ class FawkesAppHandler(BaseHTTPRequestHandler):
                 self._json(200, self.server.chat_service.development_dashboard())
             except Exception:
                 self._json(503, {"error": {"code": "development_unavailable", "message": "Development information is unavailable right now."}})
+            return
+        if path == "/api/development/dev-console":
+            if not self._require_auth(record_rider_activity=False):
+                return
+            try:
+                self._json(200, developer_console_projection(self.server.chat_service))
+            except Exception:
+                self._json(503, {"error": {"code": "dev_console_projection_unavailable",
+                    "message": "The read-only developer-console projection is unavailable right now."}})
             return
         if path == "/api/development/codex-campaigns":
             if not self._require_auth():
@@ -714,6 +943,11 @@ class FawkesAppHandler(BaseHTTPRequestHandler):
             "/presence-bootstrap.js": ("presence-bootstrap.js", "text/javascript; charset=utf-8"),
             "/presence-three.bundle.js": ("presence-three.bundle.js", "text/javascript; charset=utf-8"),
             "/manifest.webmanifest": ("manifest.webmanifest", "application/manifest+json"),
+            "/dev-console": ("dev-console/index.html", "text/html; charset=utf-8"),
+            "/dev-console/": ("dev-console/index.html", "text/html; charset=utf-8"),
+            "/dev-console/index.html": ("dev-console/index.html", "text/html; charset=utf-8"),
+            "/dev-console/console.js": ("dev-console/console.js", "text/javascript; charset=utf-8"),
+            "/dev-console/console.css": ("dev-console/console.css", "text/css; charset=utf-8"),
         }
         if path.startswith("/assets/presence/"):
             filename = path.removeprefix("/assets/presence/")
@@ -748,7 +982,7 @@ class FawkesAppHandler(BaseHTTPRequestHandler):
             return
         body = (STATIC_DIR / item[0]).read_bytes()
         identity = build_identity()["release_id"]
-        if item[0] == "index.html":
+        if item[0].endswith("index.html"):
             body = body.replace(b"__FAWKES_BUILD_ID__", identity.encode("ascii"))
         self.send_response(200)
         self.send_header("Content-Type", item[1])

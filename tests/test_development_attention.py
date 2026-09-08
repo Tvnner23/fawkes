@@ -93,6 +93,46 @@ class DevelopmentAttentionTests(unittest.TestCase):
                        separators=(",", ":")).encode()).hexdigest())
         self.assertIn("section=attention&attention=" + first["attention_id"], first["detail_url"])
 
+    def test_passive_projection_never_refreshes_expiry_or_recovers_transactions(self):
+        event = self.create("-passive")
+        event_path = self.store.events / f"{event['attention_id']}.json"
+        now = datetime.now(timezone.utc)
+        retained = json.loads(event_path.read_text(encoding="utf-8"))
+        retained["expires_at"] = (now - timedelta(seconds=1)).isoformat()
+        retained.pop("record_sha256", None)
+        from src.runtime.development_attention import _digest
+        retained["record_sha256"] = _digest(retained)
+        event_path.write_text(json.dumps(retained), encoding="utf-8")
+
+        def material():
+            return {item.relative_to(self.store.root).as_posix(): item.read_bytes()
+                    for item in self.store.root.rglob("*") if item.is_file()}
+
+        before = material()
+        projected = self.store.projection(now=now)
+        self.assertEqual(len(projected), 1)
+        self.assertEqual(projected[0]["stored_state"], "needs_tanner")
+        self.assertEqual(projected[0]["state"], "expired")
+        self.assertFalse(projected[0]["actionable"])
+        self.assertEqual(material(), before)
+        self.assertEqual(self.store.projection(pending_only=True, now=now), [])
+
+        self.store.transactions.mkdir(parents=True, exist_ok=True)
+        transaction = self.store.transactions / "incomplete-fixture.json"
+        transaction.write_text(json.dumps({"schema_version": 1,
+            "record_type": "development_attention_transaction",
+            "transaction_id": "incomplete-fixture", "writes": [{
+                "relative_path": f"events/{event['attention_id']}.json",
+                "value": {"attention_id": event["attention_id"]},
+            }]}), encoding="utf-8")
+        transaction_before = material()
+        unavailable = self.store.projection(now=now)[0]
+        self.assertEqual(unavailable["state"], "unavailable")
+        self.assertFalse(unavailable["actionable"])
+        self.assertEqual(unavailable["consumer_unavailable_reason"],
+                         "incomplete_transaction_observed")
+        self.assertEqual(material(), transaction_before)
+
     def test_attention_detail_url_enforces_local_and_authenticated_remote_origins(self):
         attention_id = "attention-" + "a" * 64
         self.assertEqual(canonical_attention_detail_url(attention_id),
@@ -442,9 +482,62 @@ class DevelopmentAttentionTests(unittest.TestCase):
             "item": {"type": "agent_message", "text": "approval required"}})))
 
     def test_secrets_and_endpoints_are_redacted(self):
-        safe = sanitize_action("token=abc https://example.invalid/private password=hunter2")
+        marker = "synthetic-redaction-marker"
+        safe = sanitize_action(
+            "token=abc https://example.invalid/private password=hunter2 "
+            "Authorization: Bearer " + marker + " {\"token\":\"" + marker + "\"}")
         self.assertNotIn("abc", safe); self.assertNotIn("hunter2", safe)
+        self.assertNotIn(marker, safe)
         self.assertNotIn("example.invalid", safe)
+
+    def test_passive_projection_re_sanitizes_and_reduces_durable_display_text(self):
+        marker = "synthetic-projection-redaction-marker"
+        event = self.store.create(campaign_id="synthetic-redaction-campaign",
+            invocation_id="synthetic-redaction-invocation", worker=self.worker,
+            kind="native_codex_approval_required",
+            blocked_action="Authorization: Bearer " + marker,
+            why_required='{"token":"' + marker + '"}',
+            requested_authority="one harmless synthetic action",
+            resources=["synthetic-resource"], reversible=True,
+            provider_code="tool.approval_required", protocol_binding={
+                "method": "item/commandExecution/requestApproval", "process_id": 4242,
+                "item_id": "item-redaction", "approved_action_sha256": "a" * 64,
+                "rider_id": "tanner", "recipient_sha256": "r" * 64,
+                "candidate_snapshot_id": "candidate-synthetic",
+                "candidate_record_sha256": "c" * 64,
+                "mutation_digest_sha256": "m" * 64,
+                "authorized_scope_sha256": "s" * 64})
+        event_path = self.store.events / f"{event['attention_id']}.json"
+        retained = json.loads(event_path.read_text(encoding="utf-8"))
+        retained["blocked_action"] = "Authorization: Bearer " + marker
+        retained["why_required"] = '{"token":"' + marker + '"}'
+        retained.pop("record_sha256")
+        from src.runtime.development_attention import _digest
+        retained["record_sha256"] = _digest(retained)
+        event_path.write_text(json.dumps(retained), encoding="utf-8")
+        before = event_path.read_bytes()
+        projected = self.store.projection()[0]
+        self.assertNotIn(marker, projected["blocked_action"])
+        self.assertNotIn(marker, projected["why_required"])
+        self.assertEqual(event_path.read_bytes(), before)
+        self.assertEqual(set(projected), {
+            "attention_id", "campaign_id", "invocation_id", "state", "stored_state",
+            "blocked_action", "why_required", "expires_at", "consumer_state",
+            "actionable", "detail_url", "approval_outcome", "consumer_unavailable_reason"})
+
+    def test_passive_projection_fails_closed_for_noncanonical_detail_url(self):
+        event = self.create("-bad-detail")
+        event_path = self.store.events / f"{event['attention_id']}.json"
+        retained = json.loads(event_path.read_text(encoding="utf-8"))
+        retained["detail_url"] = "https://localhost:8791/?view=developer&section=attention&attention=attention-" + "b" * 64
+        retained.pop("record_sha256")
+        from src.runtime.development_attention import _digest
+        retained["record_sha256"] = _digest(retained)
+        event_path.write_text(json.dumps(retained), encoding="utf-8")
+        projected = self.store.projection()[0]
+        self.assertEqual(projected["state"], "unavailable")
+        self.assertFalse(projected["actionable"])
+        self.assertIsNone(projected["detail_url"])
 
     def test_windows_projection_deduplicates_logical_attention_and_sanitizes_receipts(self):
         event = self.create()

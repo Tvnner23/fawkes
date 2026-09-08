@@ -447,6 +447,17 @@ class FawkesAppHTTPTests(unittest.TestCase):
         self.assertIsNone(result["decision"])
         self.assertNotIn("event", result)
 
+    @patch("src.runtime.development_attention.DevelopmentAttentionStore.projection")
+    def test_console_attention_projection_uses_side_effect_free_store_entrypoint(self, projection):
+        projection.return_value = [{"attention_id": "attention-console",
+                                    "actionable": False}]
+        service = object.__new__(FawkesChatService)
+        result = service.development_attention_projection(pending_only=True)
+        projection.assert_called_once_with(pending_only=True)
+        self.assertEqual(result["attention"][0]["attention_id"], "attention-console")
+        self.assertFalse(result["creates_authority"])
+        self.assertFalse(result["creates_continuing_authority"])
+
     def test_no_token_configuration_is_local_open_mode(self):
         handler = self._handler()
         handler.server.app_token = ""

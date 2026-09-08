@@ -27,7 +27,12 @@ REMOTE_AUTHENTICATED_ENV = "FAWKES_ATTENTION_REMOTE_AUTHENTICATED"
 CONSUMER_LEASE_SECONDS = 5
 APPROVE_ONCE_CLAIM_SECONDS = 60
 _DECISION_CONDITION = threading.Condition()
-_SECRET = re.compile(r"(?i)(authorization|token|api[_ -]?key|webhook|password|secret)\s*[:=]\s*\S+")
+_SECRET = re.compile(r'''(?ix)
+    (?P<label>["']?(?:authorization|token|api[_\s-]?key|webhook|password|secret)["']?)
+    \s*[:=]\s*
+    (?:(?:bearer|basic|token)\s+)?
+    (?P<value>"(?:\\.|[^"])*"|'(?:\\.|[^'])*'|[^,\s;}\]]+)
+''')
 
 
 class AttentionConsumerUnavailable(RuntimeError):
@@ -112,7 +117,10 @@ def _write_json_atomic(path, value):
 def sanitize_action(value):
     text = "".join(character for character in str(value or "")[:2_000] if character.isprintable())
     text = re.sub(r"(?:https?|wss?)://\S+", "<redacted-endpoint>", text)
-    return _SECRET.sub(lambda match: match.group(1) + "=<redacted>", text) or "unspecified protected action"
+    def redact_secret(match):
+        label = match.group("label").strip("\"'")
+        return label + "=<redacted>"
+    return _SECRET.sub(redact_secret, text) or "unspecified protected action"
 
 
 def canonical_attention_detail_url(attention_id, *, environment=None):
@@ -271,11 +279,51 @@ class DevelopmentAttentionStore:
             return "unavailable", False, "consumer_process_identity_mismatch"
         return "live", True, None
 
-    def _project_actionability(self, event):
-        effective, actionable, reason = self._effective_consumer(event)
+    def _project_actionability(self, event, *, now=None):
+        effective, actionable, reason = self._effective_consumer(event, now=now)
         return {**event, "stored_consumer_state": event.get("consumer_state"),
                 "consumer_state": effective, "actionable": actionable,
                 "consumer_unavailable_reason": reason}
+
+    @staticmethod
+    def _body_free_projection(event):
+        """Reduce a durable event to the console's safe display contract.
+
+        The durable event is an authority/audit record and can retain a historic
+        action description.  Passive console polling must neither expose that
+        record wholesale nor assume historic text was sanitized by a current
+        producer.  It therefore re-sanitizes display text and rejects a detail
+        URL that is no longer bound to the event's exact Attention identity.
+        """
+        attention_id = event.get("attention_id")
+        state = event.get("state")
+        consumer_state = event.get("consumer_state")
+        actionable = event.get("actionable") is True
+        reason = event.get("consumer_unavailable_reason")
+        try:
+            detail_url = validate_attention_detail_url(
+                event.get("detail_url"), attention_id)
+        except (TypeError, ValueError):
+            detail_url = None
+            state = "unavailable"
+            consumer_state = "unavailable"
+            actionable = False
+            reason = "detail_url_invalid"
+        return {
+            "attention_id": attention_id,
+            "campaign_id": event.get("campaign_id"),
+            "invocation_id": event.get("invocation_id"),
+            "state": state,
+            "stored_state": event.get("stored_state"),
+            "blocked_action": sanitize_action(event.get("blocked_action")),
+            "why_required": sanitize_action(event.get("why_required")),
+            "expires_at": event.get("expires_at"),
+            "consumer_state": consumer_state,
+            "actionable": actionable,
+            "detail_url": detail_url,
+            "approval_outcome": event.get("approval_outcome"),
+            "consumer_unavailable_reason": reason,
+        }
 
     @staticmethod
     def _authority_binding(event):
@@ -466,6 +514,100 @@ class DevelopmentAttentionStore:
             event["record_sha256"] = _digest(event)
             _write_json_atomic(path, event)
             return event
+
+    def _projection_has_incomplete_transaction(self, attention_id):
+        """Read transaction intents without recovering or otherwise changing them.
+
+        The normal lifecycle methods own transaction recovery because they may
+        be asked to resume an exact decision. A passive observer must never do
+        that recovery. An unreadable intent is conservatively treated as
+        affecting every projected event: hiding an action is safe, while
+        presenting an action from an ambiguous transaction is not.
+        """
+        if not self.transactions.exists():
+            return False
+        event_path = f"events/{attention_id}.json"
+        for transaction_path in sorted(self.transactions.glob("*.json")):
+            try:
+                transaction = json.loads(transaction_path.read_text(encoding="utf-8"))
+                writes = transaction["writes"]
+                if not isinstance(writes, list):
+                    return True
+            except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+                return True
+            for write in writes:
+                if not isinstance(write, dict):
+                    return True
+                relative_path = write.get("relative_path")
+                value = write.get("value")
+                if (relative_path == event_path
+                        or (isinstance(value, dict)
+                            and value.get("attention_id") == attention_id)):
+                    return True
+        return False
+
+    def projection(self, *, pending_only=False, now=None):
+        """Return a side-effect-free, body-free display projection.
+
+        This intentionally differs from :meth:`list` and :meth:`lifecycle`.
+        Those canonical lifecycle entry points may refresh expiry or recover a
+        durable multi-record transaction before an actual decision. Console
+        polling is only an observer: it samples expiry and consumer viability
+        from retained state, and fails closed for an incomplete transaction.
+        """
+        if not self.events.exists():
+            return []
+        current = datetime.now(timezone.utc) if now is None else now
+        records = []
+        for path in sorted(self.events.glob("*.json")):
+            try:
+                event = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError, json.JSONDecodeError):
+                # A malformed event cannot become an actionable console item.
+                continue
+            stored_state = event.get("state")
+            valid_record = event.get("record_sha256") == _digest(
+                {key: value for key, value in event.items() if key != "record_sha256"})
+            expired = False
+            try:
+                expires_at = event.get("expires_at")
+                expired = bool(expires_at and datetime.fromisoformat(expires_at) <= current)
+            except (TypeError, ValueError):
+                valid_record = False
+            incomplete = self._projection_has_incomplete_transaction(
+                event.get("attention_id")) if isinstance(event.get("attention_id"), str) else True
+            projected = self._project_actionability(event, now=current)
+            if not valid_record or incomplete:
+                projected = {**projected, "stored_state": stored_state,
+                             "state": "unavailable", "actionable": False,
+                             "consumer_state": "unavailable",
+                             "consumer_unavailable_reason": (
+                                 "incomplete_transaction_observed" if incomplete
+                                 else "record_integrity_invalid")}
+            elif stored_state == "needs_tanner" and expired:
+                projected = {**projected, "stored_state": stored_state,
+                             "state": "expired", "approval_outcome": "expired_observed",
+                             "actionable": False,
+                             "consumer_unavailable_reason": "request_expired_observed"}
+            elif event.get("decision_id"):
+                decision_path = self.decisions / f"{event['decision_id']}.json"
+                try:
+                    decision = json.loads(decision_path.read_text(encoding="utf-8"))
+                    decision_matches = (decision.get("attention_id") == event.get("attention_id")
+                                        and decision.get("campaign_id") == event.get("campaign_id")
+                                        and decision.get("invocation_id") == event.get("invocation_id"))
+                except (OSError, ValueError, json.JSONDecodeError):
+                    decision_matches = False
+                if not decision_matches:
+                    projected = {**projected, "stored_state": stored_state,
+                                 "state": "unavailable", "actionable": False,
+                                 "consumer_state": "unavailable",
+                                 "consumer_unavailable_reason": "decision_record_unavailable"}
+            records.append(self._body_free_projection(projected))
+        if pending_only:
+            records = [item for item in records if item.get("state") == "needs_tanner"
+                       and item.get("actionable") is True]
+        return sorted(records, key=lambda item: item.get("created_at", ""), reverse=True)
 
     def list(self, *, pending_only=False):
         if not self.events.exists():

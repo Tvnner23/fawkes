@@ -1243,6 +1243,18 @@ class FawkesChatService:
         return {"attention": DevelopmentAttentionStore().list(pending_only=pending_only),
                 "creates_authority": False}
 
+    def development_attention_projection(self, *, pending_only=False):
+        """Passive Attention display data for the authenticated developer console.
+
+        It deliberately does not call the lifecycle/list entry points because
+        those may reconcile a decision transaction or durably refresh expiry.
+        A console observer receives only the canonical store's sampled,
+        non-authorizing projection.
+        """
+        from src.runtime.development_attention import DevelopmentAttentionStore
+        return {"attention": DevelopmentAttentionStore().projection(pending_only=pending_only),
+                "creates_authority": False, "creates_continuing_authority": False}
+
     def development_attention_event(self, attention_id):
         from src.runtime.development_attention import DevelopmentAttentionStore
         try:

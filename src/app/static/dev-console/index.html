@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="fawkes-build-id" content="__FAWKES_BUILD_ID__">
+  <title>Fawkes Developer Console</title>
+  <link rel="stylesheet" href="/dev-console/console.css">
+</head>
+<body>
+  <main id="dev-console" data-idle-seconds="60" aria-label="Fawkes developer console">
+    <header class="console-header">
+      <div class="brand-row">
+        <div>
+          <p class="eyebrow">FAWKES · DEVELOPMENT</p>
+          <h1 id="page-title">Activity Summary</h1>
+        </div>
+        <span id="connection-state" class="state unavailable" aria-live="polite">UNAVAILABLE</span>
+      </div>
+      <nav class="page-nav" aria-label="Console pages">
+        <button id="previous-page" type="button" aria-label="Previous page">‹</button>
+        <ol id="page-indicators">
+          <li><button type="button" data-page-target="0" aria-label="Activity Summary" aria-current="page">1</button></li>
+          <li><button type="button" data-page-target="1" aria-label="Campaign Status">2</button></li>
+          <li><button type="button" data-page-target="2" aria-label="Repository View">3</button></li>
+          <li><button type="button" data-page-target="3" aria-label="Architecture View">4</button></li>
+        </ol>
+        <button id="next-page" type="button" aria-label="Next page">›</button>
+      </nav>
+    </header>
+
+    <section id="page-stack" class="page-stack">
+      <section class="console-page" data-page="0" aria-labelledby="summary-heading">
+        <div class="page-scroll" tabindex="0">
+          <div class="section-heading">
+            <p class="eyebrow">WHAT FAWKES IS DOING</p>
+            <h2 id="summary-heading">Activity Summary</h2>
+            <p id="summary-intro">Waiting for an authenticated read-only projection.</p>
+          </div>
+          <div id="attention-slot"></div>
+          <div id="activity-feed" class="card-list" aria-live="polite"></div>
+        </div>
+      </section>
+
+      <section class="console-page" data-page="1" aria-labelledby="campaign-heading" hidden>
+        <div class="page-scroll" tabindex="0">
+          <div class="section-heading">
+            <p class="eyebrow">CANONICAL CAMPAIGNS</p>
+            <h2 id="campaign-heading">Campaign Status</h2>
+            <p>Read-only graph position from canonical campaign projections.</p>
+          </div>
+          <div id="campaign-list" class="card-list"></div>
+        </div>
+      </section>
+
+      <section class="console-page" data-page="2" aria-labelledby="repository-heading" hidden>
+        <div class="page-scroll" tabindex="0">
+          <div class="section-heading">
+            <p class="eyebrow">AUTHORIZED WORKSPACE</p>
+            <h2 id="repository-heading">Repository View</h2>
+            <p>Body-free campaign bindings only. Source and diff bodies are not loaded here.</p>
+          </div>
+          <div id="repository-content" class="card-list"></div>
+        </div>
+      </section>
+
+      <section class="console-page" data-page="3" aria-labelledby="architecture-heading" hidden>
+        <div class="page-scroll" tabindex="0">
+          <div class="section-heading">
+            <p class="eyebrow">REFERENCE · NOT AUTHORITY</p>
+            <h2 id="architecture-heading">Architecture View</h2>
+            <p>This explanatory map is paired with separately labeled live component status.</p>
+          </div>
+          <div id="architecture-content" class="card-list"></div>
+        </div>
+      </section>
+    </section>
+
+    <footer class="console-footer">
+      <span id="last-updated">No current projection</span>
+      <span>Swipe or ← → · wheel scroll · wheel click expands</span>
+    </footer>
+  </main>
+  <script src="/dev-console/console.js"></script>
+</body>
+</html>
